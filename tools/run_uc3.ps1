@@ -1,7 +1,7 @@
 # uc3: starts Uncharted 3 (Nathan Drake Collection 01.02) with the port and keeps the log.
 # Usage (PowerShell, from anywhere):
 #   powershell -ExecutionPolicy Bypass -File D:\Uncharted\uc3_pc\tools\run_uc3.ps1
-#   powershell -ExecutionPolicy Bypass -File D:\Uncharted\uc3_pc\tools\run_uc3.ps1 -Set GOW3_DEFERRED_READBACK=0,GOW3_DRAW_PIPE=0
+#   powershell -ExecutionPolicy Bypass -File D:\Uncharted\uc3_pc\tools\run_uc3.ps1 -Set GOW3_READBACKS=1,GOW3_DRAW_PIPE=0
 # -Set takes KEY=VALUE pairs for this run only (GPU options to compare; see docs/uc3/DEVLOG.md).
 # The log goes to out\last-run.log (the previous one is kept as out\previous-run.log).
 param([string[]]$Set = @(), [string[]]$Extra = @())
@@ -10,6 +10,9 @@ $env:MSYSTEM = 'CLANG64'; $env:CHERE_INVOKING = '1'; $env:MSYS2_ROOT = 'D:/msys6
 $env:GOW3_GAME_DIR = 'D:/Uncharted/CUSA02344/app0'
 $env:GOW3_PATCH_DIR = 'D:/Uncharted/CUSA02344/patch'
 $env:GOW3_EXECUTABLE = 'big3-ps4_Shipping.elf'
+# Leituras precisas da GPU (readbacks_mode 2 do shadPS4): o modo em que o cenario aparece.
+# -Set GOW3_READBACKS=1 volta ao modo relaxado (padrao do port do GoW3).
+if (-not $env:GOW3_READBACKS) { $env:GOW3_READBACKS = '2' }
 # With -File, "-Set A=1,B=2" arrives as one string: split it here.
 foreach ($pair in ($Set | ForEach-Object { $_ -split ',' } | Where-Object { $_ })) {
     $key, $value = $pair -split '=', 2
