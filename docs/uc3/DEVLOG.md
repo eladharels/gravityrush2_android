@@ -4,6 +4,48 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — Crash na área externa do museu: corrida no `ProcessCommands` (`6681ee4`)
+
+### Sintomas (usuário, modo preciso, Cartagena/jovem Drake)
+1. **TDR** às 05:40: Windows registrou `LiveKernelEvent 141` com dump `WATCHDOG` (driver da
+   GPU reiniciado); o jogo morre sem escrever nada no log. Como achar: `Get-WinEvent`
+   (Application, provedores "Windows Error Reporting" e "Application Error").
+2. Depois, dois crashes de host com a mesma assinatura: **leitura em `0x20000`**, em
+   `RecordChunk::Push` (via `RecordHostCopy`) e em `KickRecording`. `0x20000` é o deslocamento
+   do campo `used` do `RecordChunk` (128 KiB de armazenamento antes dele): o `record_chunk`
+   do scheduler estava **nulo**, isto é, outra thread estava no meio da troca do bloco.
+3. Também visto: Drake todo preto e manchas ciano no banheiro numa execução; na seguinte, tudo
+   iluminado e normal. Não é fixo. O rastreio das piscadas (`GOW3_FLASH_TRACE=1`) não acusou
+   nada em 4 min, e não houve piscadas nessa sessão.
+
+### Diagnóstico
+O *probe* vai direto ao checkpoint ("Continuar" é o primeiro item) e reproduz em minutos. O
+relatório de falha agora imprime o **nome da thread** (`GetThreadDescription`): a que caiu era
+`gow3:DrawRec` (estágio B), gravando um desenho (`DrawRecord` → `UpdateDynamicState` →
+`Record`). Nas pilhas (`GOW3_FAULT_HOLD` + lldb), a thread da GPU (estágio A) estava em
+`ProcessCommands` executando o *readback* de uma falha de página de uma thread do jogo
+(`DownloadAllGpuModified` → `Finish` → `SyncRecording`), **sem ter drenado o estágio B**.
+O `ProcessCommands` lia `num_commands` antes do laço (e só então drenava) e de novo na
+condição do laço: um comando que chegasse entre as duas leituras rodava com o estágio B ainda
+gravando. Bug herdado do GoW3; no modo relaxado os comandos são raros, no preciso são ~150/s.
+A thread de gravação Vulkan também caiu (`RecordChunk::Execute`) num bloco corrompido pela
+mesma corrida: comandos corrompidos explicam o TDR.
+
+### Correção
+A drenagem acontece dentro do laço, na primeira iteração que realmente tem um comando.
+Verificação: 5 minutos na área externa do museu sem falha nem assertiva (antes: crash em
+2–4 min). FPS ali: 32–34 (cena pesada: ~1100 desenhos e ~1000 dispatches por quadro lento,
+171 submissões por quadro lento, 1,5 s em "GPU ticks" e 1,5 s em handlers de leitura nos 58
+quadros lentos de 5 min).
+
+### Próximos passos
+- Desempenho do modo preciso na área externa: ~170 submissões por quadro ainda; reduzir os
+  *readbacks* (o que a CPU lê a cada quadro) continua sendo o alvo.
+- Drake preto / manchas ciano: intermitente; comparar com o shadPS4 e capturar um quadro quando
+  acontecer.
+
+---
+
 ## 2026-10-13 — Modo preciso: *readback* agrupado (46–54 FPS no banheiro), 4º impasse, rastreio das piscadas (`03a919a`)
 
 ### Perfil dos quadros lentos (97 quadros acima de 40 ms, 7,1 s somados, teste anterior)
