@@ -4,6 +4,68 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — **O cenário aparece no modo preciso** (`dd96d90`)
+
+Rodado `GOW3_READBACKS=2` com o `uc3_hang_probe.py` depois da revisão. Três impasses em
+sequência, cada um diagnosticado com as pilhas do lldb, e no fim **4 minutos no banheiro a
+60 FPS, ~600 desenhos por quadro, e o usuário viu o cenário**. O bug principal é do modo
+relaxado (padrão) de leituras da GPU; não é tradução de shader.
+
+### Ferramentas novas
+- `GOW3_FAULT_HOLD=<s>`: o loader segura o processo depois de uma falha fatal (a assertiva do
+  motor termina numa leitura de `-1` de propósito) para anexar o lldb e ler todas as threads.
+- `GOW3_WRITE_LOG=1` passou a conferir, no despejo da falha, os rótulos de *fence*/WriteData
+  recentes contra a memória do jogo (lida pela visão física) e a avisar quando um *readback* de
+  buffer sobrescreve uma *fence* (`NoteDownload`). Resultado: nenhum rótulo sobrescrito; a
+  assertiva `m_gfxEopTick` é o **relógio de "GPU travada" do motor**: a última *fence* tinha
+  sido escrita 2,56 s antes, com quadros de 16 ms.
+- `WaitHostCopies` avisa no log quando fica mais de 2 s esperando (emitidas/feitas/fila).
+
+### Impasse 1 — a minha correção da revisão
+`ResolveHostCopy` dentro do callback de `ForEachUploadRange`, que segura o spinlock da região:
+o *readback* reentrava no mesmo lock (estágio B travado em si mesmo) e a thread da GPU esperava
+o `Drain`. Tela preta a 37 FPS logo no início. Correção: a leitura prévia fica só nas cópias do
+*ring* de constantes (`CollectRingBindings`, thread da GPU, fora de lock), com pré-checagem
+`IsRegionGpuModified`; os outros caminhos de upload já evitam faixas modificadas pela GPU. A
+conclusão da revisão ("modo preciso lia dados velhos") valia só para esse caminho.
+
+### Impasse 2 — a thread de captura de shaders
+`QueueShader` roda a tradução, a especialização e a captura do *fetch shader* numa thread
+auxiliar (`gow3:ShaderCapture`) e **a thread da GPU espera por ela**. No modo preciso essa
+thread lia uma página protegida contra leitura, caía no handler de falha como thread comum e
+mandava a leitura para a thread da GPU (`SendCommand`), que esperava a captura. Correção: a
+thread de captura é "lado da GPU" (`Rasterizer::MarkCaptureThread`, falha resolvida nela
+mesma, como no estágio B) e o *draw pipe* é drenado antes de esperar a captura. Passou da tela
+de título e carregou o banheiro.
+
+### Impasse 3 — contagem das cópias do host
+Já no banheiro: thread da GPU em `WaitHostCopies` (dentro de um `Finish()` de *readback*) com a
+thread de gravação ociosa e a fila vazia; duas threads do jogo esperando por ela. O contador
+`host_copies_done` guardava o **número de sequência** da última cópia executada; com cópias
+registradas por mais de uma thread (estágio B, captura), uma cópia antiga executada por último
+deixava "feitas" abaixo de "emitidas" para sempre. Agora emitidas e feitas são **contagens**
+atômicas. Não reapareceu em 4 minutos (sem o aviso de 2 s no log); fica a observação.
+
+### Estado
+- Modo preciso: tela de título, cutscene, banheiro com cenário, 60 FPS no fim; pior quadro
+  668 ms no início de um vídeo. Durante o carregamento, 26–32 FPS com 50–65% do tempo em
+  "GPU ticks" (o jogo esperando a GPU): custo dos *readbacks* precisos.
+- Modo relaxado (padrão): cenário sumido, como antes.
+- Jogando (usuário): **muito travado no começo, depois melhora grande** (numa cutscene). Nos
+  trechos lentos, GPU a 70% e CPU a 40%: nenhum dos dois saturado, ou seja, sincronização
+  (cada *readback* preciso é um `Finish()`, CPU e GPU se esperando). **Piscadas em preto** em
+  alguns momentos; suspeita: submissões no meio do quadro (um *readback* ou o `Finish()` da
+  thread de captura dentro do desenho encerra o *render pass* e perde o conteúdo do quadro).
+
+### Próximos passos
+1. Decidir o padrão do Uncharted: modo preciso no `gow3.ini`/`run_uc3.ps1`, ou achar no modo
+   relaxado o que o preciso corrige (dados escritos pela GPU e lidos pela CPU do jogo).
+2. Jogar mais tempo no modo preciso (o usuário) e anotar travamentos; o aviso de
+   `WaitHostCopies` e o `GOW3_FAULT_HOLD` já ficam prontos para o próximo diagnóstico.
+3. Desempenho do modo preciso nos carregamentos ("GPU ticks").
+
+---
+
 ## 2026-10-13 — Revisão do código do port: 9 achados, todos corrigidos (`5d6561b`)
 
 (As duas entradas abaixo, datadas de 14 e 15/10, também são de 13/10: os commits mostram a data.)
