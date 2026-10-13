@@ -9,6 +9,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
+#include "shader_recompiler/resource.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
@@ -127,6 +128,7 @@ bool Rasterizer::FilterDraw() {
         // TODO: check for a valid MRT1 to promote the draw to the resolve pass.
         LOG_TRACE(Render_Vulkan, "FMask decompression pass skipped");
         ScopedMarkerInsert("FmaskDecompress");
+        EliminateFastClear();
         return false;
     }
     if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Resolve) {
@@ -1187,6 +1189,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     const DrawIndirectParams params = {
         .vertex_sgpr_offset = vertex_sgpr_offset,
         .instance_sgpr_offset = instance_sgpr_offset,
+        .is_indirect = true,
     };
     Gow3Stats::uc3_indirect_draws.fetch_add(1, std::memory_order_relaxed);
     if (FrameCapture::Active()) {
@@ -1238,18 +1241,22 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
     BindVertexBuffers(pipeline);
     if (is_indexed) {
-        BindIndexBuffer();
+        BindIndexBuffer(0, true);
     }
 
     const auto [buffer, base] =
         buffer_cache.ObtainBuffer(indirect.args, stride * max_count, false);
     needs_barrier |= runtime.IsBufferAccessed(buffer, base, stride * max_count);
+    bound_buffers.emplace_back(buffer, base, stride * max_count,
+                               vk::AccessFlagBits2::eIndirectCommandRead);
 
     const VideoCore::Buffer* count_buffer;
     u64 count_offset;
     if (count_address != 0) {
         std::tie(count_buffer, count_offset) = buffer_cache.ObtainBuffer(count_address, 4, false);
         needs_barrier |= runtime.IsBufferAccessed(count_buffer, count_offset, 4);
+        bound_buffers.emplace_back(count_buffer, count_offset, 4,
+                                   vk::AccessFlagBits2::eIndirectCommandRead);
     }
 
     if (needs_barrier) {
@@ -1421,6 +1428,7 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
 
     const auto [buffer, base] = buffer_cache.ObtainBuffer(address + offset, size, false);
     needs_barrier |= runtime.IsBufferAccessed(buffer, base, size);
+    bound_buffers.emplace_back(buffer, base, size, vk::AccessFlagBits2::eIndirectCommandRead);
 
     if (needs_barrier) {
         runtime.FlushBarriers();
@@ -1862,6 +1870,8 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
         std::tie(range.buffer, range.offset) =
             buffer_cache.ObtainBuffer(range.base_address, size, false);
         needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, size);
+        bound_buffers.emplace_back(range.buffer, range.offset, size,
+                                   vk::AccessFlagBits2::eVertexAttributeRead);
     }
 
     // Bind vertex buffers
@@ -1893,47 +1903,68 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
     v.num_buffers = static_cast<u32>(guest_buffers.size());
 }
 
-void Rasterizer::BindIndexBuffer(u32 index_offset) {
-    ResolveIndexBuffer(index_offset);
+void Rasterizer::BindIndexBuffer(u32 index_offset, bool is_indirect) {
+    ResolveIndexBuffer(index_offset, is_indirect);
     EmitIndexBuffer();
 }
 
 void Rasterizer::EmitIndexBuffer() {
     scheduler.Record([handle = index_bind.handle, offset = index_bind.offset,
-                      type = index_bind.type](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindIndexBuffer(handle, offset, type);
+                      size = index_bind.size, type = index_bind.type,
+                      bind2 = instance.IsMaintenance5Supported()](vk::CommandBuffer cmdbuf) {
+        if (bind2) {
+            cmdbuf.bindIndexBuffer2KHR(handle, offset, size, type);
+        } else {
+            cmdbuf.bindIndexBuffer(handle, offset, type);
+        }
     });
 }
 
-void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
+void Rasterizer::ResolveIndexBuffer(u32 index_offset, bool is_indirect) {
     const auto& regs = Regs();
 
     // Figure out index type and size.
     const bool is_index16 = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16;
     const vk::IndexType index_type = is_index16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
     const u32 index_size = is_index16 ? sizeof(u16) : sizeof(u32);
-    const VAddr index_address =
-        regs.index_base_address.Address<VAddr>() + index_offset * index_size;
+    const VAddr base_address = regs.index_base_address.Address<VAddr>();
+    const VAddr index_address = base_address + u64(index_offset) * index_size;
 
     // Bind index buffer.
-    const u32 index_buffer_size = regs.num_indices * index_size;
-    const auto [buffer, offset] =
-        buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
-    needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
-    index_bind = {buffer->Handle(), offset, index_type};
+    // Upstream #5278/#5327: the draw's count clamped to the buffer's capacity (indirect
+    // draws read the whole capacity) and to the mapping; a null buffer when nothing is mapped.
+    const u32 num_indices =
+        is_indirect ? regs.max_index_size : std::min(regs.num_indices, regs.max_index_size);
+    const u64 requested_size = u64(num_indices) * index_size;
+    const u64 mapped_size =
+        base_address != 0 ? memory->ClampRangeSize(index_address, requested_size) : 0;
+    u32 index_buffer_size = static_cast<u32>(Common::AlignDown(mapped_size, index_size));
+    index_bind = {VK_NULL_HANDLE, 0, 0, index_type};
+    if (index_buffer_size != 0) {
+        const auto [buffer, offset] =
+            buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
+        needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
+        bound_buffers.emplace_back(buffer, offset, index_buffer_size,
+                                   vk::AccessFlagBits2::eIndexRead);
+        index_bind = {buffer->Handle(), offset, index_buffer_size, index_type};
+    } else if (!instance.IsMaintenance6Supported()) {
+        const auto* null_buffer = buffer_cache.GetNullIndexBuffer();
+        index_buffer_size = static_cast<u32>(null_buffer->SizeBytes());
+        needs_barrier |= runtime.IsBufferAccessed(null_buffer, 0, index_buffer_size);
+        bound_buffers.emplace_back(null_buffer, 0, index_buffer_size,
+                                   vk::AccessFlagBits2::eIndexRead);
+        index_bind = {null_buffer->Handle(), 0, index_buffer_size, index_type};
+    }
 }
 
 void Rasterizer::ResetBindings(bool is_compute) {
     for (auto& image_id : bound_images) {
         texture_cache.GetImage(image_id).binding = {};
     }
-    for (const auto [buffer, offset, size, is_written] : bound_buffers) {
+    for (const auto [buffer, offset, size, src_access] : bound_buffers) {
         const auto dst_stage = is_compute ? vk::PipelineStageFlagBits2::eComputeShader
                                           : vk::PipelineStageFlagBits2::eAllGraphics;
-        const auto write_flag =
-            is_written ? vk::AccessFlagBits2::eShaderWrite : vk::AccessFlagBits2::eNone;
-        runtime.AccessBuffer(buffer, offset, size, dst_stage,
-                             vk::AccessFlagBits2::eShaderRead | write_flag);
+        runtime.AccessBuffer(buffer, offset, size, dst_stage, src_access);
     }
     bound_images.clear();
     bound_buffers.clear();
@@ -1985,7 +2016,8 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     // Ensure shader only has 2 bound buffers
     const auto& cs_pgm = CsRegs();
     const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
-    if (cs_pgm.num_thread_x.full != 64 || info.buffers.size() != 2 || !info.images.empty()) {
+    if (cs_pgm.num_thread_x.full != 64 || info.buffers.size() < 2 || info.buffers.size() > 3 ||
+        !info.images.empty()) {
         return false;
     }
 
@@ -1993,6 +2025,9 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     const auto& desc0 = info.buffers[0];
     const auto& desc1 = info.buffers[1];
     if (!desc0.is_formatted || !desc1.is_formatted || desc0.is_written == desc1.is_written) {
+        return false;
+    }
+    if (info.buffers.size() == 3 && info.buffers[2].buffer_type != Shader::BufferType::Flatbuf) {
         return false;
     }
 
@@ -2038,7 +2073,8 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     // Ensure shader only has 2 bound buffers
     const auto& cs_pgm = CsRegs();
     const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
-    if (cs_pgm.num_thread_x.full != 64 || info.buffers.size() != 2 || !info.images.empty()) {
+    if (cs_pgm.num_thread_x.full != 64 || info.buffers.size() < 2 || info.buffers.size() > 3 ||
+        !info.images.empty()) {
         return false;
     }
 
@@ -2046,6 +2082,9 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     const auto& desc0 = info.buffers[0];
     const auto& desc1 = info.buffers[1];
     if (desc0.is_formatted || !desc1.is_formatted || desc0.is_written || !desc1.is_written) {
+        return false;
+    }
+    if (info.buffers.size() == 3 && info.buffers[2].buffer_type != Shader::BufferType::Flatbuf) {
         return false;
     }
 
@@ -2094,6 +2133,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
     const u64 alignment = instance.StorageMinAlignment();
     for (u32 buffer_index = 0; buffer_index < stage.buffers.size(); ++buffer_index) {
         const auto& desc = stage.buffers[buffer_index];
+        const auto src_access =
+            vk::AccessFlagBits2::eShaderRead |
+            (desc.is_written ? vk::AccessFlagBits2::eShaderWrite : vk::AccessFlagBits2::eNone);
         const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, buffer_index) : nullptr;
         if (ring) {
             // Copied by the GPU command thread into the constant ring (read-only).
@@ -2121,7 +2163,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 buffer_infos.emplace_back(gds_buf->Handle(), 0, gds_buf->SizeBytes());
                 needs_barrier |=
                     runtime.IsBufferAccessed(gds_buf, 0, gds_buf->SizeBytes(), desc.is_written);
-                bound_buffers.emplace_back(gds_buf, 0, gds_buf->SizeBytes(), desc.is_written);
+                bound_buffers.emplace_back(gds_buf, 0, gds_buf->SizeBytes(), src_access);
             } else if (desc.buffer_type == Shader::BufferType::Flatbuf) {
                 auto& vk_buffer = buffer_cache.GetStreamBuffer();
                 const u32 ubo_size = stage.FlatUserData().size() * sizeof(u32);
@@ -2215,7 +2257,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 push_data.AddOffset(binding.buffer, adjust);
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
-                bound_buffers.emplace_back(buffer, offset, size, desc.is_written);
+                bound_buffers.emplace_back(buffer, offset, size, src_access);
                 if (desc.is_written) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
@@ -3106,7 +3148,10 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
         regs.depth_htile_data_base.GetAddress(), DbExtent(), true);
 
     auto& read_image = texture_cache.GetImage(texture_cache.FindImage(read_desc));
-    auto& write_image = texture_cache.GetImage(texture_cache.FindImage(write_desc));
+    const auto write_id = texture_cache.FindImage(write_desc);
+    auto& write_image = texture_cache.GetImage(write_id);
+    // The copy destination is never bound as a target, so its stencil plane is linked here.
+    texture_cache.AssociateStencil(write_id, write_desc.info);
 
     VideoCore::SubresourceRange sub_range;
     sub_range.base.layer = Regs().depth_view.slice_start;

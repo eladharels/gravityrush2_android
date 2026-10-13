@@ -65,6 +65,7 @@ struct Liverpool {
     };
 
     Regs regs{};
+    u32 index_buffer_num_indices{};
     std::array<CbDbExtent, NUM_COLOR_BUFFERS> last_cb_extent{};
     CbDbExtent last_db_extent{};
     /// gow3: register blocks written since the last draw handed to the draw recording thread

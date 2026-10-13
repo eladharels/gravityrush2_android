@@ -599,6 +599,12 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         // Inherit image usage
         auto& new_image = slot_images[new_image_id];
         new_image.usage = cache_image.usage;
+        // Upstream #5229: the added layers/levels start from guest memory, not undefined.
+        if (new_info.num_samples == 1 &&
+            (new_info.resources.layers > cache_image.info.resources.layers ||
+             new_info.resources.levels > cache_image.info.resources.levels)) {
+            RefreshImage(new_image);
+        }
         new_image.flags &= ~ImageFlagBits::Dirty;
         // When creating a depth buffer through overlap resolution don't clear it on first use.
         new_image.info.meta_info.htile_clear_mask = 0;
@@ -1077,17 +1083,33 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     UpdateImage(image_id);
     PublishAliasWrite(image_id);
 
-    // Register meta data for this color buffer
-    if (desc.info.meta_info.cmask_addr) {
-        surface_metas.emplace(desc.info.meta_info.cmask_addr,
-                              MetaDataInfo{.type = MetaType::CMask});
-        image.info.meta_info.cmask_addr = desc.info.meta_info.cmask_addr;
+    // Register meta data for this color buffer (upstream #5046: owned, with the sample count)
+    const VAddr cmask_addr = desc.info.meta_info.cmask_addr;
+    if (image.info.meta_info.cmask_addr != cmask_addr) {
+        UnregisterMeta(image.info.meta_info.cmask_addr, image.image_uid);
+        image.info.meta_info.cmask_addr = cmask_addr;
+    }
+    if (cmask_addr) {
+        RegisterMeta(cmask_addr, MetaDataInfo{
+                                     .type = MetaType::CMask,
+                                     .owner_id = image_id,
+                                     .owner_uid = image.image_uid,
+                                     .num_samples = image.info.num_samples,
+                                 });
     }
 
-    if (desc.info.meta_info.fmask_addr) {
-        surface_metas.emplace(desc.info.meta_info.fmask_addr,
-                              MetaDataInfo{.type = MetaType::FMask});
-        image.info.meta_info.fmask_addr = desc.info.meta_info.fmask_addr;
+    const VAddr fmask_addr = desc.info.meta_info.fmask_addr;
+    if (image.info.meta_info.fmask_addr != fmask_addr) {
+        UnregisterMeta(image.info.meta_info.fmask_addr, image.image_uid);
+        image.info.meta_info.fmask_addr = fmask_addr;
+    }
+    if (fmask_addr) {
+        RegisterMeta(fmask_addr, MetaDataInfo{
+                                     .type = MetaType::FMask,
+                                     .owner_id = image_id,
+                                     .owner_uid = image.image_uid,
+                                     .num_samples = image.info.num_samples,
+                                 });
     }
 
     return image.FindView(desc.view_info, false);
@@ -1099,41 +1121,77 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     image.usage.depth_target = 1u;
     UpdateImage(image_id);
 
-    // Register meta data for this depth buffer
-    if (desc.info.meta_info.htile_addr) {
-        surface_metas.emplace(desc.info.meta_info.htile_addr,
-                              MetaDataInfo{.type = MetaType::HTile,
-                                           .clear_mask = image.info.meta_info.htile_clear_mask});
-        image.info.meta_info.htile_addr = desc.info.meta_info.htile_addr;
+    // Register meta data for this depth buffer (upstream #5046: owned, with the sample count)
+    const VAddr htile_addr = desc.info.meta_info.htile_addr;
+    if (image.info.meta_info.htile_addr != htile_addr) {
+        UnregisterMeta(image.info.meta_info.htile_addr, image.image_uid);
+        image.info.meta_info.htile_addr = htile_addr;
+    }
+    if (htile_addr) {
+        RegisterMeta(htile_addr, MetaDataInfo{
+                                     .type = MetaType::HTile,
+                                     .owner_id = image_id,
+                                     .owner_uid = image.image_uid,
+                                     .num_samples = image.info.num_samples,
+                                     .clear_mask = image.info.meta_info.htile_clear_mask,
+                                 });
     }
 
-    // If there is a stencil attachment, link depth and stencil.
-    if (desc.info.stencil_addr != 0) {
-        ImageId stencil_id{};
-        ForEachImageInRegion(
-            desc.info.stencil_addr, desc.info.stencil_size, [&](ImageId image_id, Image& image) {
-                if (image.info.guest_address != desc.info.stencil_addr) {
-                    return;
-                }
-                if (image.info.pixel_format == vk::Format::eUndefined ||
-                    Vulkan::LiverpoolToVK::IsFormatStencilCompatible(image.info.pixel_format)) {
-                    stencil_id = image_id;
-                }
-            });
-        if (!stencil_id) {
-            ImageInfo info{};
-            info.guest_address = desc.info.stencil_addr;
-            info.guest_size = desc.info.stencil_size;
-            info.size = desc.info.size;
-            stencil_id = slot_images.Insert(instance, runtime, slot_image_views, info);
-            RegisterImage(stencil_id);
-        }
-        Image& stencil_image = slot_images[stencil_id];
-        TouchImage(stencil_image);
-        stencil_image.AssociateDepth(image_id, image.image_uid);
-    }
+    AssociateStencil(image_id, desc.info);
 
     return image.FindView(desc.view_info, false);
+}
+
+void TextureCache::RegisterMeta(VAddr address, MetaDataInfo info) {
+    const auto it = surface_metas.find(address);
+    if (it == surface_metas.end()) {
+        surface_metas.emplace(address, info);
+        return;
+    }
+    auto& registered = it.value();
+    if (registered.type != info.type || registered.owner_uid != info.owner_uid) {
+        registered = info;
+        return;
+    }
+    // Preserve the current clear state when the same render target is rebound.
+    registered.owner_id = info.owner_id;
+    registered.num_samples = info.num_samples;
+}
+
+void TextureCache::UnregisterMeta(VAddr address, u64 owner_uid) {
+    const auto it = surface_metas.find(address);
+    if (it != surface_metas.end() && it.value().owner_uid == owner_uid) {
+        surface_metas.erase(address);
+    }
+}
+
+// Upstream #5296: also used by DepthStencilCopy, whose destination is never bound as a target.
+void TextureCache::AssociateStencil(ImageId depth_id, const ImageInfo& depth_info) {
+    if (depth_info.stencil_addr == 0) {
+        return;
+    }
+    ImageId stencil_id{};
+    ForEachImageInRegion(
+        depth_info.stencil_addr, depth_info.stencil_size, [&](ImageId image_id, Image& image) {
+            if (image.info.guest_address != depth_info.stencil_addr) {
+                return;
+            }
+            if (image.info.pixel_format == vk::Format::eUndefined ||
+                Vulkan::LiverpoolToVK::IsFormatStencilCompatible(image.info.pixel_format)) {
+                stencil_id = image_id;
+            }
+        });
+    if (!stencil_id) {
+        ImageInfo info{};
+        info.guest_address = depth_info.stencil_addr;
+        info.guest_size = depth_info.stencil_size;
+        info.size = depth_info.size;
+        stencil_id = slot_images.Insert(instance, runtime, slot_image_views, info);
+        RegisterImage(stencil_id);
+    }
+    Image& stencil_image = slot_images[stencil_id];
+    TouchImage(stencil_image);
+    stencil_image.AssociateDepth(depth_id, slot_images[depth_id].image_uid);
 }
 
 void TextureCache::RefreshImage(Image& image) {
@@ -1200,8 +1258,8 @@ void TextureCache::RefreshImage(Image& image) {
             }
         }
 
-        const u32 extent_width = mip_pitch ? std::min(mip_pitch, width) : width;
-        const u32 extent_height = mip_height ? std::min(mip_height, height) : height;
+        const u32 extent_width = mip_pitch ? std::min<u32>(mip_pitch, width) : width;
+        const u32 extent_height = mip_height ? std::min<u32>(mip_height, height) : height;
         image_copies.push_back({
             .bufferOffset = mip_offset,
             .bufferRowLength = mip_pitch,
@@ -1607,13 +1665,13 @@ void TextureCache::DeleteImage(ImageId image_id) {
     // Remove any registered meta areas.
     const auto& meta_info = image.info.meta_info;
     if (meta_info.cmask_addr) {
-        surface_metas.erase(meta_info.cmask_addr);
+        UnregisterMeta(meta_info.cmask_addr, image.image_uid);
     }
     if (meta_info.fmask_addr) {
-        surface_metas.erase(meta_info.fmask_addr);
+        UnregisterMeta(meta_info.fmask_addr, image.image_uid);
     }
     if (meta_info.htile_addr) {
-        surface_metas.erase(meta_info.htile_addr);
+        UnregisterMeta(meta_info.htile_addr, image.image_uid);
     }
 
     {

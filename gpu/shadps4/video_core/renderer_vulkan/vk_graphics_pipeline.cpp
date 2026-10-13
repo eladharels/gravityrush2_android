@@ -397,6 +397,30 @@ GraphicsPipeline::GraphicsPipeline(
                                                      ? vk::BlendFactor::eOne
                                                      : vk::BlendFactor::eZero; // 1-A
         }
+
+        auto& attachment = attachments[i];
+        LiverpoolToVK::NormalizeMinMaxBlend(attachment.colorBlendOp, attachment.srcColorBlendFactor,
+                                            attachment.dstColorBlendFactor,
+                                            key.color_buffers[i].num_format);
+        LiverpoolToVK::NormalizeMinMaxBlend(attachment.alphaBlendOp, attachment.srcAlphaBlendFactor,
+                                            attachment.dstAlphaBlendFactor,
+                                            key.color_buffers[i].num_format);
+
+        const auto color_scaled_min_max =
+            (attachment.colorBlendOp == vk::BlendOp::eMin ||
+             attachment.colorBlendOp == vk::BlendOp::eMax) &&
+            (attachment.srcColorBlendFactor != vk::BlendFactor::eOne ||
+             attachment.dstColorBlendFactor != vk::BlendFactor::eOne);
+        const auto alpha_scaled_min_max =
+            (attachment.alphaBlendOp == vk::BlendOp::eMin ||
+             attachment.alphaBlendOp == vk::BlendOp::eMax) &&
+            (attachment.srcAlphaBlendFactor != vk::BlendFactor::eOne ||
+             attachment.dstAlphaBlendFactor != vk::BlendFactor::eOne);
+        if (control.enable && (color_scaled_min_max || alpha_scaled_min_max)) {
+            LOG_WARNING(
+                Render_Vulkan,
+                "Unimplemented use of min/max blend op with blend factor not equal to one.");
+        }
     }
 
     const vk::PipelineColorBlendStateCreateInfo color_blending = {

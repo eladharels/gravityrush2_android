@@ -25,6 +25,7 @@
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
+#include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -1884,7 +1885,8 @@ bool TemporalUpscaler::RedirectSampled(VideoCore::ImageId image,
             cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
         });
     }
-    view = Mirror(vk::Image(ui_image), ui_views, info.format, info.mapping);
+    view = Mirror(vk::Image(ui_image), ui_views, info.format,
+                  Vulkan::LiverpoolToVK::ComponentMapping(info.mapping));
     layout = vk::ImageLayout::eGeneral;
     return true;
 }

@@ -312,12 +312,12 @@ private:
     void MarkPass(const GraphicsPipeline* pipeline, const RenderState& state);
     void BindVertexBuffers(const GraphicsPipeline* pipeline,
                            const PreparedDraw* prepared = nullptr);
-    void BindIndexBuffer(u32 index_offset = 0);
+    void BindIndexBuffer(u32 index_offset = 0, bool is_indirect = false);
     /// gow3: BindVertexBuffers/BindIndexBuffer in two halves: obtaining the buffers
     /// (vertex_binds, index_bind) and recording the binds.
     void ResolveVertexBuffers(const GraphicsPipeline* pipeline, const PreparedDraw* prepared);
     void EmitVertexBuffers();
-    void ResolveIndexBuffer(u32 index_offset);
+    void ResolveIndexBuffer(u32 index_offset, bool is_indirect = false);
     void EmitIndexBuffer();
 
     void ResetBindings(bool is_compute);
@@ -357,16 +357,18 @@ private:
     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
+
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
-    boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
+
     struct BoundBuffer {
         const VideoCore::Buffer* buffer;
         u64 offset;
         u32 size;
-        bool is_written;
+        vk::AccessFlags2 src_access;
     };
-    boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS> bound_buffers;
+    std::vector<BoundBuffer> bound_buffers;
+    std::vector<VideoCore::ImageId> bound_images;
 
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;
@@ -448,6 +450,7 @@ private:
     struct IndexBind {
         vk::Buffer handle;
         u64 offset;
+        vk::DeviceSize size;
         vk::IndexType type;
     } index_bind{};
     /// The direct draw whose vertex/index buffers BindResources may resolve early.
