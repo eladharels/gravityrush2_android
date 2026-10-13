@@ -26,17 +26,18 @@ recompilação completa, e a Naughty Dog colocou boa parte do motor nas SPUs.
 
 ## Situação
 
-**Fase 3 — implementar o que falta.** O executável do Uncharted 3 (`big3-ps4_Shipping.elf`,
-versão 01.02) já é preparado e carregado pelo port; faltam 69 funções do sistema, listadas em
-[docs/uc3/IMPORTS.md](docs/uc3/IMPORTS.md). Detalhes no [devlog](docs/uc3/DEVLOG.md).
+**O Uncharted 3 chega ao menu principal** (vídeo de abertura, som, controle, saves). Próximo:
+o gameplay e os artefatos gráficos do menu. Detalhes no [devlog](docs/uc3/DEVLOG.md).
+
+Para jogar: `powershell -ExecutionPolicy Bypass -File tools\run_uc3.ps1` (log em `out\last-run.log`).
 
 | Fase | Objetivo | Status |
 |---|---|---|
 | 0 | Ambiente de build, estudo do código, organização | concluída |
 | 1 | Separar o que é específico do GoW3 do que é genérico | concluída (launcher fica para a fase 5) |
 | 2 | Preparar o executável do Uncharted 3 e listar as funções faltantes (`--check-imports`) | concluída: 69 faltando ([IMPORTS.md](docs/uc3/IMPORTS.md)) |
-| 3 | Implementar o runtime até o jogo abrir (menus) | precisa do dump |
-| 4 | Gameplay: gráficos, áudio, cutscenes, saves | precisa do dump |
+| 3 | Implementar o runtime até o jogo abrir (menus) | **concluída: menu principal, som e "Novo jogo"** |
+| 4 | Gameplay: gráficos, áudio, cutscenes, saves | em andamento |
 | 5 | Launcher, patches (resolução, FPS), polimento | — |
 
 ## O que é preciso

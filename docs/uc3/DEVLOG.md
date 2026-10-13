@@ -4,6 +4,54 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-14 — Fase 3: **o Uncharted 3 chega ao menu principal**
+
+### Importações: 69 → 0
+Detalhes em [IMPORTS.md](IMPORTS.md). Commits `48fc866` (stubs e mapeamentos), `45a888b`
+(fibras), `c01e2a0` (Videodec2, `sceKernelUtimes`).
+- **Mapeamentos:** muitas funções já existiam (`open`/`read`/`write`, `scePadRead`,
+  `sceRtcGetTime_t`); faltava só o nome dos NIDs. `src/import_names_uc3.inc` tem os NIDs do
+  `big3`.
+- **Stubs offline** em `runtime_services.c`/`runtime_kernel.c`/`runtime_content.c`.
+  O `ErrorDialog` registra no log o código do erro que o jogo quis mostrar, e o `LoadExec`
+  registra o executável pedido e encerra (trocar de executável fica para depois).
+- **Fibras** (`src/runtime_fiber.c`): troca de contexto em assembly. Uma fibra só fica
+  "suspensa" depois de salvar os registradores, o estado por thread é relido depois de cada
+  troca (a fibra pode ter migrado) e os limites de pilha do TEB acompanham a fibra no Windows.
+  Teste `tests/test_fiber.c` (alvo `fiber-test`): 8 threads, 128 fibras, ~165 mil trocas,
+  **30/30 no Windows (Clang) e no Linux (GCC)**. O primeiro erro do teste foi justamente o
+  risco previsto: o compilador do *teste* guardou o endereço do TLS de antes da troca.
+- **Videodec2** (`src/runtime_videodec2.c`): layouts, códigos de erro e posição da *picture
+  info* conferidos no código do shadPS4 (`b4e7ae7`, baixado só para consulta), com uma
+  verificação a mais (pixels + info precisam caber no buffer). Teste `tests/test_videodec2.c`.
+- O último NID (`0Cq8ipKr9n0`) é **`sceKernelUtimes`**, achado no `aerolib.inl` do shadPS4.
+
+### Primeira execução de verdade
+1. Chegou longe de primeira: fibras `NdJob Fiber (512 KiB)`, 6 `NdJobWorkerThread`, threads de
+   GPU e de I/O (Fios), ~50 `DCLoader`, PlayGo com 100 chunks e o vídeo de abertura
+   (`Videodec2 first picture 1920x1080`). Então parou com **`STOP: GPU hook queue overflow`**.
+2. Causa: o `runtime_memory.c` guarda os avisos de mapeamento para a GPU numa fila fixa de 64
+   posições. O Uncharted mapeia memória direta em **206 pedaços de 1 MiB**, e um desmapeamento
+   sobre a faixa toda gera um aviso por pedaço. **Correção:** a fila cresce sob demanda
+   (`eeea09e`).
+3. Segunda execução: **2 minutos sem travar** (encerrada pelo limite de tempo). O usuário
+   jogou na janela: **menu principal navegável, "Novo jogo" funcionando (saves `SAVEDATA03P` e
+   `SAVEDATA0CC` criados), som correto**. Único defeito visto: **alguns artefatos na imagem de
+   fundo do menu**.
+
+### Observações
+- Os ~50 `open(.../u3data/build/main/effect1/*.bin) -> not found` são normais: a pasta
+  `effect1` não existe e os mesmos recursos estão em pacotes `.pak` (`pak23/`, `actor33/`). O
+  motor procura versões soltas opcionais antes.
+- Avisos `SanitizeCopyLayers` do Vulkan aparecem junto com o vídeo de abertura; podem ter
+  relação com os artefatos.
+- `tools/run_uc3.ps1` roda o jogo sem limite de tempo e grava `out/last-run.log`.
+
+### Próximos passos
+- Entrar no gameplay ("Novo jogo" até o fim do carregamento) e ver o que acontece.
+- Investigar os artefatos do menu (captura de tela; comparar com o shadPS4 0.19.0; testar
+  `GOW3_DIRECT_MEMORY_ACCESS=1` e as opções de leitura da GPU).
+
 ## 2026-10-13 — Fase 2: o Uncharted 3 passa pelo loader; 69 funções faltando
 
 ### Executável escolhível
