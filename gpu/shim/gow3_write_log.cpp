@@ -15,6 +15,10 @@
 #endif
 #include <x86intrin.h>
 
+// runtime_memory.c: the backing view of guest memory, past any page protection.
+extern "C" int runtime_memory_region_backing(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end,
+                                             int* mapped, const unsigned char** backing);
+
 namespace Gow3WriteLog {
 namespace {
 struct Entry {
@@ -57,6 +61,37 @@ void NoteIntent(std::uint64_t address, const void* data, std::uint64_t size, Sou
 void Note(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
     if (Enabled()) {
         Record(address, data, size, source);
+    }
+}
+
+void NoteDownload(std::uint64_t address, const void* data, std::uint64_t size) {
+    if (!Enabled()) {
+        return;
+    }
+    static std::atomic<int> shown{0};
+    const std::uint64_t n = head.load(std::memory_order_relaxed);
+    const std::uint64_t now = __rdtsc();
+    for (std::uint64_t i = n; i-- > (n > 65536 ? n - 65536 : 0);) {
+        const Entry& e = ring[i % Size];
+        if ((e.source != Fence && e.source != WriteData) || e.address >= address + size ||
+            e.address + e.size <= address) {
+            continue;
+        }
+        if (shown.fetch_add(1, std::memory_order_relaxed) >= 50) {
+            return;
+        }
+        std::uint64_t brings = 0;
+        if (e.address >= address) {
+            const std::uint64_t offset = e.address - address, left = size - offset;
+            std::memcpy(&brings, static_cast<const unsigned char*>(data) + offset, left < 8 ? left : 8);
+        }
+        std::fprintf(stderr,
+                     "Write log: readback %#llx +%llu overwrites %s %#llx +%llu (wrote %#llx, %.3f s ago, "
+                     "tid %u) with %#llx\n",
+                     (unsigned long long)address, (unsigned long long)size,
+                     e.source == Fence ? "fence" : "WriteData", (unsigned long long)e.address,
+                     (unsigned long long)e.size, (unsigned long long)e.first,
+                     double(now - e.tsc) / 3.0e9, e.tid, (unsigned long long)brings);
     }
 }
 
@@ -159,6 +194,62 @@ extern "C" void gow3gpu_dump_guest_writes(void* ucontext) {
             print(e, "near");
             ++shown;
         }
+    }
+    // uc3: the labels the GPU emulation wrote lately (fences, WriteData), as guest memory holds
+    // them now, read through the backing view (a page may be read-protected): a label that no
+    // longer holds what was written was overwritten, and the writes that landed there say by
+    // whom. The most recent write per address counts.
+    {
+        struct Label { std::uint64_t address, size, first, tsc; std::uint32_t source; };
+        Label labels[96];
+        int count = 0;
+        for (std::uint64_t i = n; i-- > (n > 20000 ? n - 20000 : 0) && count < 96;) {
+            const Entry& e = ring[i % Size];
+            if (e.source != Fence && e.source != WriteData) {
+                continue;
+            }
+            bool seen = false;
+            for (int k = 0; k < count && !seen; ++k) {
+                seen = labels[k].address == e.address;
+            }
+            if (!seen) {
+                labels[count++] = {e.address, e.size, e.first, e.tsc, e.source};
+            }
+        }
+        int changed = 0;
+        for (int k = 0; k < count; ++k) {
+            const Label& l = labels[k];
+            std::uintptr_t start = 0, end = 0;
+            int mapped = 0;
+            const unsigned char* backing = nullptr;
+            std::uint64_t holds = 0;
+            if (runtime_memory_region_backing(l.address, &start, &end, &mapped, &backing) && backing &&
+                l.address + 8 <= end) {
+                std::memcpy(&holds, backing, 8);
+            }
+            const bool differs = (l.size >= 8 ? holds : holds & 0xffffffffull) !=
+                                 (l.size >= 8 ? l.first : l.first & 0xffffffffull);
+            if (differs || k < 12) {
+                std::fprintf(stderr,
+                             "Write log: label %#llx +%llu: %s wrote %#llx %.3f s before the fault; now holds %#llx%s\n",
+                             (unsigned long long)l.address, (unsigned long long)l.size,
+                             l.source == Fence ? "fence" : "WriteData", (unsigned long long)l.first,
+                             double(now - l.tsc) / 3.0e9, (unsigned long long)holds,
+                             differs ? " (CHANGED)" : "");
+            }
+            if (!differs || changed++ >= 16) {
+                continue;
+            }
+            int listed = 0;
+            for (std::uint64_t i = n; i-- > (n > Size ? n - Size : 0) && listed < 8;) {
+                const Entry& e = ring[i % Size];
+                if (e.address < l.address + 8 && e.address + e.size > l.address) {
+                    print(e, "  over it");
+                    ++listed;
+                }
+            }
+        }
+        std::fprintf(stderr, "Write log: %d label addresses checked, %d changed\n", count, changed);
     }
     std::fprintf(stderr, "Write log: %llu writes logged\n", (unsigned long long)n);
 }

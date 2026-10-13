@@ -126,6 +126,10 @@ public:
         vo_port = port;
     }
 
+    Vulkan::Rasterizer* GetRasterizer() const {
+        return rasterizer;
+    }
+
     void BindRasterizer(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
     }

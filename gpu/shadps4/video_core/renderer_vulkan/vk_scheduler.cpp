@@ -214,12 +214,26 @@ void Scheduler::WaitDeferredSignals() {
 }
 
 void Scheduler::WaitHostCopies() {
-    if (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
+    if (host_copies_done.load(std::memory_order_acquire) <
+        host_copies_issued.load(std::memory_order_relaxed)) {
         Gow3Stats::WaitTimer timer{Gow3Stats::host_copies_wait_ns};
         Gow3Stats::host_copy_waits.fetch_add(1, std::memory_order_relaxed);
         KickRecording(true);
-        while (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
+        const auto started = std::chrono::steady_clock::now();
+        bool reported = false;
+        while (host_copies_done.load(std::memory_order_acquire) <
+               host_copies_issued.load(std::memory_order_relaxed)) {
             std::this_thread::yield();
+            // uc3: a wait this long is a hang in the making; say what it waits for.
+            if (!reported && std::chrono::steady_clock::now() - started > std::chrono::seconds{2}) {
+                reported = true;
+                LOG_WARNING(Render_Vulkan,
+                            "gow3: host copies stuck: {} issued, {} done, {} chunks queued, "
+                            "recorder {}, recording {}",
+                            host_copies_issued.load(), host_copies_done.load(),
+                            queued_chunks.load(), recorder_sleeping ? "sleeping" : "busy",
+                            IsRecordingDeferred() ? "deferred" : "direct");
+            }
         }
     }
     Gow3Stats::WaitTimer timer{Gow3Stats::copy_threads_wait_ns};

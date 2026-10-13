@@ -133,13 +133,16 @@ static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
         source += n; dest += n; size -= n;
     }
 }
+// Not from under the memory tracker's region lock (ForEachUploadRange holds it while the
+// upload callback runs): the readback takes that lock again, and on the GPU command thread
+// it first drains the draw pipe, whose thread may be waiting for the same lock.
 void MemoryManager::ResolveHostCopy(VAddr source, u64 size) {
-    if (PreciseReadbacks() && rasterizer && rasterizer->IsGpuSideThread()) {
+    if (PreciseReadbacks() && rasterizer && rasterizer->IsGpuSideThread() &&
+        rasterizer->GetBufferCache().IsRegionGpuModified(source, size)) {
         rasterizer->ReadMemory(source, size, true);
     }
 }
 void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
-    ResolveHostCopy(source, size); // a copy made on the GPU thread (or split from it below)
     // gow3: large uploads (streaming) are split across the copy threads.
     constexpr u64 Chunk = 512 * 1024;
     if (size < 4 * Chunk || !Gow3Copy::Enabled()) {

@@ -425,7 +425,17 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
 }
 
 bool Rasterizer::IsGpuSideThread() const {
-    return OnStageA() || DrawPipe::OnStageB();
+    return OnStageA() || DrawPipe::OnStageB() || OnCaptureThread();
+}
+
+namespace {
+thread_local bool on_capture_thread = false;
+}
+void Rasterizer::MarkCaptureThread() {
+    on_capture_thread = true;
+}
+bool Rasterizer::OnCaptureThread() noexcept {
+    return on_capture_thread;
 }
 
 bool Rasterizer::IsGpuSideThreadId(u32 tid) const {
@@ -509,6 +519,9 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         if (source) {
             std::memcpy(dst, source, size);
         } else {
+            // uc3: a buffer the GPU wrote, bound as a constant: precise readbacks bring its data
+            // back first (the other upload paths only copy CPU-modified or GPU-clean ranges).
+            memory->ResolveHostCopy(address, size);
             memory->CopySparseMemory(address, dst, size);
         }
         constant_ring->Flush(*offset, size);

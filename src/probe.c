@@ -141,6 +141,14 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         rbp=frame[0];
     }
     fflush(NULL);
+    /* uc3: GOW3_FAULT_HOLD=<seconds> keeps the process alive after a fatal fault, so a debugger
+     * can attach and read every thread (lldb -p PID -b -o 'thread backtrace all'). */
+    const char *hold=getenv("GOW3_FAULT_HOLD");
+    if (hold && atoi(hold)>0) {
+        fprintf(stderr,"Fault: holding the process %d s for a debugger (GOW3_FAULT_HOLD)\n",atoi(hold));
+        fflush(NULL);
+        Sleep((DWORD)atoi(hold)*1000);
+    }
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }

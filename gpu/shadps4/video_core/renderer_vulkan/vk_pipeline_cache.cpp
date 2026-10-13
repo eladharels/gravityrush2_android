@@ -24,6 +24,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "gow3_settings.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_depth_stencil_state.h"
@@ -406,6 +407,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         capture_compiler = std::make_unique<AsyncCompiler>(capture_count, 8, [](unsigned index) {
             Common::SetCurrentThreadName(("gow3:ShaderCapture" + std::to_string(index)).c_str());
             Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
+            Rasterizer::MarkCaptureThread(); // uc3: its page faults resolve inline
         });
         compiler = std::make_unique<AsyncCompiler>(count, 64, [](unsigned index) {
             Common::SetCurrentThreadName(("gow3:ShaderCompile" + std::to_string(index)).c_str());
@@ -501,6 +503,12 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
         return false;
     }
     {
+        // uc3: the capture thread may read a page the GPU wrote (precise readbacks) and bring
+        // the GPU's data back itself, touching the caches as the draw recording thread does:
+        // that thread runs dry first, so nobody else uses them meanwhile.
+        if (auto* rasterizer = liverpool->GetRasterizer()) {
+            rasterizer->DrainDrawPipe();
+        }
         PhaseTimer waiting{g_gow3_guest_wait_ns};
         capture_job.Wait();
     }

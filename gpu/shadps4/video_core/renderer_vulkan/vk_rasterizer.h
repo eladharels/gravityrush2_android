@@ -131,6 +131,14 @@ public:
     }
     /// The GPU command thread or the draw recording thread (fault handling runs inline there).
     bool IsGpuSideThread() const;
+    /// uc3: marks the calling thread as a shader capture thread (PipelineCache::QueueShader
+    /// runs the guest reads of a new shader on it while the GPU command thread waits): its page
+    /// faults are resolved inline, as the draw recording thread's are. Through the locked path
+    /// they would wait for the GPU command thread, which waits for the capture (precise
+    /// readbacks read-protect GPU-written pages: a deadlock the guest's GPU watchdog turned
+    /// into the m_gfxEopTick assertion).
+    static void MarkCaptureThread();
+    static bool OnCaptureThread() noexcept;
     bool IsGpuSideThreadId(u32 tid) const;
     /// A guest write hit a protected page.
     bool OnWriteFault(VAddr addr, bool assume_locks);
