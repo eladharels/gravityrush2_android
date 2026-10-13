@@ -324,6 +324,15 @@ extern uintptr_t gow3_damage_multiplier(int taken);
 extern uintptr_t gow3_orb_pickup_multiplier(unsigned kind);
 extern void gow3_stat_multipliers_status(int damage, int orb_pickup);
 
+/* uc3: the God of War III hooks below are only searched for in God of War III (the title IDs
+ * of scripts/patches.py): in another game a chance signature match would patch unrelated code. */
+static int is_gow3_title(const char *title_id) {
+    static const char *const ids[] = {"CUSA01623", "CUSA01715", "CUSA01720"};
+    for (size_t i = 0; i < sizeof(ids) / sizeof(*ids); ++i)
+        if (!strcmp(title_id, ids[i])) return 1;
+    return 0;
+}
+
 /* The hooks below find their sites by signature (src/signature.h), so they work in any region
  * and version of the game whose code matches; a site that is not found leaves its feature off. */
 static void install_cheats(Segment *segments, uint64_t count, uint64_t size) {
@@ -587,13 +596,16 @@ int main(int argc, char **argv) {
         }
         runtime_content_configure(values);
     }
+    char title_id[16]="";
     if (app0) {
         runtime_file_configure(app0, user_dir ? user_dir : "user");
         char sfo[4096], id[16]="";
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
+        sfo_value(sfo,"TITLE_ID",title_id,sizeof(title_id),NULL);
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
             runtime_savedata_configure(id);
     }
+    const int gow3_hooks = is_gow3_title(title_id);
     gow3gpu_register_kernel();
 #ifdef _WIN32
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
@@ -722,7 +734,7 @@ int main(int argc, char **argv) {
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
     if (!cpu_only) {
-        char title[128]="God of War III", serial[16]="UNKNOWN", sfo[4096];
+        char title[128]="PS4 game", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
         sfo_value(sfo,"TITLE",title,sizeof(title),NULL);
@@ -782,10 +794,14 @@ int main(int argc, char **argv) {
         _exit(missing ? 1 : 0); /* no destructors: GPU threads are running */
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
-    if (gpu_enabled) install_orb_multiplier(segments, ns, size);
-    if (gpu_enabled) install_cheats(segments, ns, size);
-    if (gpu_enabled) install_actor_watch(segments, ns, size);
-    if (gpu_enabled) install_stat_multipliers(segments, ns, size);
+    if (gpu_enabled && gow3_hooks) {
+        install_orb_multiplier(segments, ns, size);
+        install_cheats(segments, ns, size);
+        install_actor_watch(segments, ns, size);
+        install_stat_multipliers(segments, ns, size);
+    } else if (gpu_enabled) {
+        printf("Game hooks: none for title %s (God of War III cheats and multipliers off)\n", title_id[0] ? title_id : "?");
+    }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif

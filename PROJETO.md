@@ -26,13 +26,13 @@ recompilação completa, e a Naughty Dog colocou boa parte do motor nas SPUs.
 
 ## Situação
 
-**Fase 0 — preparação.** O ambiente compila o port do GoW3 sem alterações. Ainda não há dump
-do jogo.
+**Aguardando o dump do jogo.** O ambiente compila, e o código específico do GoW3 que poderia
+atrapalhar outro jogo foi isolado. Detalhes no [devlog](docs/uc3/DEVLOG.md).
 
 | Fase | Objetivo | Status |
 |---|---|---|
-| 0 | Ambiente de build, estudo do código, organização | em andamento |
-| 1 | Separar o que é específico do GoW3 do que é genérico | a fazer |
+| 0 | Ambiente de build, estudo do código, organização | concluída |
+| 1 | Separar o que é específico do GoW3 do que é genérico | concluída (launcher fica para a fase 5) |
 | 2 | Preparar o eboot do Uncharted e listar as funções faltantes (`--check-imports`) | precisa do dump |
 | 3 | Implementar o runtime até o jogo abrir (menus) | precisa do dump |
 | 4 | Gameplay: gráficos, áudio, cutscenes, saves | precisa do dump |

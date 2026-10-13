@@ -19,6 +19,9 @@ from prepare import parse_self, span, unpack
 from link_libc import encode_id
 
 DEFAULT_MODULES = ('libc.prx', 'libSceFios2.prx')
+# uc3: modules after libc are linked only when the game ships them (sce_module differs per game);
+# their imports otherwise go to the host runtime, and --check-imports shows what is missing.
+REQUIRED_MODULES = ('libc.prx',)
 FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
 
 
@@ -94,7 +97,11 @@ def patch_fs_loads(image, ph, base):
     return patched
 
 
-def link(game, out, module_names=DEFAULT_MODULES):
+def link(game, out, module_names=DEFAULT_MODULES, optional=()):
+    absent = [name for name in module_names if name in optional and not (game / 'sce_module' / name).is_file()]
+    for name in absent:
+        print(f'Linked modules: {name} not shipped with this game, its imports go to the host runtime')
+    module_names = [name for name in module_names if name not in absent]
     main = module(game / 'eboot.bin')
     raw = (out / 'boot.bin').read_bytes()
     magic, size, entry, ns, nr, ni, flags = unpack('<8s6Q', raw, 0)
@@ -248,6 +255,9 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('game', type=Path)
     p.add_argument('--out', type=Path, default=Path(__file__).resolve().parent.parent / 'out')
-    p.add_argument('--modules', nargs='*', default=list(DEFAULT_MODULES))
+    p.add_argument('--modules', nargs='*', default=None)
     a = p.parse_args()
-    link(a.game, a.out, a.modules)
+    if a.modules is None:
+        link(a.game, a.out, DEFAULT_MODULES, optional=set(DEFAULT_MODULES) - set(REQUIRED_MODULES))
+    else:
+        link(a.game, a.out, a.modules)

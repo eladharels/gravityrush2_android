@@ -4,6 +4,66 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-12 — Fase 1: separar o que é do GoW3
+
+### Resultado do estudo
+O caminho principal (preparar → linkar → carregar → rodar) já é quase todo genérico:
+
+| Parte | Específico do GoW3? |
+|---|---|
+| `scripts/prepare.py`, `link_libc.py`, `content_profile.py` | Não |
+| `scripts/link_modules.py` | Exigia `libSceFios2.prx` → **corrigido** |
+| `scripts/patches.py` | Tabela `GAMES` com os IDs do GoW3; sem perfil, não aplica patch nenhum. Ok por enquanto; o perfil do Uncharted entra aqui na fase 5 |
+| `run.py` | Só o padrão `GOW3_GAME_DIR=../CUSA01623`; basta definir a variável |
+| `src/probe.c` | Hooks de trapaça do GoW3 rodavam em qualquer jogo → **corrigido** |
+| `src/runtime_*.c` | Genérico (é o "PS4" que o jogo enxerga) |
+| `gpu/shim/gow3_overlay.cpp` | Abas de trapaça do GoW3, mas já se desativam sozinhas quando os hooks não existem |
+| `launcher/`, `packaging/` | Totalmente GoW3 (nome, cores, ícones). Fica para a fase 5 |
+
+### Núcleo gráfico (shadPS4 embutido)
+- Base: shadPS4 commit `b4e7ae7` (2026-10-02), praticamente a mesma época da **0.19.0**, a
+  versão em que a Nathan Drake Collection chegou a *Ingame*. Bom sinal.
+- 286 alterações marcadas com `gow3:`. Quase todas são de **arquitetura e desempenho**, não
+  truques do GoW3: pipeline de desenho em duas threads, leituras adiadas, compilação de shaders
+  em segundo plano, estatísticas e suporte a Windows. Poucas são calibradas para o GoW3 (vetores
+  de movimento e upscaler temporal, que já ficam desligados por padrão).
+- Interruptores para testar se o Uncharted renderizar errado (todos variáveis de ambiente):
+  - `GOW3_DIRECT_MEMORY_ACCESS=1`: **desligado por padrão, e o shadPS4 diz que a NDC precisa
+    dele.** É o primeiro a testar.
+  - `GOW3_DRAW_PIPE`, `GOW3_VK_RECORD_THREAD`: voltam ao desenho numa thread só, como no shadPS4.
+  - `GOW3_DEFERRED_READBACK`, `GOW3_STALE_READBACK`, `GOW3_READBACK_LINEAR`: leituras da GPU
+    (equivalem ao *precise readback* do shadPS4).
+  - `GOW3_ASYNC_SHADERS`, `GOW3_DMEM_MB` (memória direta informada ao jogo, padrão 5056 MiB).
+- Plano B: se algo renderizar errado só no port, comparar com o shadPS4 0.19.0 puro
+  (`tools/shadps4`) para saber se o problema é do núcleo ou das mudanças do GoW3.
+
+### Mudanças
+1. **`src/probe.c`:** os hooks do GoW3 (trapaças, multiplicadores, barra de vida) só são
+   procurados quando o `TITLE_ID` é CUSA01623/01715/01720. Eles acham o código por padrões de
+   bytes, e num jogo diferente uma coincidência alteraria código do Uncharted sem ninguém
+   perceber. Em outro jogo o log mostra `Game hooks: none for title ...`. O título padrão da
+   janela (sem `param.sfo`) virou "PS4 game".
+2. **`scripts/link_modules.py`:** só o `libc.prx` é obrigatório. Se o jogo não trouxer o
+   `libSceFios2.prx`, o linker avisa e as importações dele vão para o runtime (o
+   `--check-imports` vai mostrar o que faltar). Com `--modules` explícito continua estrito.
+
+### Verificação
+- Build completo OK.
+- Testes Python: 159 rodados, mesmas 11 falhas do GoW3 original (testes que dependem do Linux:
+  links simbólicos, Nix). Nenhuma falha nova.
+- Ainda não deu para testar as mudanças com um jogo de verdade (falta o dump).
+
+### Armadilha (de novo): CRLF nos submódulos
+Os submódulos são clonados com o `core.autocrlf=true` global do Windows, e o patch do
+FSR-Vulkan falha (`patch não se aplica`). Correção: `core.autocrlf=false` em cada submódulo e
+checkout de novo (`git submodule foreach`).
+
+### Próximos passos
+- Fase 1 concluída no que dá para fazer sem o jogo.
+- **Dump da Nathan Drake Collection** → fase 2: `prepare.py` + `link_modules.py` +
+  `gow3-probe.exe --check-imports`.
+- Antes disso, se quiser: testar a coletânea no shadPS4 0.19.0 para ter uma referência.
+
 ## 2026-10-12 — Início do projeto
 
 ### Decisão: versão de PS4, não de PS3
