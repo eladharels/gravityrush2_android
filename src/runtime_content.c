@@ -77,7 +77,30 @@ static ABI int32_t addon_list(uint32_t service,void *list,uint32_t capacity,uint
     if (hits) *hits=0;
     ++lists; return 0;
 }
+/* uc3: Uncharted 3 asks for add-ons by label (none are installed) and for the download data
+ * space (/download0). */
+#define CONTENT_NOT_FOUND ((int32_t)0x80D90005)
+static ABI int32_t addcont_mount(uint32_t service,const char *label,char *mount_point) {
+    (void)service; (void)mount_point;
+    require_initialized();
+    printf("Runtime: AppContent add-on %.16s is not installed\n",label ? label : "?");
+    return CONTENT_NOT_FOUND;
+}
+static ABI int32_t addcont_download(uint32_t service,const char *label) {
+    (void)service;
+    printf("Runtime: AppContent download of add-on %.16s refused (offline)\n",label ? label : "?");
+    return CONTENT_NOT_FOUND;
+}
+static ABI int32_t download_space(const char *mount_point,uint64_t *kb) {
+    (void)mount_point;
+    if (!kb) return PARAMETER;
+    *kb=1024*1024; /* 1 GiB free */
+    return 0;
+}
 uintptr_t runtime_content_resolve(const char *name) {
+    if (!strcmp(name,"VANhIWcqYak#libSceAppContent")) return (uintptr_t)addcont_mount;
+    if (!strcmp(name,"7gxh+5QubhY#libSceAppContent")) return (uintptr_t)addcont_download;
+    if (!strcmp(name,"Gl6w5i0JokY#libSceAppContent")) return (uintptr_t)download_space;
     if (!strcmp(name,"g8cM39EUZ6o#libSceSysmodule")) return (uintptr_t)module_load;
     if (!strcmp(name,"fMP5NHUOaMk#libSceSysmodule")) return (uintptr_t)module_loaded;
     if (!strcmp(name,"eR2bZFAAU0Q#libSceSysmodule")) return (uintptr_t)module_unload;

@@ -254,6 +254,7 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
 }
 static const struct { const char *nid, *symbol; } import_names[]={
 #include "import_names.inc"
+#include "import_names_uc3.inc"
 };
 /* Symbol name for a scoped NID, or NULL when this eboot/libc never imports it. */
 const char *runtime_symbol(const char *nid) {
@@ -273,6 +274,15 @@ const char *runtime_import_name(const char *name) {
     char canonical[128];
     const char *symbol=runtime_symbol(canonical_name(name,canonical));
     return symbol ? symbol : "name not resolved; see analysis.json import_name_hints";
+}
+/* uc3: sceKernelDlsym: a symbol by name, through the NIDs this runtime knows the names of. */
+uintptr_t runtime_resolve_symbol(const char *symbol) {
+    for (size_t i=0;symbol && i<sizeof(import_names)/sizeof(*import_names);++i) {
+        if (strcmp(symbol,import_names[i].symbol)) continue;
+        uintptr_t found=runtime_resolve(import_names[i].nid,0);
+        if (found) return found;
+    }
+    return 0;
 }
 const char *runtime_executable_name(void) {
     const char *name=getenv("GOW3_EXECUTABLE");

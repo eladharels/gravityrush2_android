@@ -186,7 +186,8 @@ static ABI int32_t voice_info(uint32_t port,uint32_t *info) {
 /* ---- Common dialogs: nothing is displayed; an opened dialog finishes. ---- */
 typedef struct { const char *name; int initialized, status; uint32_t button; } Dialog;
 static Dialog dialogs[]={{"CommonDialog",0,0,0},{"MsgDialog",0,0,0},{"SaveDataDialog",0,0,0},
-                         {"NpProfileDialog",0,0,0},{"NpCommerceDialog",0,0,0},{"ImeDialog",0,0,0}};
+                         {"NpProfileDialog",0,0,0},{"NpCommerceDialog",0,0,0},{"ImeDialog",0,0,0},
+                         {"ErrorDialog",0,0,0}};
 #define DIALOG_RUNNING 2
 #define DIALOG_FINISHED 3
 #define DIALOG_NOT_FINISHED ((int32_t)0x80B80005)
@@ -355,6 +356,16 @@ static ABI int32_t save_result(unsigned char *out) {
     return 0;
 }
 static ABI int32_t save_ready(void) { return 1; }
+/* uc3: ErrorDialog (Uncharted 3). OrbisErrorDialogParam: size, errorCode, userId. The error the
+ * game wanted to show goes to the log (a diagnostic); the dialog finishes at once. */
+static ABI int32_t error_init(void) { return dialog_init(6); }
+static ABI int32_t error_open(const int32_t *param) {
+    if (!param) return DIALOG_ARG_NULL;
+    printf("Runtime: ErrorDialog: game error 0x%08X\n",(uint32_t)param[1]);
+    return dialog_open(6);
+}
+static ABI int32_t error_status(void) { return dialog_status(6); }
+static ABI int32_t error_term(void) { return dialog_term(6); }
 static ABI int32_t profile_result(void *result) { if (result) memset(result,0,4); return 0; }
 /* ImeDialog: text typed on the keyboard into the game window (title bar shows it).
  * OrbisImeDialogParam: user, type, languages(8), enter label, method, filter,
@@ -523,6 +534,79 @@ static ABI int32_t playgo_close(int32_t handle) {
     playgo_handle=0; return 0;
 }
 static ABI int32_t playgo_terminate(void) { playgo_handle=0; return 0; }
+/* uc3: Uncharted 3 also asks for install estimates, languages and prefetches. */
+static ABI int32_t playgo_eta(int32_t handle,const uint16_t *ids,uint32_t count,int64_t *eta) {
+    if (handle!=playgo_handle || !handle) return PLAYGO_BAD_HANDLE;
+    if (!ids || !eta) return PLAYGO_BAD_POINTER;
+    if (!count) return PLAYGO_BAD_SIZE;
+    *eta=0; return 0; /* installed: nothing left */
+}
+static ABI int32_t playgo_get_languages(int32_t handle,uint64_t *mask) {
+    if (handle!=playgo_handle || !handle) return PLAYGO_BAD_HANDLE;
+    if (!mask) return PLAYGO_BAD_POINTER;
+    *mask=~UINT64_C(0); return 0; /* every language is installed */
+}
+static ABI int32_t playgo_set_languages(int32_t handle,uint64_t mask) {
+    (void)mask; return handle==playgo_handle && handle ? 0 : PLAYGO_BAD_HANDLE;
+}
+static ABI int32_t playgo_get_todo(int32_t handle,void *list,uint32_t count,uint32_t *out) {
+    if (handle!=playgo_handle || !handle) return PLAYGO_BAD_HANDLE;
+    if (!list || !out) return PLAYGO_BAD_POINTER;
+    if (!count) return PLAYGO_BAD_SIZE;
+    *out=0; return 0;
+}
+static ABI int32_t playgo_prefetch(int32_t handle,const uint16_t *ids,uint32_t count,int8_t locus) {
+    (void)locus;
+    if (handle!=playgo_handle || !handle) return PLAYGO_BAD_HANDLE;
+    if (!ids) return PLAYGO_BAD_POINTER;
+    return count ? 0 : PLAYGO_BAD_SIZE;
+}
+
+/* ---- uc3: switching executables (Nathan Drake Collection) ----
+ * Each game of the collection is its own executable; LoadExec starts another one (the menu is
+ * /app0/eboot.bin). The port runs one executable per process: it reports the request and ends. */
+static ABI int32_t system_load_exec(const char *path,char *const *argv) {
+    printf("Runtime: SystemService LoadExec %s",path ? path : "(null)");
+    for (int i=0;argv && argv[i] && i<16;++i) printf(" [%s]",argv[i]);
+    puts(" (switching executables is not supported yet; ending)");
+    runtime_report();
+    fflush(NULL);
+    _exit(0); /* no destructors: GPU, audio and guest threads are still running */
+}
+
+/* ---- uc3: libScePosix sockets (Uncharted 3): unplugged, FreeBSD errno ---- */
+#define POSIX_EBADF 9
+#define POSIX_EINVAL 22
+#define POSIX_ENETDOWN 50
+static ABI int32_t posix_net_down(void) { *runtime_errno()=POSIX_ENETDOWN; return -1; }
+/* select() with no descriptors is a sleep; descriptors can only be sockets, which never open. */
+typedef struct { int64_t sec, usec; } GuestTimeval;
+static ABI int32_t posix_select(int32_t nfds,void *read,void *write,void *except,const GuestTimeval *timeout) {
+    if (nfds>0 && (read || write || except)) { *runtime_errno()=POSIX_EBADF; return -1; }
+    if (timeout && (timeout->sec<0 || timeout->usec<0 || timeout->usec>=1000000)) { *runtime_errno()=POSIX_EINVAL; return -1; }
+    if (timeout) {
+        uint64_t ns=(uint64_t)timeout->sec*1000000000u+(uint64_t)timeout->usec*1000u;
+#ifdef _WIN32
+        compat_sleep_ns(ns);
+#else
+        struct timespec t={(time_t)(ns/1000000000u),(long)(ns%1000000000u)}; nanosleep(&t,NULL);
+#endif
+    }
+    return 0;
+}
+/* fcntl on a socket that never opened, or flag queries on files: get/set descriptor and status
+ * flags succeed and report none; any other command is unsupported. */
+static ABI int32_t posix_fcntl(int32_t fd,int32_t cmd,int64_t arg) {
+    (void)arg;
+    if (fd<0) { *runtime_errno()=POSIX_EBADF; return -1; }
+    switch (cmd) {
+    case 1: case 3: return 0;   /* F_GETFD, F_GETFL */
+    case 2: case 4: return 0;   /* F_SETFD, F_SETFL */
+    default:
+        printf("Runtime: fcntl(%d, %d) unsupported\n",fd,cmd);
+        *runtime_errno()=POSIX_EINVAL; return -1;
+    }
+}
 
 /* ---- DiscMap: the game is fully installed, no disc bitmap exists ---- */
 #define DISC_MAP_NO_BITMAP ((int32_t)0x81100004)
@@ -669,5 +753,21 @@ static const RuntimeExport exports[]={
     {"sceAudioInOpen",audio_in_open},
     {"sceDiscMapIsRequestOnHDD",discmap_on_hdd}, {"sceDiscMap_8A828CAEE7EDD5E9",discmap_8a82},
     {"sceVoiceInit",ok_void}, {"sceVoiceEnd",ok_void},
+    /* uc3: Uncharted 3 (Nathan Drake Collection) */
+    {"sceErrorDialogInitialize",error_init}, {"sceErrorDialogOpen",error_open},
+    {"sceErrorDialogUpdateStatus",error_status}, {"sceErrorDialogTerminate",error_term},
+    {"sceInvitationDialogTerminate",ok_void}, {"sceRemoteplayInitialize",ok_void},
+    {"sceNpSignalingGetConnectionInfo",np_signed_out}, {"sceNpSignalingTerminateConnection",ok_void},
+    {"sceNpTusCreateNpTitleCtx",np_request_ctx}, {"sceNpTusDeleteNpTitleCtx",ok_void},
+    {"sceNpTusCreateRequest",np_request}, {"sceNpTusDeleteRequest",ok_void}, {"sceNpTusPollAsync",np_poll},
+    {"sceNpTusGetDataAsync",np_signed_out}, {"sceNpTusSetDataAsync",np_signed_out},
+    {"sceNpTusGetFriendsDataStatusAsync",np_signed_out},
+    {"scePlayGoGetEta",playgo_eta}, {"scePlayGoGetLanguageMask",playgo_get_languages},
+    {"scePlayGoSetLanguageMask",playgo_set_languages}, {"scePlayGoGetToDoList",playgo_get_todo},
+    {"scePlayGoPrefetch",playgo_prefetch},
+    {"sceSystemServiceLoadExec",system_load_exec},
+    {"socket",posix_net_down}, {"bind",posix_net_down}, {"listen",posix_net_down}, {"accept",posix_net_down},
+    {"connect",posix_net_down}, {"send",posix_net_down}, {"recv",posix_net_down}, {"setsockopt",posix_net_down},
+    {"select",posix_select}, {"fcntl",posix_fcntl},
 };
 uintptr_t runtime_services_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

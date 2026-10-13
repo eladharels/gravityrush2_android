@@ -184,6 +184,85 @@ static ABI int32_t module_info_from_addr(uint64_t address,int32_t flags,void *in
     return ERR(3); /* ESRCH: the runtime keeps no module records */
 }
 static ABI int32_t kernel_mlock(const void *address,uint64_t size) { (void)address; (void)size; return 0; }
+
+/* ---- uc3: Uncharted 3 ---- */
+/* System modules loaded at run time (libSceFiber.prx, libSceNpManager.prx, ...): the runtime
+ * already serves their functions, so a load succeeds with a handle; Dlsym finds functions by
+ * name. Handles count from 0x100 so they never collide with the linked modules. */
+#define LOADED_MODULES 64
+static struct { char path[128]; } loaded_modules[LOADED_MODULES];
+static int32_t loaded_module_count;
+static pthread_mutex_t module_lock=PTHREAD_MUTEX_INITIALIZER;
+static ABI int32_t load_start_module(const char *path,uint64_t argc,const void *argv,uint32_t flags,const void *opt,int32_t *result) {
+    (void)argc; (void)argv; (void)flags; (void)opt;
+    if (!path) return ERR(22);
+    pthread_mutex_lock(&module_lock);
+    int32_t handle=-1;
+    for (int32_t i=0;i<loaded_module_count;++i)
+        if (!strcmp(loaded_modules[i].path,path)) handle=0x100+i;
+    if (handle<0 && loaded_module_count<LOADED_MODULES) {
+        snprintf(loaded_modules[loaded_module_count].path,sizeof(loaded_modules[0].path),"%s",path);
+        handle=0x100+loaded_module_count++;
+    }
+    pthread_mutex_unlock(&module_lock);
+    if (handle<0) return ERR(12); /* ENOMEM */
+    printf("Runtime: sceKernelLoadStartModule(%s) = 0x%x (served by the host runtime)\n",path,handle);
+    if (result) *result=0;
+    return handle;
+}
+static ABI int32_t kernel_dlsym(int32_t handle,const char *symbol,void **address) {
+    if (!symbol || !address) return ERR(22);
+    uintptr_t found=runtime_resolve_symbol(symbol);
+    printf("Runtime: sceKernelDlsym(0x%x, %s) %s\n",handle,symbol,found ? "found" : "not found");
+    if (!found) return ERR(3); /* ESRCH */
+    *address=(void *)found;
+    return 0;
+}
+/* Exception unwinding asks which module holds an address: as sceKernelGetModuleInfoFromAddr, the
+ * runtime keeps no module records yet. */
+static ABI int32_t module_info_for_unwind(uint64_t address,int32_t flags,void *info) {
+    static int reported;
+    if (!reported) { reported=1; printf("Runtime: sceKernelGetModuleInfoForUnwind(0x%llx): no module records\n",(unsigned long long)address); }
+    if (!info) return ERR(14);
+    (void)flags;
+    return ERR(3);
+}
+static ABI int32_t set_virtual_range_name(void *address,uint64_t size,const char *name) {
+    (void)address; (void)size; (void)name; return 0; /* names only show in debuggers */
+}
+/* Seconds east of UTC at time t. */
+static long utc_offset_seconds(time_t t) {
+#ifdef _WIN32
+    return compat_utc_offset(t);
+#else
+    struct tm local; localtime_r(&t,&local); return local.tm_gmtoff;
+#endif
+}
+typedef struct { int64_t t; uint32_t west_sec, dst_sec; } GuestTimesec;
+static ABI int32_t convert_utc_to_local(int64_t utc,int64_t *local,GuestTimesec *st,uint64_t *dst_sec) {
+    if (!local) return ERR(22);
+    long offset=utc_offset_seconds((time_t)utc);
+    *local=utc+offset;
+    if (st) { st->t=utc; st->west_sec=(uint32_t)(-offset); st->dst_sec=0; }
+    if (dst_sec) *dst_sec=0;
+    return 0;
+}
+static ABI int32_t convert_local_to_utc(int64_t local,int64_t unknown,int64_t *utc,GuestTimezone *tz,int32_t *dst_sec) {
+    (void)unknown;
+    if (!utc) return ERR(22);
+    long offset=utc_offset_seconds((time_t)local);
+    *utc=local-offset;
+    if (tz) { tz->minuteswest=(int32_t)(-offset/60); tz->dsttime=0; }
+    if (dst_sec) *dst_sec=0;
+    return 0;
+}
+/* scePthreadGetthreadid: a small unique number per thread. */
+static int32_t next_thread_id=1;
+static _Thread_local int32_t thread_id;
+static ABI int32_t get_thread_id(void) {
+    if (!thread_id) thread_id=__atomic_fetch_add(&next_thread_id,1,__ATOMIC_RELAXED);
+    return thread_id;
+}
 /* libc's C++ exception unwinder. The game does not throw (no __cxa_throw import): unwinding
  * finds no frame data, and resuming a context is a stop, never a silent success. */
 static ABI int32_t elf_phdr_match_addr(void *info,uint64_t address) { (void)info; (void)address; return 0; }
@@ -350,5 +429,12 @@ static const RuntimeExport exports[]={
     {"scePthreadSetspecific",key_set}, {"scePthreadGetspecific",key_get},
     {"pthread_key_create",posix_key_create}, {"pthread_key_delete",posix_key_delete},
     {"pthread_setspecific",posix_key_set}, {"pthread_getspecific",key_get},
+    /* uc3: Uncharted 3 */
+    {"sceKernelLoadStartModule",load_start_module}, {"sceKernelDlsym",kernel_dlsym},
+    {"sceKernelGetModuleInfoForUnwind",module_info_for_unwind},
+    {"sceKernelSetVirtualRangeName",set_virtual_range_name},
+    {"sceKernelConvertUtcToLocaltime",convert_utc_to_local},
+    {"sceKernelConvertLocaltimeToUtc",convert_local_to_utc},
+    {"scePthreadGetthreadid",get_thread_id},
 };
 uintptr_t runtime_kernel_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

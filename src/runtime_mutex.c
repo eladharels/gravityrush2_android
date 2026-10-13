@@ -216,7 +216,10 @@ static ABI int32_t condattr_destroy(void **attr) {
     if (!attr || !*attr) return (int32_t)0x80020016;
     free(*attr); *attr=NULL; return 0;
 }
+/* uc3: libScePosix's pthread_condattr_init (Uncharted 3): POSIX error numbers. */
+static ABI int32_t posix_condattr_init(void **attr) { return posix_result(condattr_init(attr)); }
 uintptr_t runtime_mutex_resolve(const char *name) {
+    if (!strcmp(name,"mKoTx03HRWA#libkernel")) return (uintptr_t)posix_condattr_init;
     if (!strcmp(name,"m5-2bsNfv7s#libkernel")) return (uintptr_t)condattr_init;
     if (!strcmp(name,"waPcxYiR3WA#libkernel")) return (uintptr_t)condattr_destroy;
     if (!strcmp(name,"0TyVk4MSLt0#libkernel")) return (uintptr_t)posix_cond_init;
