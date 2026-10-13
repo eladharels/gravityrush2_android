@@ -45,6 +45,8 @@ extern std::atomic<u32> g_gow3_pending_draws;
 } // namespace Vulkan
 
 namespace Libraries::VideoOut {
+// uc3: GOW3_FLASH_TRACE time base: process start (the game window follows within seconds).
+static const auto uc3_flash_clock = std::chrono::steady_clock::now();
 
 constexpr static bool Is32BppPixelFormat(PixelFormat format) {
     switch (format) {
@@ -640,9 +642,8 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         // uc3: GOW3_FLASH_TRACE=1 — a blank flip shows one black frame.
         static const bool flash_trace = std::getenv("GOW3_FLASH_TRACE") != nullptr;
         if (flash_trace) {
-            static const auto start = std::chrono::steady_clock::now();
             std::printf("Flash trace: %.2f s: blank flip (buffer index -1)\n",
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - uc3_flash_clock).count());
         }
         frame = presenter->PrepareBlankFrame(false);
     } else {

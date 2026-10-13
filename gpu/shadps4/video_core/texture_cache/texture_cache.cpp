@@ -27,6 +27,8 @@
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
+// uc3: GOW3_FLASH_TRACE time base: process start (the game window follows within seconds).
+static const auto uc3_flash_clock = std::chrono::steady_clock::now();
 
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
@@ -1179,10 +1181,9 @@ void TextureCache::RefreshImage(Image& image) {
             // (or black) content. Time-stamped so the player can match it to a flash.
             static const bool flash_trace = std::getenv("GOW3_FLASH_TRACE") != nullptr;
             if (flash_trace && image.info.size.width >= 640 && m == 0) {
-                static const auto start = std::chrono::steady_clock::now();
                 static std::atomic<int> shown{0};
                 if (shown.fetch_add(1, std::memory_order_relaxed) < 400) {
-                    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - uc3_flash_clock).count();
                     std::printf("Flash trace: %.2f s: GPU-written image %ux%u fmt %u at %#llx re-uploaded from guest memory (cpu dirty %d)\n",
                                 t, image.info.size.width, image.info.size.height,
                                 u32(image.info.pixel_format), (unsigned long long)image.info.guest_address,
