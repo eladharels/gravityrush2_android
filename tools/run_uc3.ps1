@@ -10,7 +10,8 @@ $env:MSYSTEM = 'CLANG64'; $env:CHERE_INVOKING = '1'; $env:MSYS2_ROOT = 'D:/msys6
 $env:GOW3_GAME_DIR = 'D:/Uncharted/CUSA02344/app0'
 $env:GOW3_PATCH_DIR = 'D:/Uncharted/CUSA02344/patch'
 $env:GOW3_EXECUTABLE = 'big3-ps4_Shipping.elf'
-foreach ($pair in $Set) {
+# With -File, "-Set A=1,B=2" arrives as one string: split it here.
+foreach ($pair in ($Set | ForEach-Object { $_ -split ',' } | Where-Object { $_ })) {
     $key, $value = $pair -split '=', 2
     if (-not $key -or $null -eq $value) { Write-Host "Ignorado (use CHAVE=VALOR): $pair" -ForegroundColor Yellow; continue }
     Set-Item -Path "env:$key" -Value $value
