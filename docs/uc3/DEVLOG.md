@@ -44,9 +44,21 @@ Os três executáveis são *fake SELF* sem criptografia nem compressão (flags d
 `prepare.py` no `eboot.bin`: 429 importações, 19.243 realocações, 52 módulos requisitados,
 `_init_env` da libc verificado. O dump está bom.
 
+### Atualização 1.02
+- `D:\Uncharted\CUSA02344\1.02.pkg` (0,96 GB), mesmo `CONTENT_ID`, categoria `gp` (patch),
+  **`APP_VER` 01.02**.
+- Extraída para **`D:\Uncharted\CUSA02344\patch`** (2,05 GB), com 42 entradas de `sce_sys`
+  (`param.sfo`, `changeinfo/`, `origin-deltainfo.dat`, troféus…) conferidas pelo tamanho.
+- Traz **executáveis novos** para os três jogos (`big3`: 22,9 → 26,0 MB), sem criptografia, e
+  dados novos em `u1data`/`u2data`/`u3data`. Não traz `sce_module` (vale o do jogo base).
+- Para usar: `GOW3_PATCH_DIR=D:\Uncharted\CUSA02344\patch`. O `run.py` monta uma visão
+  combinada temporária (`scripts/game_update.py`, só links) sem alterar nenhuma das pastas.
+- **Vamos trabalhar com a 01.02**, a versão dos relatos do shadPS4. Para scripts que não passam
+  pelo `run.py`, o `big3` certo é o de `patch\`.
+
 ### Próximos passos (fase 2)
 1. Ensinar o `prepare.py`/`link_modules.py` a usar outro executável além do `eboot.bin`
-   (o `big3-ps4_Shipping.elf`).
+   (o `big3-ps4_Shipping.elf`, versão 01.02).
 2. `--check-imports` no `big3` para listar o que falta no runtime.
 3. Descobrir como o `eboot.bin` lança o `big3` (argumentos, parâmetros) para reproduzir isso.
 
