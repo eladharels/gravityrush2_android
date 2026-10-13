@@ -43,7 +43,15 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
       tile_manager{instance, scheduler, runtime, buffer_cache.GetStreamBuffer()},
       readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()} {
 
-    std::printf("GPU: deferred image readback %s (64 copies, 64 MiB pending limit)%s\n",
+    // uc3: the readback mode in the log, so a run's FPS is never attributed to the wrong mode.
+    const u32 readbacks_mode = EmulatorSettings.GetReadbacksMode();
+    std::printf("GPU: readbacks mode %u (%s); deferred image readback %s (64 copies, 64 MiB "
+                "pending limit)%s\n",
+                readbacks_mode,
+                readbacks_mode == u32(GpuReadbacksMode::Precise)
+                    ? "precise: GPU-written pages read-protected, GOW3_READBACKS=2"
+                : readbacks_mode == u32(GpuReadbacksMode::Relaxed) ? "relaxed, GOW3_READBACKS=1"
+                                                                   : "disabled",
                 deferred_readbacks ? "enabled" : "disabled",
                 stale_readbacks ? "; CPU reads use the previous frame's copy" : "");
 
