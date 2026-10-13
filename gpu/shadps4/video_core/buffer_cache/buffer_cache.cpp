@@ -149,13 +149,16 @@ void BufferCache::ExtendWriteFault(VAddr device_addr) {
 }
 
 // uc3: precise readbacks cost a fault, a 512 KiB window download and a full GPU wait per CPU
-// access to a page the GPU wrote: about 150 submissions per frame in Uncharted 3's first
-// level, half of each slow frame spent waiting. One readback instead brings back every
-// GPU-modified range of every arena, with one wait; the accesses that follow find nothing
-// pending. GOW3_READBACK_ALL=0 keeps the window download.
+// access to a page the GPU wrote. GOW3_READBACK_ALL=1 makes one readback bring back every
+// GPU-modified range of every arena with one wait, so the accesses that follow find nothing
+// pending. OFF by default: it also brings back ranges the CPU never asked for, and a range
+// marked GPU-modified at bind time whose memory the game has since reused (textures loaded
+// from disk after a level reload) gets the arena's stale bytes written over the new data:
+// corrupted textures and lightmaps after "menu -> new game" in Uncharted 3. The window
+// download only touches what the CPU is reading, where the GPU's data is what it wants.
 static bool ReadbackAll() {
     static const bool all = EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise &&
-                            EmulatorSettingsImpl::Flag("GOW3_READBACK_ALL", true);
+                            EmulatorSettingsImpl::Flag("GOW3_READBACK_ALL", false);
     return all;
 }
 
