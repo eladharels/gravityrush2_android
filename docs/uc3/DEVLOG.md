@@ -4,6 +4,48 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — WSL (Ubuntu) como ambiente de apoio
+
+### Por quê
+O port vai rodar no **Windows**, e o build principal continua sendo o MSYS2. O WSL é apoio:
+- roda os testes que dependem do Linux (os 11 que falham no Windows);
+- é o **plano B para travamentos de threads**. As ferramentas de diagnóstico Linux do loader (o
+  *watchdog* `--timeout`, que mostra a pilha de cada thread, e o `gdb`) não existem na versão
+  Windows, e o Uncharted 3 tem histórico de travar no sistema de jobs da Naughty Dog
+  (`NdJobWorkerThread`, `condvar`). A ideia é rodar o loader em `--cpu-only` no WSL quando isso
+  aparecer.
+- **Não** serve para jogar: no WSL2 o Vulkan passa por tradução para D3D12 (Dozen), lento e
+  diferente do driver real da AMD.
+
+### Instalação
+- A virtualização (AMD SVM) estava desligada na BIOS; ligada pelo usuário.
+- `wsl --install -d Ubuntu` (admin) ligou os recursos do Windows, mas a distribuição não ficou
+  instalada depois do reinício. Resolvido com `wsl --install -d Ubuntu --no-launch`, sem admin.
+- **Ubuntu 26.04.1 LTS** no WSL2 (WSL 3.0.3, kernel 6.18), usuário `matheus`, 16 threads,
+  15 GB de RAM.
+- O disco virtual foi movido do C: (pouco espaço) para **`D:\WSL\Ubuntu`**
+  (`wsl --manage Ubuntu --move D:\WSL\Ubuntu`).
+- Pacotes: `build-essential cmake ninja-build pkg-config python3-pil git gdb`.
+
+### Repositório no Linux
+- `~/uncharted/uc3_pc`, branch `uc3`, clonado do repositório do Windows. Fica **dentro** do
+  sistema de arquivos do Linux, porque o acesso a `/mnt/d` é lento.
+- Remotos: `windows` (`/mnt/d/Uncharted/uc3_pc`, para trazer os commits) e `upstream` (GoW3,
+  só *fetch*). Para atualizar: `git pull windows uc3`.
+
+### Resultado: testes
+**Linux: 159 testes, todos OK (34 pulados).** As 11 falhas no Windows são limitações da
+plataforma (links simbólicos, Nix), não problemas do código.
+
+### Plano B: build completo no Linux (pacotes já conferidos no 26.04)
+```bash
+sudo apt install -y libsdl3-dev libavcodec-dev libavutil-dev libavformat-dev libswscale-dev \
+  libboost-dev libfmt-dev robin-map-dev libxxhash-dev libvulkan-memory-allocator-dev \
+  glslang-dev glslang-tools spirv-cross libspirv-cross-c-shared-dev libxbyak-dev libzydis-dev \
+  spirv-headers libvulkan-dev libx11-dev libxcb1-dev libwayland-dev
+```
+`magic_enum` e `miniz` vêm dos submódulos (não há pacote no Ubuntu).
+
 ## 2026-10-12 — Fase 1: separar o que é do GoW3
 
 ### Resultado do estudo

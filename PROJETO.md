@@ -56,6 +56,10 @@ export MSYS2_ROOT=/d/msys64
 bash build.sh        # gera out/gow3-probe.exe
 ```
 
+Há também um ambiente de apoio no **WSL (Ubuntu 26.04)**, em `~/uncharted/uc3_pc`, para os
+testes que dependem do Linux e para depurar travamentos de threads (veja o devlog,
+2026-10-13). O port em si é testado no Windows.
+
 Os nomes `gow3-*` e as variáveis `GOW3_*` vêm do projeto original e por enquanto ficam como
 estão (veja o DEVLOG, 2026-10-12).
 
@@ -67,6 +71,9 @@ D:\Uncharted\
 ├── ref\gow3_pc\         ← port do GoW3 original, só referência
 ├── ref\bloodborne_pc\   ← port do Bloodborne (Windows), só referência
 └── tools\shadps4\       ← shadPS4 0.19.0, para comparar o comportamento do jogo
+
+D:\msys64\               ← MSYS2 (build do Windows)
+D:\WSL\Ubuntu\           ← disco do Ubuntu no WSL (repositório em ~/uncharted/uc3_pc)
 ```
 
 ## Licença e créditos
