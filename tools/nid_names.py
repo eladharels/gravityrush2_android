@@ -160,7 +160,7 @@ for n in re.findall(r'pthread_(\w+)', posix):
     camel = ''.join(p[:1].upper() + p[1:] for p in n.split('_'))
     scepthread += ['scePthread' + camel]
 names = set(candidates.split()) | set(posix.split()) | set(kernel.split()) | set(scepthread)
-names |= {'_sceFiberInitializeImpl', 'sceNpTusGetFriendsDataStatusAsync',
+names |= {'_sceFiberInitializeImpl', 'sceNpTusGetFriendsDataStatusAsync', 'sceKernelUtimes',
           'scePthreadAttrGetaffinity', 'scePthreadAttrSetaffinity', 'scePthreadGetaffinity', 'scePthreadSetaffinity',
           'scePthreadRename', 'scePthreadGetthreadid', 'scePthreadAttrGet', 'scePthreadMutexIsowned',
           'scePthreadSemInit', 'scePthreadSemDestroy', 'scePthreadSemWait', 'scePthreadSemPost', 'scePthreadSemTrywait',

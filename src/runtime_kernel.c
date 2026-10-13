@@ -256,6 +256,15 @@ static ABI int32_t convert_local_to_utc(int64_t local,int64_t unknown,int64_t *u
     if (dst_sec) *dst_sec=0;
     return 0;
 }
+/* sceKernelUtimes(path, times[2]): file times are not kept apart from the host's own, so an
+ * existing file succeeds unchanged; a missing one is ENOENT. */
+static ABI int32_t kernel_utimes(const char *path,const GuestTimeval *times) {
+    (void)times;
+    if (!path) return ERR(14); /* EFAULT */
+    unsigned char st[256]; /* larger than the guest's struct stat */
+    int64_t r=runtime_file_stat(path,st); /* 0 or -host errno */
+    return r<0 ? ERR(runtime_guest_errno((int)-r)) : 0;
+}
 /* scePthreadGetthreadid: a small unique number per thread. */
 static int32_t next_thread_id=1;
 static _Thread_local int32_t thread_id;
@@ -435,6 +444,6 @@ static const RuntimeExport exports[]={
     {"sceKernelSetVirtualRangeName",set_virtual_range_name},
     {"sceKernelConvertUtcToLocaltime",convert_utc_to_local},
     {"sceKernelConvertLocaltimeToUtc",convert_local_to_utc},
-    {"scePthreadGetthreadid",get_thread_id},
+    {"scePthreadGetthreadid",get_thread_id}, {"sceKernelUtimes",kernel_utimes},
 };
 uintptr_t runtime_kernel_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

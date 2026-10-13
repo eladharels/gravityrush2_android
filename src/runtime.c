@@ -253,6 +253,8 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
     if (file) return file;
     uintptr_t fiber = runtime_fiber_resolve(name);
     if (fiber) return fiber;
+    uintptr_t videodec2 = runtime_videodec2_resolve(name);
+    if (videodec2) return videodec2;
     return gow3gpu_resolve(name);
 }
 static const struct { const char *nid, *symbol; } import_names[]={

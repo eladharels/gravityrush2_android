@@ -6,7 +6,7 @@ hash dos nomes do SDK (o mesmo algoritmo de NID de `scripts/prepare.py`).
 
 **69 faltando** (68 identificadas). Checklist da fase 3; marque `[x]` quando implementar.
 
-**Situação (2026-10-13):** 11 faltando, todas de `libSceVideodec2` mais o NID não identificado. As fibras estão em `src/runtime_fiber.c`, testadas por `tests/test_fiber.c`.
+**Situação (2026-10-13): 0 faltando.** Fibras em `src/runtime_fiber.c` (`tests/test_fiber.c`), Videodec2 em `src/runtime_videodec2.c` (`tests/test_videodec2.c`).
 
 Legenda do tipo:
 - **real**: precisa funcionar de verdade, senão o jogo não roda.
@@ -30,16 +30,16 @@ fibras. É o coração do motor e a causa dos travamentos antigos no shadPS4.
 Cutscenes. O GoW3 já decodifica H.264 com FFmpeg na API antiga (`runtime_videodec.c`); a
 Videodec2 é parecida.
 
-- [ ] `sceVideodec2QueryComputeMemoryInfo` (`RnDibcGCPKw`)
-- [ ] `sceVideodec2AllocateComputeQueue` (`eD+X2SmxUt4`)
-- [ ] `sceVideodec2ReleaseComputeQueue` (`UvtA3FAiF4Y`)
-- [ ] `sceVideodec2QueryDecoderMemoryInfo` (`qqMCwlULR+E`)
-- [ ] `sceVideodec2CreateDecoder` (`CNNRoRYd8XI`)
-- [ ] `sceVideodec2DeleteDecoder` (`jwImxXRGSKA`)
-- [ ] `sceVideodec2Decode` (`852F5+q6+iM`)
-- [ ] `sceVideodec2Flush` (`l1hXwscLuCY`)
-- [ ] `sceVideodec2Reset` (`wJXikG6QFN8`)
-- [ ] `sceVideodec2GetPictureInfo` (`NtXRa3dRzU0`)
+- [x] `sceVideodec2QueryComputeMemoryInfo` (`RnDibcGCPKw`)
+- [x] `sceVideodec2AllocateComputeQueue` (`eD+X2SmxUt4`)
+- [x] `sceVideodec2ReleaseComputeQueue` (`UvtA3FAiF4Y`)
+- [x] `sceVideodec2QueryDecoderMemoryInfo` (`qqMCwlULR+E`)
+- [x] `sceVideodec2CreateDecoder` (`CNNRoRYd8XI`)
+- [x] `sceVideodec2DeleteDecoder` (`jwImxXRGSKA`)
+- [x] `sceVideodec2Decode` (`852F5+q6+iM`)
+- [x] `sceVideodec2Flush` (`l1hXwscLuCY`)
+- [x] `sceVideodec2Reset` (`wJXikG6QFN8`)
+- [x] `sceVideodec2GetPictureInfo` (`NtXRa3dRzU0`)
 
 ## Módulos e executáveis (real)
 - [x] `sceKernelLoadStartModule` (`wzvqT4UqKX8`): carrega `libSceFiber.prx`,
@@ -67,7 +67,7 @@ Mesmas funções que o runtime já tem com nome `sceKernel*`/libc, sob outra bib
 - [x] `sceKernelConvertUtcToLocaltime` (`-o5uEDpN+oY`): mapear (fuso do Windows)
 - [x] `sceKernelConvertLocaltimeToUtc` (`0NTHN1NKONI`): mapear
 - [x] `sceKernelSetVirtualRangeName` (`DGMG3JshrZU`): stub (só nomeia memória)
-- [ ] **não identificada** (`0Cq8ipKr9n0`): ver quem chama quando o jogo rodar
+- [x] `sceKernelUtimes` (`0Cq8ipKr9n0`): achado na tabela aerolib do shadPS4; arquivo existente = ok
 
 ## Controle, relógio, instalação
 - [x] `scePadRead` (`q1cHNfGycLI`): mapear (o runtime tem `scePadReadState`; `Read` devolve

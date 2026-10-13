@@ -69,3 +69,4 @@
 {"wJXikG6QFN8#libSceVideodec2","sceVideodec2Reset"},
 {"wuCroIGjt2g#libkernel","open"},
 {"wzvqT4UqKX8#libkernel","sceKernelLoadStartModule"},
+{"0Cq8ipKr9n0#libkernel","sceKernelUtimes"},

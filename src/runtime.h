@@ -34,6 +34,8 @@ uintptr_t runtime_resolve_symbol(const char *symbol);
 /* uc3: libSceFiber (runtime_fiber.c). */
 uintptr_t runtime_fiber_resolve(const char *name);
 void runtime_fiber_report(void);
+/* uc3: libSceVideodec2 (runtime_videodec2.c). */
+uintptr_t runtime_videodec2_resolve(const char *name);
 uintptr_t runtime_rwlock_resolve(const char *name);
 void runtime_rwlock_report(void);
 void runtime_set_libc_tls(const void *data, uint64_t filesz, uint64_t memsz);
