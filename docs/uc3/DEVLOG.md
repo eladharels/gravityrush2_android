@@ -4,6 +4,45 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — Modo preciso: *readback* agrupado (46–54 FPS no banheiro), 4º impasse, rastreio das piscadas (`03a919a`)
+
+### Perfil dos quadros lentos (97 quadros acima de 40 ms, 7,1 s somados, teste anterior)
+GPU ticks 3,0 s · handlers de falha de leitura 2,0 s (1001 falhas, ~10/quadro) · handlers de
+falha de escrita 2,0 s · **~150 submissões por quadro**. Cada acesso da CPU a uma página escrita
+pela GPU era uma falha, um download de 512 KiB e um `Finish()` (espera completa da GPU).
+Script: `stalls.py` (agrega as linhas `Stall:` do log).
+
+### *Readback* agrupado (`BufferCache::DownloadAllGpuModified`)
+No modo preciso, o primeiro *readback* traz **todas** as faixas modificadas pela GPU, de todas
+as arenas, com uma só espera; os acessos seguintes não encontram nada pendente.
+`GOW3_READBACK_ALL=0` volta ao download por janela. Resultado (4 min, mesmo percurso):
+- quadros lentos 97 → 16 (7,1 s → 2,3 s); banheiro 29–38 FPS → **46–54 FPS**; sem travar.
+- Custo: ~150 *readbacks*/s de ~4 MB (600 MB/s de GPU→CPU) durante o gameplay; 0 em cena parada.
+  A linha `uc3 draw stats` mostra "readbacks: N all-at-once, X MB".
+
+### 4º impasse (corrigido): a captura começava antes de drenar o estágio B
+A thread de captura segurava o mutex de submissão (`Finish()` → `SyncRecording`) enquanto o
+estágio B, ainda ativo, tentava um `Finish()` no EOP (`ProcessDownloadImages`) e travava no
+mesmo mutex; a thread da GPU esperava o `Drain`. O `DrainDrawPipe` passou para **antes** de
+iniciar o *job* de captura.
+
+### Piscadas em preto (usuário: tela inteira, um quadro, a qualquer momento)
+Não reproduzíveis pelo *probe*. Hipóteses e rastreio (`GOW3_FLASH_TRACE=1`, com tempo em s):
+- `RefreshImage`: uma imagem escrita pela GPU só é recarregada da memória do jogo quando o
+  *hash* dos bytes muda; um *readback* que grave dados de *buffer* na memória de um *render
+  target* (a arena pode não ter os pixels) muda o hash → imagem preta por um quadro. Log:
+  "Flash trace: T s: GPU-written image WxH ... re-uploaded".
+- Flip em branco (índice -1): "Flash trace: T s: blank flip".
+O jogador anota o segundo aproximado de cada piscada e compara com o log.
+
+### Estado / próximos passos
+- `run_uc3.ps1` usa o modo preciso por padrão (`c5db78c`).
+- Reduzir os *readbacks* (600 MB/s): descobrir o que a CPU lê a cada quadro (endereços das
+  falhas) e limitar o download às arenas/faixas tocadas, ou fazê-lo uma vez por quadro no EOP.
+- Piscadas: esperar o rastreio do jogador.
+
+---
+
 ## 2026-10-13 — **O cenário aparece no modo preciso** (`dd96d90`)
 
 Rodado `GOW3_READBACKS=2` com o `uc3_hang_probe.py` depois da revisão. Três impasses em
