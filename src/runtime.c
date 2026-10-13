@@ -289,6 +289,22 @@ uintptr_t runtime_resolve_symbol(const char *symbol) {
     }
     return 0;
 }
+/* uc3: arguments after the program name (GOW3_GUEST_ARGS, space-separated). The collection
+ * menu starts Uncharted 3 through sceSystemServiceLoadExec with "eboot.bin ispartofuccollection". */
+int runtime_guest_args(const char **out, int max) {
+    static char buffer[512];
+    static const char *args[16];
+    static int count=-1;
+    if (count<0) {
+        count=0;
+        const char *env=getenv("GOW3_GUEST_ARGS");
+        snprintf(buffer,sizeof(buffer),"%s",env ? env : "");
+        for (char *p=strtok(buffer," "); p && count<16; p=strtok(NULL," ")) args[count++]=p;
+    }
+    int n=count<max ? count : max;
+    for (int i=0;i<n;++i) out[i]=args[i];
+    return n;
+}
 const char *runtime_executable_name(void) {
     const char *name=getenv("GOW3_EXECUTABLE");
     return name && *name ? name : "eboot.bin";

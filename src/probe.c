@@ -846,7 +846,14 @@ int main(int argc, char **argv) {
     entered_game=1;
     static char program[256];
     snprintf(program, sizeof(program), "/app0/%s", runtime_executable_name());
-    struct { uint64_t argc; const char *argv[2]; } params = {1, {program, NULL}};
+    struct { uint64_t argc; const char *argv[18]; } params = {1, {program, NULL}};
+    params.argc += (uint64_t)runtime_guest_args(params.argv + 1, 16);
+    params.argv[params.argc] = NULL;
+    if (params.argc > 1) {
+        printf("Guest arguments:");
+        for (uint64_t i = 1; i < params.argc; ++i) printf(" %s", params.argv[i]);
+        printf("\n");
+    }
 #ifdef _WIN32
     typedef void (ABI *Entry)(void *, void (ABI *)(void));
     ((Entry)(image + entry))(&params, guest_exit);

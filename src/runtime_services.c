@@ -563,15 +563,37 @@ static ABI int32_t playgo_prefetch(int32_t handle,const uint16_t *ids,uint32_t c
 }
 
 /* ---- uc3: switching executables (Nathan Drake Collection) ----
- * Each game of the collection is its own executable; LoadExec starts another one (the menu is
- * /app0/eboot.bin). The port runs one executable per process: it reports the request and ends. */
+ * Each game of the collection is its own executable; LoadExec starts another one (the menu,
+ * /app0/eboot.bin, starts Uncharted 3 with "eboot.bin ispartofuccollection"). The port runs one
+ * executable per process: like the in-game "Apply and restart", it starts run.py again (which
+ * prepares the new executable) with GOW3_EXECUTABLE and GOW3_GUEST_ARGS set, and ends. */
+static void set_env(const char *name, const char *value) {
+#ifdef _WIN32
+    SetEnvironmentVariableA(name,value);  /* the restarted process inherits this block */
+    _putenv_s(name,value);
+#else
+    setenv(name,value,1);
+#endif
+}
 static ABI int32_t system_load_exec(const char *path,char *const *argv) {
-    printf("Runtime: SystemService LoadExec %s",path ? path : "(null)");
-    for (int i=0;argv && argv[i] && i<16;++i) printf(" [%s]",argv[i]);
-    puts(" (switching executables is not supported yet; ending)");
+    char args[512]="";
+    for (int i=0;argv && argv[i] && i<16;++i)
+        snprintf(args+strlen(args),sizeof(args)-strlen(args),"%s%s",i ? " " : "",argv[i]);
+    printf("Runtime: SystemService LoadExec %s [%s]\n",path ? path : "(null)",args);
+    const char *name=path && !strncmp(path,"/app0/",6) ? path+6 : NULL;
+    char host[1024];
+    if (!name || !*name || strchr(name,'/') || strchr(name,'\\') || runtime_file_translate(path,host,sizeof(host))) {
+        printf("Runtime: LoadExec target not supported (an executable in /app0 only)\n");
+        return SYSTEM_PARAMETER;
+    }
+    FILE *f=fopen(host,"rb");
+    if (!f) { printf("Runtime: LoadExec target %s not found\n",path); return SYSTEM_PARAMETER; }
+    fclose(f);
+    set_env("GOW3_EXECUTABLE",name);
+    set_env("GOW3_GUEST_ARGS",args);
     runtime_report();
-    fflush(NULL);
-    _exit(0); /* no destructors: GPU, audio and guest threads are still running */
+    runtime_restart(); /* does not return */
+    return 0;
 }
 
 /* ---- uc3: libScePosix sockets (Uncharted 3): unplugged, FreeBSD errno ---- */

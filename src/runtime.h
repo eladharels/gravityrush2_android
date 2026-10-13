@@ -29,6 +29,8 @@ int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 const char *runtime_import_name(const char *name);
 /* uc3: the game executable's file name (GOW3_EXECUTABLE, default eboot.bin): argv[0], progname. */
 const char *runtime_executable_name(void);
+/* uc3: guest arguments after the program name (GOW3_GUEST_ARGS); returns how many (<= max). */
+int runtime_guest_args(const char **out, int max);
 /* uc3: a runtime function by symbol name (sceKernelDlsym), 0 when unknown. */
 uintptr_t runtime_resolve_symbol(const char *symbol);
 /* uc3: libSceFiber (runtime_fiber.c). */

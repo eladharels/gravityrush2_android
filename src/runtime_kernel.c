@@ -168,9 +168,14 @@ static ABI __attribute__((noreturn)) void raise_exception(uint32_t code,uint64_t
     exit(23);
 }
 /* The process was started without arguments other than its own name. */
-static const char *guest_argv[]={NULL,NULL};
-static ABI int32_t get_argc(void) { return 1; }
-static ABI const char **get_argv(void) { guest_argv[0]=runtime_executable_name(); return guest_argv; }
+static const char *guest_argv[18];
+static ABI int32_t get_argc(void) { const char *extra[16]; return 1+runtime_guest_args(extra,16); }
+static ABI const char **get_argv(void) {
+    guest_argv[0]=runtime_executable_name();
+    int n=runtime_guest_args(guest_argv+1,16);
+    guest_argv[1+n]=NULL;
+    return guest_argv;
+}
 /* Only the game and its bundled modules exist; nothing was loaded at run time. */
 static ABI int32_t stop_unload_module(int32_t handle,uint64_t args,const void *argp,uint32_t flags,const void *opt,int32_t *result) {
     (void)args; (void)argp; (void)flags; (void)opt; (void)result;
