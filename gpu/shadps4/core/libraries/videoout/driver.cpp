@@ -482,11 +482,14 @@ void VideoOutDriver::Flip(const Request& req) {
             static u64 uc3_window_draws = 0;
             // uc3: draws left out for want of a pipeline (pending compiles included).
             std::printf("uc3 draw stats: %llu draws, %llu without pipeline (%u of them pending "
-                        "compiles), %llu indirect, %llu indirect without pipeline\n",
+                        "compiles), %llu indirect, %llu indirect without pipeline; readbacks: "
+                        "%llu all-at-once, %.1f MB\n",
                         (unsigned long long)(Gow3Stats::draws.load() - uc3_window_draws),
                         (unsigned long long)Gow3Stats::uc3_no_pipeline_draws.exchange(0), pending_draws,
                         (unsigned long long)Gow3Stats::uc3_indirect_draws.exchange(0),
-                        (unsigned long long)Gow3Stats::uc3_no_pipeline_indirect.exchange(0));
+                        (unsigned long long)Gow3Stats::uc3_no_pipeline_indirect.exchange(0),
+                        (unsigned long long)Gow3Stats::uc3_readback_all.exchange(0),
+                        Gow3Stats::uc3_readback_all_bytes.exchange(0) / 1e6);
             uc3_window_draws = Gow3Stats::draws.load();
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);
             const u64 faults = Gow3Stats::tracker_faults.exchange(0);
@@ -634,6 +637,13 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
     Vulkan::Frame* frame;
     if (index == -1) {
+        // uc3: GOW3_FLASH_TRACE=1 — a blank flip shows one black frame.
+        static const bool flash_trace = std::getenv("GOW3_FLASH_TRACE") != nullptr;
+        if (flash_trace) {
+            static const auto start = std::chrono::steady_clock::now();
+            std::printf("Flash trace: %.2f s: blank flip (buffer index -1)\n",
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+        }
         frame = presenter->PrepareBlankFrame(false);
     } else {
         const auto& buffer = port->buffer_slots[index];

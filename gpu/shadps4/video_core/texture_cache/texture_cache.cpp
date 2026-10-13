@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdlib>
+#include <chrono>
 #include <xxhash.h>
 #include "video_core/amdgpu/liverpool.h"
 
@@ -1171,6 +1174,21 @@ void TextureCache::RefreshImage(Image& image) {
                 continue;
             }
             image.mip_hashes[m] = hash;
+            // uc3: GOW3_FLASH_TRACE=1 — a GPU-written image whose guest bytes changed is
+            // re-uploaded from guest memory: for a render target that is a frame of stale
+            // (or black) content. Time-stamped so the player can match it to a flash.
+            static const bool flash_trace = std::getenv("GOW3_FLASH_TRACE") != nullptr;
+            if (flash_trace && image.info.size.width >= 640 && m == 0) {
+                static const auto start = std::chrono::steady_clock::now();
+                static std::atomic<int> shown{0};
+                if (shown.fetch_add(1, std::memory_order_relaxed) < 400) {
+                    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                    std::printf("Flash trace: %.2f s: GPU-written image %ux%u fmt %u at %#llx re-uploaded from guest memory (cpu dirty %d)\n",
+                                t, image.info.size.width, image.info.size.height,
+                                u32(image.info.pixel_format), (unsigned long long)image.info.guest_address,
+                                int(True(image.flags & ImageFlagBits::CpuDirty)));
+                }
+            }
         }
 
         const u32 extent_width = mip_pitch ? std::min(mip_pitch, width) : width;

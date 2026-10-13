@@ -13,6 +13,7 @@
 #include "gow3_toggles.h"
 #include "gow3_write_log.h"
 #include "common/alignment.h"
+#include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -147,8 +148,26 @@ void BufferCache::ExtendWriteFault(VAddr device_addr) {
     memory_tracker->ExtendWriteFault(Common::AlignDown(device_addr, window), window);
 }
 
+// uc3: precise readbacks cost a fault, a 512 KiB window download and a full GPU wait per CPU
+// access to a page the GPU wrote: about 150 submissions per frame in Uncharted 3's first
+// level, half of each slow frame spent waiting. One readback instead brings back every
+// GPU-modified range of every arena, with one wait; the accesses that follow find nothing
+// pending. GOW3_READBACK_ALL=0 keeps the window download.
+static bool ReadbackAll() {
+    static const bool all = EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise &&
+                            EmulatorSettingsImpl::Flag("GOW3_READBACK_ALL", true);
+    return all;
+}
+
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write] {
+        if (ReadbackAll()) {
+            DownloadAllGpuModified();
+            if (is_write) {
+                memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+            }
+            return;
+        }
         const u32 first_block = device_addr >> block_shift;
         const u32 last_block = (device_addr + size - 1) >> block_shift;
         const auto* arena = GetArena(first_block, last_block);
@@ -213,6 +232,61 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
                                 copy.size);
     }
     memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+}
+
+void BufferCache::DownloadAllGpuModified() {
+    struct ArenaCopies {
+        const Buffer* arena;
+        boost::container::small_vector<vk::BufferCopy, 16> copies;
+    };
+    boost::container::small_vector<ArenaCopies, 8> work;
+    u64 total_size_bytes = 0;
+    for (const Buffer& arena : arenas) {
+        ArenaCopies entry{&arena};
+        const VAddr arena_base = arena.cpu_addr;
+        memory_tracker->ForEachDownloadRange<false>(
+            arena_base, arena.size_bytes, [&](u64 address, u64 size) {
+                gpu_modified_ranges.ForEachInRange(address, size, [&](VAddr start, VAddr end) {
+                    entry.copies.push_back(vk::BufferCopy{
+                        .srcOffset = start - arena_base,
+                        .dstOffset = total_size_bytes,
+                        .size = end - start,
+                    });
+                    constexpr u64 align = 64ULL;
+                    total_size_bytes += (end - start + align - 1) & ~(align - 1);
+                });
+                gpu_modified_ranges.Subtract(address, size);
+            });
+        if (!entry.copies.empty()) {
+            work.push_back(std::move(entry));
+        }
+    }
+    if (total_size_bytes == 0) {
+        return;
+    }
+    Gow3Stats::uc3_readback_all.fetch_add(1, std::memory_order_relaxed);
+    Gow3Stats::uc3_readback_all_bytes.fetch_add(total_size_bytes, std::memory_order_relaxed);
+    const auto download = staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached);
+    for (auto& entry : work) {
+        for (auto& copy : entry.copies) {
+            copy.dstOffset += download.offset;
+        }
+        runtime.CopyBuffer(entry.arena, download.buffer, entry.copies);
+    }
+    scheduler.Finish();
+
+    download.buffer->Invalidate(download.offset, download.size);
+    for (const auto& entry : work) {
+        const VAddr arena_base = entry.arena->cpu_addr;
+        for (const auto& copy : entry.copies) {
+            auto* dst_addr = std::bit_cast<u8*>(arena_base + copy.srcOffset);
+            Gow3WriteLog::NoteDownload(reinterpret_cast<u64>(dst_addr),
+                                       download.mapped + (copy.dstOffset - download.offset), copy.size);
+            memory->TryWriteBacking(dst_addr, download.mapped + (copy.dstOffset - download.offset),
+                                    copy.size);
+        }
+        memory_tracker->UnmarkRegionAsGpuModified(entry.arena->cpu_addr, entry.arena->size_bytes);
+    }
 }
 
 namespace {

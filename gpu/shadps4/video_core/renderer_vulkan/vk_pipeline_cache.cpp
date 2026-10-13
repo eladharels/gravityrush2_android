@@ -485,6 +485,14 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
     }
     build->pool_cache = &compiler_pools;
     snapshot.Stop();
+    // uc3: the capture thread may read a page the GPU wrote (precise readbacks) and bring the
+    // GPU's data back itself, submitting as the draw recording thread does. That thread runs
+    // dry before the capture starts: two threads finishing at once deadlock on the submission
+    // (one holds its mutex waiting for the recording to sync, the other waits for the mutex
+    // with recorded commands the sync needs).
+    if (auto* rasterizer = liverpool->GetRasterizer()) {
+        rasterizer->DrainDrawPipe();
+    }
     AsyncJob<bool> capture_job;
     if (!capture_job.Start(*capture_compiler, [this, build, binding] {
         PhaseTimer capture{g_gow3_capture_ns};
@@ -503,12 +511,6 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
         return false;
     }
     {
-        // uc3: the capture thread may read a page the GPU wrote (precise readbacks) and bring
-        // the GPU's data back itself, touching the caches as the draw recording thread does:
-        // that thread runs dry first, so nobody else uses them meanwhile.
-        if (auto* rasterizer = liverpool->GetRasterizer()) {
-            rasterizer->DrainDrawPipe();
-        }
         PhaseTimer waiting{g_gow3_guest_wait_ns};
         capture_job.Wait();
     }

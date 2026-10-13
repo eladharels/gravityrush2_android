@@ -131,6 +131,9 @@ private:
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
+    /// uc3: brings every GPU-modified range of every arena back to guest memory with one
+    /// GPU wait (precise readbacks; see ReadMemory).
+    void DownloadAllGpuModified();
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
