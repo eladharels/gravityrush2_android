@@ -55,16 +55,19 @@ def main():
     p.add_argument('--port-user', default=str(Path(__file__).resolve().parent.parent / 'user'))
     p.add_argument('--shadps4', default='D:/Uncharted/tools/shadps4')
     p.add_argument('--home', default='1000', help="shadPS4 user folder under user/home")
+    p.add_argument('--template', help='a param.sfo to copy the layout from (default: one found in the destination)')
     a = p.parse_args()
     source = Path(a.port_user) / 'savedata' / '1' / TITLE_ID
     dest = Path(a.shadps4) / 'user' / 'home' / a.home / 'savedata' / TITLE_ID
-    templates = sorted(dest.glob('SAVEDATA*/sce_sys/param.sfo'))
-    if not templates:
-        raise SystemExit(f'no param.sfo to use as a template under {dest}')
+    templates = [Path(a.template)] if a.template else sorted(dest.glob('SAVEDATA*/sce_sys/param.sfo'))
+    if not templates or not templates[0].is_file():
+        raise SystemExit(f'no param.sfo to use as a template (looked under {dest}); pass --template')
     sfo, template = read_sfo(templates[0].read_bytes())
-    backup = dest.parent / f'{TITLE_ID}_backup-{datetime.datetime.now():%Y%m%d-%H%M%S}'
-    shutil.copytree(dest, backup)
-    print(f'shadPS4 saves backed up to {backup}')
+    if dest.is_dir():
+        backup = dest.parent / f'{TITLE_ID}_backup-{datetime.datetime.now():%Y%m%d-%H%M%S}'
+        shutil.copytree(dest, backup)
+        print(f'shadPS4 saves backed up to {backup}')
+    dest.mkdir(parents=True, exist_ok=True)
     copied = 0
     for save in sorted(d for d in source.iterdir() if d.is_dir() and not d.name.endswith('.sce_sys')):
         meta = source / f'{save.name}.sce_sys'
