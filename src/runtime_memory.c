@@ -464,10 +464,18 @@ static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, in
     size_t replaced=fixed_replaced;
     int32_t result=map_direct_locked(out,size,prot,flags,physical,alignment);
     replaced=fixed_replaced-replaced;
+    /* uc3: physical pages seen through another address too (GPU tracking is per address). */
+    uintptr_t alias=0;
+    if (!result)
+        for (size_t i=0; i<vma_count && !alias; ++i)
+            if (vmas[i].kind==KIND_DIRECT && vmas[i].start!=(uintptr_t)*out && vmas[i].phys<(uint64_t)physical+size &&
+                (uint64_t)physical<vmas[i].phys+(vmas[i].end-vmas[i].start))
+                alias=vmas[i].start+((uint64_t)physical>vmas[i].phys ? (uint64_t)physical-vmas[i].phys : 0);
     write_unlock();
     flush_hooks();
-    if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x%s\n", *out, size, prot,
-                        replaced ? " (over a mapping)" : "");
+    if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x, phys=0x%" PRIx64 "%s",
+                        *out, size, prot, (uint64_t)physical, replaced ? " (over a mapping)" : "");
+    if (!result) { if (alias) printf(" alias of %p\n", (void *)alias); else printf("\n"); }
     return result;
 }
 static ABI int32_t direct_map_named(void **out, uint64_t size, int prot, int flags, int64_t physical,
@@ -497,6 +505,8 @@ static ABI int32_t direct_unmap(void *address, uint64_t size) {
     int32_t result=unmap_locked((uintptr_t)address,size);
     pending_count=before; /* already notified above */
     write_unlock();
+    static unsigned logged;
+    if (logged<40) { ++logged; printf("Runtime: unmapped %p, size=%" PRIu64 "\n", address, size); }
     return result;
 }
 static ABI int32_t direct_release(uint64_t start, uint64_t size) {
