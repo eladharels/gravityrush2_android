@@ -86,11 +86,18 @@ Liverpool::~Liverpool() {
 }
 
 void Liverpool::ProcessCommands() {
-    if (num_commands && rasterizer) {
-        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands); // gow3: commands touch the caches
-    }
+    // gow3: commands touch the caches, so the draw recording thread runs dry first.
+    // uc3: drained inside the loop, once a command is really there. Checking num_commands
+    // before the loop and again in its condition let a command that arrived in between (a
+    // guest page fault's readback: ~150/s with precise readbacks) run with stage B still
+    // recording a draw: both threads used the scheduler's record chunk, a null dereference.
+    bool drained = false;
     // Process incoming commands with high priority
     while (num_commands) {
+        if (!drained && rasterizer) {
+            rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
+            drained = true;
+        }
         Common::UniqueFunction<void> callback{};
         {
             std::scoped_lock lk{submit_mutex};

@@ -121,12 +121,25 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     const CONTEXT *c=info->ContextRecord;
     char where[MAX_PATH+64];
     describe_address(where,sizeof(where),(uintptr_t)c->Rip);
+    /* uc3: the faulting thread's name (the port names its host threads: GPU command thread,
+     * draw recording, shader capture, copy threads...). GetThreadDescription needs Windows 10
+     * 1607; looked up at run time so older systems still load. */
+    char thread_name[128]="";
+    {
+        typedef HRESULT (WINAPI *GetDescription)(HANDLE, PWSTR *);
+        GetDescription get=(GetDescription)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"),"GetThreadDescription");
+        PWSTR description=NULL;
+        if (get && SUCCEEDED(get(GetCurrentThread(),&description)) && description) {
+            if (description[0]) snprintf(thread_name,sizeof(thread_name)," \"%ls\"",description);
+            LocalFree(description);
+        }
+    }
     if (record->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2)
-        fprintf(stderr,"Fault: %s access to %p at %s (thread %lu)\n",
+        fprintf(stderr,"Fault: %s access to %p at %s (thread %lu%s)\n",
                 record->ExceptionInformation[0]==1 ? "write" : record->ExceptionInformation[0]==8 ? "execute" : "read",
-                (void *)record->ExceptionInformation[1],where,GetCurrentThreadId());
+                (void *)record->ExceptionInformation[1],where,GetCurrentThreadId(),thread_name);
     else
-        fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu)\n",record->ExceptionCode,where,GetCurrentThreadId());
+        fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu%s)\n",record->ExceptionCode,where,GetCurrentThreadId(),thread_name);
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
     if (gpu_enabled) gow3gpu_dump_guest_writes(info);
