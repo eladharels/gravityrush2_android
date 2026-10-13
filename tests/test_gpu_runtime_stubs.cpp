@@ -4,6 +4,10 @@
 #include <cstdint>
 #include <cstddef>
 #include <setjmp.h>
+#ifdef _WIN32
+// uc3: no sigjmp_buf on Windows; the shim's stand-in (gow3_toggles.h) has the same shape.
+typedef unsigned long long sigjmp_buf[32];
+#endif
 // Renderer tests have no guest process. Clock/host-thread services work; guest accesses abort.
 extern "C" {
 thread_local sigjmp_buf* runtime_fault_recover = nullptr;
@@ -21,5 +25,6 @@ void runtime_restart() { std::abort(); }
 uint64_t runtime_process_time_counter() { return runtime_process_time_us() * 1000; }
 int32_t* runtime_errno() { std::abort(); }
 int runtime_memory_write_backing(uintptr_t, const void*, uint64_t) { std::abort(); }
+int runtime_memory_region_backing(uintptr_t, uintptr_t*, uintptr_t*, int*, const unsigned char**) { std::abort(); }
 }
 

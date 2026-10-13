@@ -71,7 +71,7 @@ public:
     }
 
     /// Retrieves the stream buffer.
-    StreamBuffer& GetStreamBuffer() noexcept {
+    [[nodiscard]] StreamBuffer& GetStreamBuffer() noexcept {
         return stream_buffer;
     }
 
@@ -79,6 +79,8 @@ public:
     u32 GetSparsePageShift() const noexcept {
         return block_shift;
     }
+
+    void TickFrame();
 
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
@@ -102,9 +104,6 @@ public:
 
     /// Return true when a region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
-
-    /// Processes the fault buffer.
-    void ProcessFaultBuffer();
 
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
@@ -169,6 +168,7 @@ private:
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
+    bool fault_process_pending{};
 
     std::array<const Buffer*, MAX_ARENA_PAGES> address_space{};
     u64 arena_page_bits{MAX_ARENA_PAGE_BITS};

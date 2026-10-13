@@ -591,7 +591,7 @@ void PipelineCache::PublishShaders(bool wait) {
                 program->info_template = std::make_unique<Shader::Info>(program->info);
             }
             build->spec.info = &program->info;
-            RegisterShaderMeta(program->info, build->spec.fetch_shader_data, build->spec,
+            RegisterShaderMeta(program->info, Shader::Gcn::ToOptional(build->spec.fetch_shader_data), build->spec,
                                perm_hash, build->permutation);
             program->AddPermut(build->module, std::move(build->spec));
             build->module = nullptr;
@@ -1218,7 +1218,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         const size_t perm_idx = std::distance(program->modules.begin(), it);
         worker.stages.push_back(
             {program, params.hash, hw_stage, info.pgm_base, &info.flattened_ud_buf});
-        return std::make_tuple(&info, it->module, it->spec.fetch_shader_data,
+        return std::make_tuple(&info, it->module, Shader::Gcn::ToOptional(it->spec.fetch_shader_data),
                                HashCombine(params.hash, perm_idx));
     }
 
@@ -1253,7 +1253,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         auto spec = Shader::StageSpecialization(new_program->info, runtime_info, profile, start);
         const auto perm_hash = HashCombine(params.hash, 0);
 
-        RegisterShaderMeta(new_program->info, spec.fetch_shader_data, spec, perm_hash, 0);
+        RegisterShaderMeta(new_program->info, Shader::Gcn::ToOptional(spec.fetch_shader_data), spec,
+                           perm_hash, 0);
         new_program->AddPermut(module, std::move(spec));
         new_program->info_template = std::make_unique<Shader::Info>(new_program->info);
         Program* program = new_program.get();
@@ -1261,7 +1262,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             std::unique_lock lk{programs_mutex};
             program_cache.emplace(params.hash, std::move(new_program));
         }
-        return std::make_tuple(&program->info, module, program->modules[0].spec.fetch_shader_data,
+        return std::make_tuple(&program->info, module,
+                               Shader::Gcn::ToOptional(program->modules[0].spec.fetch_shader_data),
                                perm_hash);
     }
 
@@ -1310,7 +1312,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
         module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
 
-        RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
+        RegisterShaderMeta(info, Shader::Gcn::ToOptional(spec.fetch_shader_data), spec, perm_hash,
+                           perm_idx);
         std::unique_lock lk{programs_mutex};
         program->AddPermut(module, std::move(spec));
     } else {
@@ -1320,7 +1323,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         perm_hash = HashCombine(params.hash, perm_idx);
     }
     return std::make_tuple(&program->info, module,
-                           program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
+                           Shader::Gcn::ToOptional(program->modules[perm_idx].spec.fetch_shader_data),
+                           perm_hash);
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,

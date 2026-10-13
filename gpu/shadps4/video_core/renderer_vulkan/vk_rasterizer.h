@@ -38,6 +38,10 @@ public:
                         AmdGpu::Liverpool* liverpool);
     ~Rasterizer();
 
+    [[nodiscard]] Scheduler& GetScheduler() noexcept {
+        return scheduler;
+    }
+
     [[nodiscard]] Runtime& GetRuntime() noexcept {
         return runtime;
     }
@@ -143,7 +147,6 @@ public:
     /// A guest write hit a protected page.
     bool OnWriteFault(VAddr addr, bool assume_locks);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
-    void ProcessDownloadImages();
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
     void RegisterMemory(VAddr addr, u64 size);
@@ -152,6 +155,9 @@ public:
     u64 Flush();
     void Finish();
     void OnSubmit();
+    void OnFence();
+    /// gow3: drains the draw pipe, then the texture cache's pending downloads.
+    void ProcessDownloadImages();
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;
@@ -472,7 +478,6 @@ private:
     u64 helper_full = 0, helper_partial = 0, helper_serial = 0;
     /// The memoized cache entry of each image binding (FindImage memo taken), else null.
     boost::container::static_vector<ImageDescCacheEntry*, Shader::NUM_IMAGES> image_binding_entries;
-    bool fault_process_pending{};
     bool attachment_feedback_loop{};
     bool needs_barrier{};
     // gow3: two-stage draw pipeline (stage B state; the thread is the last member so it

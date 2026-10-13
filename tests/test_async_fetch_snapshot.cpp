@@ -10,9 +10,9 @@ extern "C" { uint32_t runtime_disabled_optimizations = 0; }
 void assert_fail_impl() { std::abort(); }
 [[noreturn]] void unreachable_impl() { std::abort(); }
 namespace Common::Log {
-bool ShouldLog(Level) { return false; }
-void Write(std::string_view, Level, const char*, int, const char*, std::string&&) {}
-}
+std::array<Level, NUM_LOG_CLASSES> g_class_levels{};
+void VLog(Class, Level, const char*, int, const char*, fmt::string_view, fmt::format_args) {}
+} // namespace Common::Log
 
 int main() {
     using namespace Shader::Gcn;

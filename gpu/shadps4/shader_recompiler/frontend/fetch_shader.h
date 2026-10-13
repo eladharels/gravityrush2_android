@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <vector>
+#include "common/small_vector.h"
 #include "common/types.h"
 #include "shader_recompiler/info.h"
 
@@ -22,15 +23,14 @@ struct VertexAttribute {
         Plain = 3,
     };
 
-    u8 semantic;      ///< Semantic index of the attribute
     u8 dest_vgpr;     ///< Destination VGPR to load first component.
     u8 num_elements;  ///< Number of components to load
     u8 sgpr_base;     ///< SGPR that contains the pointer to the list of vertex V#
     u8 dword_offset;  ///< The dword offset of the V# that describes this attribute.
     u8 instance_data; ///< Indicates that the buffer will be accessed in instance rate
     u8 inst_offset;   ///< Instruction offset applied on the formatted buffer loads
-    u8 data_format{}; ///< Data format override when typed buffer loads are used
-    u8 num_format{};  ///< Number format override when typed buffer loads are used
+    u8 data_format;   ///< Data format override when typed buffer loads are used
+    u8 num_format;    ///< Number format override when typed buffer loads are used
 
     InstanceIdType GetStepRate() const {
         return static_cast<InstanceIdType>(instance_data);
@@ -38,22 +38,22 @@ struct VertexAttribute {
 
     AmdGpu::Buffer GetSharp(const Shader::Info& info) const noexcept;
 
-    bool operator==(const VertexAttribute& other) const {
-        return semantic == other.semantic && dest_vgpr == other.dest_vgpr &&
-               num_elements == other.num_elements && sgpr_base == other.sgpr_base &&
-               dword_offset == other.dword_offset && instance_data == other.instance_data;
-    }
+    bool operator==(const VertexAttribute& other) const = default;
 };
 
 struct FetchShaderData {
     u32 size = 0;
-    std::vector<VertexAttribute> attributes;
+    SmallVector<VertexAttribute, 8> attributes;
     s8 vertex_offset_sgpr = -1;   ///< SGPR of vertex offset from VADDR
     s8 instance_offset_sgpr = -1; ///< SGPR of instance offset from VADDR
 
     bool operator==(const FetchShaderData& other) const {
         return attributes == other.attributes && vertex_offset_sgpr == other.vertex_offset_sgpr &&
                instance_offset_sgpr == other.instance_offset_sgpr;
+    }
+
+    bool Empty() const {
+        return size == 0;
     }
 
     void Serialize(Serialization::Archive& ar) const;
@@ -78,6 +78,17 @@ private:
 
 const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base);
 
+bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data);
+
+/// gow3: the same as an optional (the pipeline selection keeps the fetch shader that way).
 std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info);
+
+/// gow3: an empty fetch shader (a stage without one) as a disengaged optional.
+inline std::optional<FetchShaderData> ToOptional(const FetchShaderData& data) {
+    if (data.Empty()) {
+        return std::nullopt;
+    }
+    return data;
+}
 
 } // namespace Shader::Gcn

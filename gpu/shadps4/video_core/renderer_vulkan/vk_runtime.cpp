@@ -21,10 +21,10 @@ static vk::ImageType ConvertImageType(AmdGpu::ImageType type) noexcept {
     switch (type) {
     case AmdGpu::ImageType::Color1D:
     case AmdGpu::ImageType::Color1DArray:
-        return vk::ImageType::e1D;
     case AmdGpu::ImageType::Color2D:
     case AmdGpu::ImageType::Color2DMsaa:
     case AmdGpu::ImageType::Color2DArray:
+    case AmdGpu::ImageType::Cube:
         return vk::ImageType::e2D;
     case AmdGpu::ImageType::Color3D:
         return vk::ImageType::e3D;
@@ -786,24 +786,21 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
 
 bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
                                bool check_read_access) {
-    const AddressRange range = {
-        .resource = reinterpret_cast<u64>(handle),
-        .range_start = offset,
-        .range_end = offset + size - 1,
-    };
-    bool has_access = barrier_tracker.FindRange(range, Access::Write);
+    MakeCurrent(handle);
+    bool has_access = resource->write_ranges.Overlaps(offset, offset + size);
     if (check_read_access && !has_access) {
-        has_access |= barrier_tracker.FindRange(range, Access::Read);
+        has_access |= resource->read_ranges.Overlaps(offset, offset + size);
     }
     return has_access;
 }
 
 void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
                            vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access) {
-    AddressRange range = {
-        .resource = reinterpret_cast<u64>(handle),
-        .range_start = offset,
-        .range_end = offset + size - 1,
+    MakeCurrent(handle);
+
+    Interval range = {
+        .start = offset,
+        .end = offset + size,
     };
 
     constexpr static vk::AccessFlags2 READ_MASK =
@@ -823,31 +820,31 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
     // insert returns early instead of growing the tree until the next barrier flush.
     // Wider read ranges only add barriers, never drop one.
     if (!(src_access & WRITE_MASK) && !Gow3Toggle::Disabled(Gow3Toggle::CoarseReadTracking)) {
-        range.range_start &= ~u64{0xFFF};
-        range.range_end |= 0xFFF;
+        range.start &= ~u64{0xFFF};
+        range.end = (range.end + 0xFFF) & ~u64{0xFFF};
     }
-    const auto insert = [&](Access access) {
+    const auto insert = [&](bool write) {
+        auto& ranges = write ? resource->write_ranges : resource->read_ranges;
         if (Gow3Toggle::Disabled(Gow3Toggle::AccessMemo)) {
-            barrier_tracker.InsertRange(range, access);
+            ranges.Add(range);
             return;
         }
-        u64 hash = range.resource ^ range.range_start * 0x9E3779B97F4A7C15ull ^
-                   range.range_end << 13 ^ u64(access) << 61;
+        const u64 id = reinterpret_cast<u64>(handle);
+        u64 hash = id ^ range.start * 0x9E3779B97F4A7C15ull ^ range.end << 13 ^ u64(write) << 61;
         hash = (hash ^ hash >> 31) * 0xFF51AFD7ED558CCDull;
         auto& memo = access_memo[(hash ^ hash >> 29) % access_memo.size()];
-        if (memo.epoch == access_epoch && memo.resource == range.resource &&
-            memo.start == range.range_start && memo.end == range.range_end &&
-            memo.access == u32(access)) {
+        if (memo.epoch == access_epoch && memo.resource == id && memo.start == range.start &&
+            memo.end == range.end && memo.access == u32(write)) {
             return;
         }
-        barrier_tracker.InsertRange(range, access);
-        memo = {range.resource, range.range_start, range.range_end, access_epoch, u32(access)};
+        ranges.Add(range);
+        memo = {id, range.start, range.end, access_epoch, u32(write)};
     };
     if (src_access & WRITE_MASK) {
-        insert(Access::Write);
+        insert(true);
     }
     if (src_access & READ_MASK) {
-        insert(Access::Read);
+        insert(false);
     }
 
     memory_barrier.srcStageMask |= src_stage;
@@ -888,8 +885,25 @@ void Runtime::FlushBarriers() {
     memory_barrier.srcAccessMask = vk::AccessFlagBits2::eNone;
 
     image_barriers.clear();
-    barrier_tracker.Clear();
+    for (auto& resource : resources) {
+        resource.read_ranges.Clear();
+        resource.write_ranges.Clear();
+    }
+    resources.clear();
+    resource = nullptr;
     ++access_epoch;
+}
+
+void Runtime::MakeCurrent(const VideoCore::Buffer* handle) {
+    if (resource && resource->handle == handle) {
+        return;
+    }
+    auto it = std::ranges::find(resources, handle, &BufferBarriers::handle);
+    if (it != resources.end()) {
+        resource = std::addressof(*it);
+        return;
+    }
+    resource = &resources.emplace_back(handle);
 }
 
 } // namespace Vulkan

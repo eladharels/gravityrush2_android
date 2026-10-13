@@ -32,9 +32,9 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 7u; // gow3: interpolated integer fix (Pascal)
-static constexpr u32 ShaderMetaVersion = 7u; // gow3: ImageResource::needs_native
-static constexpr u32 PipelineKeyVersion = 5u; // gow3: Info layout (ImageResource::needs_native)
+static constexpr u32 ShaderBinaryVersion = 8u; // uc3: shadPS4 0.19.0 core (upstream: 6)
+static constexpr u32 ShaderMetaVersion = 8u;   // uc3: shadPS4 0.19.0 core (upstream: 6)
+static constexpr u32 PipelineKeyVersion = 6u;  // uc3: shadPS4 0.19.0 core (upstream: 3)
 } // namespace Serialization
 
 namespace Vulkan {
@@ -648,7 +648,7 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
         return false;
     }
 
-    fetch_shader_data = spec.fetch_shader_data;
+    fetch_shader_data = Shader::Gcn::ToOptional(spec.fetch_shader_data);
     return true;
 }
 
@@ -1427,9 +1427,9 @@ void StageSpecialization::Serialize(Serialization::Archive& ar) const {
 
     spec.Write(bitset.to_string());
 
-    if (fetch_shader_data) {
-        spec.Write(sizeof(*fetch_shader_data));
-        fetch_shader_data->Serialize(ar);
+    if (!fetch_shader_data.Empty()) {
+        spec.Write(sizeof(fetch_shader_data));
+        fetch_shader_data.Serialize(ar);
     } else {
         spec.Write(size_t{0});
     }

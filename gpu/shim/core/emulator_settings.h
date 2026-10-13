@@ -57,6 +57,11 @@ public:
     bool IsPatchShaders() { return false; }
     bool IsPipelineCacheArchived() { return false; }
     bool IsPipelineCacheEnabled() { static const auto value = Flag("GOW3_PIPELINE_CACHE", true); return value; }
+    // uc3: shadPS4 0.19.0 debugging option (fetch shader translated inline); off.
+    bool IsInlineFetchShader() const {
+        return false;
+    }
+
     bool IsReadbackLinearImagesEnabled() { static const auto value = Flag("GOW3_READBACK_LINEAR", false); return value; }
     bool IsRenderdocEnabled() { return false; }
     bool IsShaderCollect() { return false; }

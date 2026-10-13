@@ -8,6 +8,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/assert.h"
+#include "common/path_util.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -468,17 +469,18 @@ void GraphicsPipeline::GetVertexInputs(
         return;
     }
     const auto& vs_info = GetStage(Shader::SwStage::Vertex);
-    for (const auto& attrib : fetch_shader->attributes) {
+    for (u32 semantic = 0; semantic < fetch_shader->attributes.size(); ++semantic) {
+        const auto& attrib = fetch_shader->attributes[semantic];
         const auto step_rate = attrib.GetStepRate();
         const auto buffer = attrib.GetSharp(vs_info);
         attributes.push_back(Attribute{
-            .location = attrib.semantic,
-            .binding = attrib.semantic,
+            .location = semantic,
+            .binding = semantic,
             .format = LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt()),
             .offset = 0,
         });
         bindings.push_back(Binding{
-            .binding = attrib.semantic,
+            .binding = semantic,
             .stride = buffer.GetStride(),
             .inputRate = step_rate == InstanceIdType::None ? vk::VertexInputRate::eVertex
                                                            : vk::VertexInputRate::eInstance,
@@ -490,7 +492,7 @@ void GraphicsPipeline::GetVertexInputs(
             bindings.back().divisor = divisor;
         } else if (step_rate != InstanceIdType::None) {
             divisors.push_back(vk::VertexInputBindingDivisorDescriptionEXT{
-                .binding = attrib.semantic,
+                .binding = semantic,
                 .divisor = divisor,
             });
         }

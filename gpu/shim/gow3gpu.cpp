@@ -133,8 +133,8 @@ static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
         source += n; dest += n; size -= n;
     }
 }
-// Not from under the memory tracker's region lock (ForEachUploadRange holds it while the
-// upload callback runs): the readback takes that lock again, and on the GPU command thread
+// Not from under a memory tracker region lock (ForEachUploadRange takes one per region while
+// it collects the ranges): the readback takes that lock again, and on the GPU command thread
 // it first drains the draw pipe, whose thread may be waiting for the same lock.
 void MemoryManager::ResolveHostCopy(VAddr source, u64 size) {
     if (PreciseReadbacks() && rasterizer && rasterizer->IsGpuSideThread() &&
