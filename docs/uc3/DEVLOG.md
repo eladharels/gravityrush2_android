@@ -4,6 +4,64 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — Revisão do código do port: 9 achados, todos corrigidos (`5d6561b`)
+
+(As duas entradas abaixo, datadas de 14 e 15/10, também são de 13/10: os commits mostram a data.)
+
+Revisão dos 23 commits da branch `uc3` em relação ao GoW3 (`windows-v2.1.7`), com foco em
+erros reais. As fibras, o LoadExec (mesma semântica de `argv` do shadPS4) e o analisador de
+quadros passaram sem achados. O que foi corrigido:
+
+### Correção (comportamento)
+1. **Modo preciso lia dados velhos** (`gow3gpu.cpp`, `buffer_cache.cpp`). A correção do impasse
+   (`3305573`) fazia as threads de cópia lerem pela visão física as páginas protegidas contra
+   leitura, mas elas estão protegidas justamente porque **a GPU tem dados mais novos**; o
+   shadPS4 faz o *readback* na falha, antes de copiar. Agora `MemoryManager::ResolveHostCopy`
+   traz os dados da GPU para a memória do jogo **na thread da GPU, antes de despachar a cópia**
+   (`SmallGuestCopy`, grupos do `UploadCopies`, pedaços do `ObtainBufferForImage` e toda
+   `CopySparseMemory` feita na thread da GPU), e a cópia lê pela visão física só para atravessar
+   uma proteção ganha depois disso (o conteúdo da CPU é o certo nesse ponto do fluxo de
+   comandos). Candidato forte para a assertiva `m_gfxEopTick` do modo preciso: **testar**.
+2. **Aviso de desmapeamento antes de o mapeamento falhar** (`place()`): o `HOOK_UNMAP` do
+   mapeamento substituído era enfileirado antes do `host_map`; se ele falhasse, a GPU perdia o
+   rastreamento de um mapeamento ainda vivo. Agora é enfileirado depois do `host_map` bem-sucedido.
+3. **Videodec2 tratava `EAGAIN` como erro**: uma unidade de acesso que gera duas imagens deixava
+   a segunda presa no decodificador e o `avcodec_send_packet` seguinte devolvia `EAGAIN` →
+   `0x811D0100` e a cutscene parava. Agora as imagens pendentes são postas de lado (`set_aside`,
+   fila de 8) e saem uma por chamada, na ordem.
+4. **Argumentos do LoadExec com espaços** se partiam na ida e volta por `GOW3_GUEST_ARGS`. Agora
+   cada argumento vai numa variável (`GOW3_GUEST_ARG_COUNT`, `GOW3_GUEST_ARG_<i>`);
+   `GOW3_GUEST_ARGS` (separado por espaços) continua valendo para uso manual.
+
+### Arquitetura e limpeza
+5. **`sceKernelDlsym` só achava símbolos das tabelas de importação.** Agora o NID é calculado do
+   nome (`runtime_nid`: SHA-1 do nome + sal do SDK, 8 bytes invertidos, base64 com `-`), como
+   o `nid_names.py`, e tentado em cada biblioteca que as tabelas mencionam; conferido contra o
+   Python em 7 nomes (inclusive um que ocupa dois blocos do SHA-1).
+6. **IDs do GoW3 duplicados** entre `probe.c` e `patches.py`: o loader ganhou `--game-hooks`, que
+   o `run.py` passa quando o jogo tem perfil de patches (só o GoW3 tem). A lista em C saiu.
+7. **Teste do gerenciador de memória** (`tests/test_memory.c`, alvo `memory-test`, Windows e
+   Linux): divisão de mapeamento flexível por `mprotect` parcial (cada metade com as próprias
+   páginas físicas; liberar uma não zera a outra), mapa fixo sobre memória mapeada (a GPU recebe
+   `unmap` e depois `map`) e a leitura pela visão física. Com a linha antiga do `split_at`, o
+   teste falha em 3 pontos. Precisa do `--disable-high-entropy-va`, como o loader.
+8. **Videodec2 alocava um frame NV12 por imagem** (o decodificador por software entrega
+   YUV 4:2:0 planar, então toda imagem passava pelo swscale + `av_frame_get_buffer`). Agora o
+   croma é intercalado direto na cópia para o buffer do jogo; o swscale fica só para outros
+   formatos, com o frame de destino reaproveitado.
+9. **Busca dupla de VMA na cópia do modo preciso**: `runtime_memory_region_backing` devolve a
+   região e o ponteiro da visão física numa só consulta (o cache por thread guarda o `phys`).
+   `runtime_memory_read_backing` saiu.
+
+Testes: `memory-test`, `videodec2-test` e `fiber-test` OK no Windows; `memory-test` e
+`fiber-test` OK no Linux (WSL). Build completo OK.
+
+### Onde parou
+O cenário sumido continua. Próximo passo: rodar `-Set GOW3_READBACKS=2` de novo com a
+correção 1 e ver se o modo preciso passa da tela de título (e se o cenário aparece).
+
+---
+
 ## 2026-10-15 — Cenário: argumentos indiretos descartados, memória do runtime, modo preciso
 
 O cenário **continua sumido** no modo normal depois de tudo abaixo (testado pelo usuário).
