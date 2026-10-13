@@ -4,6 +4,30 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — O Castelo (27%): port, shadPS4 0.19.0 e nightly no mesmo nível; readback preciso custa pouco aqui (`ad17165`)
+
+Checkpoint `SAVEDATA038` ("O Castelo", combate), mesma cena nas quatro execuções:
+
+| Execução | FPS |
+|---|---|
+| Port, nightly `23c4133`, modo **preciso** | 18–20 (jogador: 22–24 na 0.19.0) |
+| Port, modo **relaxado** (`GOW3_READBACKS=1`, cenário/texturas somem) | 20–24 |
+| shadPS4 nightly (executável 1.02 direto) | ~20 (jogador: "quase o mesmo do port") |
+| shadPS4 0.19.0 | 20 no print, ~18 de média segundo o jogador |
+
+Conclusões: (1) nessa região o próprio shadPS4 roda a 18–20 FPS, então o limite é a emulação
+da cena (espera pela GPU de ~30 ms por quadro com a GPU a 68 %: muitas submissões e
+sincronizações, 145 por quadro), não o port; (2) o readback preciso custa só 2–4 FPS aqui, ao
+contrário do museu/ruas, onde as falhas de leitura dominavam. O custo do readback varia por
+cena: vale medir sempre nos dois modos antes de atacar.
+
+Lateral: a nightly do shadPS4 não abre o jogo pelo `eboot.bin` (a normalização nova de caminhos,
+#5332, apaga o `..` de `/app0/../CUSA02344-UPDATE/`); contorno:
+`shadPS4.exe -g <jogo>\big3-ps4_Shipping.elf -- eboot.bin ispartofuccollection` (o overlay de
+update resolve o ELF 1.02). O log do port passa a dizer o modo de readback na inicialização.
+
+---
+
 ## 2026-10-13 — Nightly `23c4133` do shadPS4 fundida; crash da captura F11; sessão de 2 h na 0.19.0 (`e90e5fd`)
 
 ### Sessão do jogador na 0.19.0 (`c8b0bf7`)
