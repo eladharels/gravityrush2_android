@@ -87,6 +87,9 @@ inline std::atomic<std::uint64_t> buffer_upload_bytes{0};
 inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command thread
 inline std::atomic<unsigned long> gpu_thread_id{0}; ///< Windows thread id of the GPU command thread
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
+/// uc3: draws left out because no pipeline came back (any reason), direct and indirect, and
+/// indirect draws seen (GOW3_FRAME_STATS).
+inline std::atomic<std::uint64_t> uc3_no_pipeline_draws{0}, uc3_no_pipeline_indirect{0}, uc3_indirect_draws{0};
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).

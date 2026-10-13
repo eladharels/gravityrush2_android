@@ -479,6 +479,15 @@ void VideoOutDriver::Flip(const Request& req) {
             const double snapshot_ms = Vulkan::g_gow3_snapshot_ns.exchange(0) / 1e6;
             const double guest_wait_ms = Vulkan::g_gow3_guest_wait_ns.exchange(0) / 1e6;
             const u32 pending_draws = Vulkan::g_gow3_pending_draws.exchange(0);
+            static u64 uc3_window_draws = 0;
+            // uc3: draws left out for want of a pipeline (pending compiles included).
+            std::printf("uc3 draw stats: %llu draws, %llu without pipeline (%u of them pending "
+                        "compiles), %llu indirect, %llu indirect without pipeline\n",
+                        (unsigned long long)(Gow3Stats::draws.load() - uc3_window_draws),
+                        (unsigned long long)Gow3Stats::uc3_no_pipeline_draws.exchange(0), pending_draws,
+                        (unsigned long long)Gow3Stats::uc3_indirect_draws.exchange(0),
+                        (unsigned long long)Gow3Stats::uc3_no_pipeline_indirect.exchange(0));
+            uc3_window_draws = Gow3Stats::draws.load();
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);
             const u64 faults = Gow3Stats::tracker_faults.exchange(0);
             // GPU command thread CPU time per draw: comparable between builds even when the scene

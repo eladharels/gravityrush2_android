@@ -226,6 +226,16 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     display = display && targets.size() == 1;
     const bool new_pass = !(pass_open && !entries.empty() && !entries.back().compute &&
                             entries.back().colors == targets);
+    // uc3: Uncharted 3 renders its scene into other targets and only composites into a display
+    // buffer at the end, so waiting for a display pass to start missed the whole scene. Once
+    // armed (at a flip), recording starts at the next pass and ends at the next display pass.
+    if (!display && new_pass && state.load(std::memory_order_relaxed) == Armed) {
+        entries.clear();
+        pending_sampled.clear();
+        pending_buffers.clear();
+        pass_open = false;
+        state.store(Recording, std::memory_order_release);
+    }
     if (display && new_pass) {
         if (state.load(std::memory_order_relaxed) == Recording) {
             Write(last_presented.load(std::memory_order_relaxed));
@@ -291,6 +301,11 @@ void FrameCapture::Buffer(u64 stage_hash, u32 slot, VAddr address, const void* d
     const u64 bytes = std::min<u64>(size, 1024) & ~u64(3);
     std::string out = std::format("  buffer stage {:016x} slot {} at {:#x} size {}:", stage_hash,
                                   slot, address, size);
+    if (!data) {
+        // uc3: Uncharted 3 binds buffers with no CPU-visible contents here; listing them faulted.
+        pending_buffers.push_back(out + " (no CPU copy)");
+        return;
+    }
     const auto* words = static_cast<const float*>(data);
     for (u64 i = 0; i < bytes / 4; ++i) {
         if (i % 8 == 0) {

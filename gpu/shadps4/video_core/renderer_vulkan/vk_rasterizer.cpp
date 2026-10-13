@@ -938,6 +938,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
                          prepared->reg_checksum == liverpool->gfx_reg_checksum);
     }
     if (!pipeline) {
+        Gow3Stats::uc3_no_pipeline_draws.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     if (pipelined && FilterDrawPasses()) {
@@ -1174,8 +1175,15 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         .vertex_sgpr_offset = vertex_sgpr_offset,
         .instance_sgpr_offset = instance_sgpr_offset,
     };
+    Gow3Stats::uc3_indirect_draws.fetch_add(1, std::memory_order_relaxed);
+    if (FrameCapture::Active()) {
+        // uc3: bring the GPU-written arguments back into guest memory (the GPU thread waits
+        // for the work before them), so the frame analyzer shows what the draw will use.
+        ReadMemory(arg_address + offset, 20, true);
+    }
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params);
     if (!pipeline) {
+        Gow3Stats::uc3_no_pipeline_indirect.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     const IndirectDraw indirect = {arg_address + offset, count_address, stride, max_count};
@@ -1192,6 +1200,10 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         FrameCapture::Poll();
         scheduler.PopPendingOperations();
     }
+    // uc3: who last modified the arguments, before this draw syncs them (frame analyzer).
+    const bool capture_args = FrameCapture::Active();
+    const bool args_cpu_modified = capture_args && buffer_cache.IsRegionCpuModified(indirect.args, 20);
+    const bool args_gpu_modified = capture_args && buffer_cache.IsRegionGpuModified(indirect.args, 20);
     const VAddr count_address = indirect.count;
     const u32 stride = indirect.stride;
     const u32 max_count = indirect.max_count;
@@ -1244,6 +1256,22 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
     scheduler.BeginRendering(state);
+    if (FrameCapture::Active()) {
+        // uc3: indirect draws in the frame analyzer (args written by the GPU or the CPU).
+        const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        FrameCapture::Draw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash, ps ? ps->pgm_hash : 0, 0, 0);
+        // The first argument record as guest memory holds it now (CPU view; a GPU-written value
+        // shows only after a readback).
+        u32 a[5] = {};
+        std::memcpy(a, reinterpret_cast<const void*>(indirect.args), sizeof(a));
+        char note[240];
+        std::snprintf(note, sizeof(note),
+                      "\n  indirect%s args %#llx stride %u max %u count %#llx; guest memory: %u %u %u %d %u; cpu modified %d, gpu modified %d",
+                      is_indexed ? " indexed" : "", (unsigned long long)indirect.args, stride, max_count,
+                      (unsigned long long)count_address, a[0], a[1], a[2], s32(a[3]), a[4],
+                      int(args_cpu_modified), int(args_gpu_modified));
+        FrameCapture::Note(note);
+    }
 
     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
                                  : sizeof(VkDrawIndirectCommand)));
@@ -1395,6 +1423,16 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
         cmdbuf.dispatchIndirect(args, args_offset);
     });
+    if (FrameCapture::Active()) {
+        // uc3: indirect dispatches in the frame analyzer, with the group counts guest memory
+        // holds now (GPU-written ones show only after a readback).
+        u32 g[3] = {};
+        std::memcpy(g, reinterpret_cast<const void*>(address), sizeof(g));
+        FrameCapture::Dispatch(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash, g[0], g[1], g[2]);
+        char note[128];
+        std::snprintf(note, sizeof(note), "\n  indirect dispatch args %#llx", (unsigned long long)address);
+        FrameCapture::Note(note);
+    }
     DebugState.IncDispatch();
 
     ResetBindings(true);
