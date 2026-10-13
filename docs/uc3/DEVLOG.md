@@ -4,6 +4,52 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — Dump do jogo extraído
+
+### O pacote
+- `D:\Uncharted\CUSA02344\CUSA02344.pkg` (40,55 GB), backup da cópia do usuário.
+- `EP9000-CUSA02344_00-UNCHARTEDTRILOGY`: *Nathan Drake Collection* europeia, **versão 01.00**
+  (jogo base, sem a atualização 1.02), SDK 2.508. É o mesmo ID do relato *Ingame* no shadPS4 0.19.0.
+
+### Extração
+- Ferramenta: **PkgTool 0.2.231** do [LibOrbisPkg](https://github.com/maxton/LibOrbisPkg)
+  (LGPL, código aberto), em `tools/pkgtool`.
+- `pkg_extract --passcode 00000000000000000000000000000000` → 58,6 GB, 15.146 arquivos.
+- O `pkg_extract` **não** grava os metadados do `sce_sys` (`param.sfo`, ícones, playgo,
+  troféus): eles são entradas do pacote. Extraídos um a um com `pkg_extractentry` (IDs 11–29 do
+  `pkg_listentries`).
+- Armadilha: em PowerShell, um `[ordered]@{}` com chaves inteiras é indexado **por posição**;
+  os nomes saíram trocados na primeira tentativa. Use uma lista de pares.
+- Pasta final: **`D:\Uncharted\CUSA02344\app0`** (nome do PS4 para a pasta do jogo).
+
+### Estrutura do jogo — descoberta importante
+```
+app0\
+├── eboot.bin                 10,6 MB  menu da coletânea (e talvez o Uncharted 1)
+├── big2-ps4_Shipping.elf     16,4 MB  Uncharted 2
+├── big3-ps4_Shipping.elf     22,9 MB  Uncharted 3   ← o nosso alvo
+├── sce_module\ libc.prx, libSceFios2.prx
+├── u1data\ u2data\ u3data\ shareddata\
+└── sce_sys\
+```
+"big" é o codinome da série na Naughty Dog. Cada jogo da coletânea tem **o seu próprio
+executável**, e o `eboot.bin` provavelmente lança os outros (algo como
+`sceSystemServiceLoadExec`). Isso explica o relato antigo do shadPS4 em que "o Uncharted 3 não
+abria", mesmo com o 1 e o 2 funcionando. Para o port, a ideia é **carregar o `big3` direto**.
+
+Os três executáveis são *fake SELF* sem criptografia nem compressão (flags dos segmentos com
+`0x800` e sem `0x2`/`0x8`), o formato que o `prepare.py` aceita.
+
+### Validação
+`prepare.py` no `eboot.bin`: 429 importações, 19.243 realocações, 52 módulos requisitados,
+`_init_env` da libc verificado. O dump está bom.
+
+### Próximos passos (fase 2)
+1. Ensinar o `prepare.py`/`link_modules.py` a usar outro executável além do `eboot.bin`
+   (o `big3-ps4_Shipping.elf`).
+2. `--check-imports` no `big3` para listar o que falta no runtime.
+3. Descobrir como o `eboot.bin` lança o `big3` (argumentos, parâmetros) para reproduzir isso.
+
 ## 2026-10-13 — WSL (Ubuntu) como ambiente de apoio
 
 ### Por quê

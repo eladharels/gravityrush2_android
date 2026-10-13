@@ -68,6 +68,8 @@ estão (veja o DEVLOG, 2026-10-12).
 ```
 D:\Uncharted\
 ├── uc3_pc\              ← este repositório (branch uc3)
+├── CUSA02344\app0\      ← o jogo extraído (fora do git); o Uncharted 3 é big3-ps4_Shipping.elf
+├── tools\pkgtool\       ← PkgTool (LibOrbisPkg), extrai o .pkg
 ├── ref\gow3_pc\         ← port do GoW3 original, só referência
 ├── ref\bloodborne_pc\   ← port do Bloodborne (Windows), só referência
 └── tools\shadps4\       ← shadPS4 0.19.0, para comparar o comportamento do jogo
