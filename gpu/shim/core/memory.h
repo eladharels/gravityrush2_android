@@ -18,6 +18,9 @@ public:
     }
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
     void CopySparseMemory(VAddr source, u8* dest, u64 size);
+    /// uc3: before guest memory is copied on a copy thread (precise readbacks): GPU-modified
+    /// data in the range comes back to guest memory first, on the GPU thread.
+    void ResolveHostCopy(VAddr source, u64 size);
     bool TryWriteBacking(void* address, const void* data, u64 size);
     /// CPU wrote guest memory outside page tracking (e.g. decoded video frames).
     void InvalidateMemory(VAddr address, u64 size);

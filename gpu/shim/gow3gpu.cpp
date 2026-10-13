@@ -37,9 +37,10 @@ extern "C" {
 // runtime_memory.c
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t size);
-int runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size);
 int runtime_memory_region(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped);
+int runtime_memory_region_backing(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped,
+                                  const unsigned char** backing);
 void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
 typedef void (*RuntimeGpuRange)(uintptr_t address, uint64_t size);
 // runtime_kernel.c: one clock for guest and GPU timestamps
@@ -107,24 +108,38 @@ void MemoryManager::InvalidateMemory(VAddr address, u64 size) {
 u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
     return runtime_memory_clamp(virtual_addr, size);
 }
+// uc3: precise readbacks read-protect GPU-modified pages, and a fault on a copy thread waited
+// for the GPU thread, which waited for the copies. ResolveHostCopy brings the GPU's data back
+// first (as the fault would have, upstream); the copy itself then reads through the backing
+// view, past a protection a page may have gained since (its CPU contents are what the copy
+// is meant to carry at this point of the command stream).
+static bool PreciseReadbacks() {
+    static const bool precise = EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise;
+    return precise;
+}
 static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
+    const bool precise = PreciseReadbacks();
     while (size) {
         uintptr_t start = 0, end = 0;
         int mapped = 0;
-        if (!runtime_memory_region(source, &start, &end, &mapped)) {
+        const unsigned char* backing = nullptr;
+        if (!runtime_memory_region_backing(source, &start, &end, &mapped, precise ? &backing : nullptr)) {
             end = source + size;
         }
         const u64 n = std::min<u64>(size, end - source);
-        // uc3: precise readbacks read-protect GPU-modified pages; the copy threads read past them
-        // (a fault there waited for the GPU thread, which waited for the copies).
-        static const bool precise = EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise;
         if (!mapped) std::memset(dest, 0, n);
-        else if (!precise || !runtime_memory_read_backing(source, dest, n))
-            std::memcpy(dest, reinterpret_cast<const void*>(source), n);
+        else if (backing) std::memcpy(dest, backing, n);
+        else std::memcpy(dest, reinterpret_cast<const void*>(source), n);
         source += n; dest += n; size -= n;
     }
 }
+void MemoryManager::ResolveHostCopy(VAddr source, u64 size) {
+    if (PreciseReadbacks() && rasterizer && rasterizer->IsGpuSideThread()) {
+        rasterizer->ReadMemory(source, size, true);
+    }
+}
 void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
+    ResolveHostCopy(source, size); // a copy made on the GPU thread (or split from it below)
     // gow3: large uploads (streaming) are split across the copy threads.
     constexpr u64 Chunk = 512 * 1024;
     if (size < 4 * Chunk || !Gow3Copy::Enabled()) {

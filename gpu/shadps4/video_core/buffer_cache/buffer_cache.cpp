@@ -127,6 +127,7 @@ void BufferCache::RunGuestCopy(const Gow3Copy::Item& item) {
 // Small guest copies run on the recording thread (it spins for work: no wakeup, and it is
 // idle most of the time); PoolSmallCopies (toggle 524288) batches them for the copy threads.
 void BufferCache::SmallGuestCopy(const Gow3Copy::Item& item) {
+    memory->ResolveHostCopy(item.source, item.size); // uc3: before it leaves this thread
     if (scheduler.IsRecordingDeferred() && !Gow3Toggle::Disabled(Gow3Toggle::PoolSmallCopies)) {
         scheduler.RecordHostCopy([item] { item.run(item); });
         return;
@@ -361,6 +362,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
         // the upload reads the staging only after submission, which waits for the copies.
         constexpr u64 Chunk = 1_MB;
         for (u64 offset = 0; offset < staging.size; offset += Chunk) {
+            memory->ResolveHostCopy(device_addr + offset, std::min(Chunk, staging.size - offset));
             const Gow3Copy::Item item{
                 .run = &RunGuestCopy,
                 .context = this,
@@ -584,6 +586,7 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
             });
         };
         for (auto& copy : copies) {
+            memory->ResolveHostCopy(copy.dstOffset, copy.size); // uc3: before it leaves this thread
             group->push_back({copy.dstOffset, staging.mapped + copy.srcOffset, copy.size});
             group_bytes += copy.size;
             copy.srcOffset += staging.offset;

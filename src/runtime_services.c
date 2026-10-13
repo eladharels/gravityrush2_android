@@ -576,10 +576,11 @@ static void set_env(const char *name, const char *value) {
 #endif
 }
 static ABI int32_t system_load_exec(const char *path,char *const *argv) {
-    char args[512]="";
-    for (int i=0;argv && argv[i] && i<16;++i)
-        snprintf(args+strlen(args),sizeof(args)-strlen(args),"%s%s",i ? " " : "",argv[i]);
-    printf("Runtime: SystemService LoadExec %s [%s]\n",path ? path : "(null)",args);
+    int count=0;
+    while (argv && argv[count] && count<16) ++count;
+    printf("Runtime: SystemService LoadExec %s [",path ? path : "(null)");
+    for (int i=0;i<count;++i) printf("%s\"%s\"",i ? " " : "",argv[i]);
+    printf("]\n");
     const char *name=path && !strncmp(path,"/app0/",6) ? path+6 : NULL;
     char host[1024];
     if (!name || !*name || strchr(name,'/') || strchr(name,'\\') || runtime_file_translate(path,host,sizeof(host))) {
@@ -590,7 +591,11 @@ static ABI int32_t system_load_exec(const char *path,char *const *argv) {
     if (!f) { printf("Runtime: LoadExec target %s not found\n",path); return SYSTEM_PARAMETER; }
     fclose(f);
     set_env("GOW3_EXECUTABLE",name);
-    set_env("GOW3_GUEST_ARGS",args);
+    /* One variable per argument (an argument may hold spaces); runtime_guest_args reads them. */
+    char value[32];
+    snprintf(value,sizeof(value),"%d",count);
+    set_env("GOW3_GUEST_ARG_COUNT",value);
+    for (int i=0;i<count;++i) { snprintf(value,sizeof(value),"GOW3_GUEST_ARG_%d",i); set_env(value,argv[i]); }
     runtime_report();
     runtime_restart(); /* does not return */
     return 0;

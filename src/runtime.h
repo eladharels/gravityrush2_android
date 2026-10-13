@@ -26,6 +26,8 @@ void runtime_mutex_report(void);
 uintptr_t runtime_memory_resolve(const char *name);
 void runtime_memory_report(void);
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+int runtime_memory_region_backing(uintptr_t address, uintptr_t *start, uintptr_t *end, int *mapped,
+                                  const unsigned char **backing);
 const char *runtime_import_name(const char *name);
 /* uc3: the game executable's file name (GOW3_EXECUTABLE, default eboot.bin): argv[0], progname. */
 const char *runtime_executable_name(void);
@@ -33,6 +35,8 @@ const char *runtime_executable_name(void);
 int runtime_guest_args(const char **out, int max);
 /* uc3: a runtime function by symbol name (sceKernelDlsym), 0 when unknown. */
 uintptr_t runtime_resolve_symbol(const char *symbol);
+/* uc3: the NID (11 characters) of a symbol name. */
+void runtime_nid(const char *symbol, char out[12]);
 /* uc3: libSceFiber (runtime_fiber.c). */
 uintptr_t runtime_fiber_resolve(const char *name);
 void runtime_fiber_report(void);

@@ -89,7 +89,14 @@ _Static_assert(sizeof(ConfigInfo)==0x48 && sizeof(MemoryInfo)==0x48 && sizeof(In
 /* OutputInfo of older SDKs ends before frame_format (0x30). */
 static int output_size_ok(const OutputInfo *o) { return (o->this_size|8)==sizeof(OutputInfo); }
 
-typedef struct { AVCodecContext *codec; AVPacket *packet; AVFrame *frame, *nv12; struct SwsContext *sws; } Decoder;
+typedef struct {
+    AVCodecContext *codec; AVPacket *packet;
+    AVFrame *frame;      /* the picture being delivered */
+    AVFrame *nv12;       /* conversion target for formats other than NV12/YUV420P, kept across pictures */
+    struct SwsContext *sws;
+    AVFrame *queued[8];  /* pictures set aside when the decoder had more than one ready (see set_aside) */
+    int queued_count;
+} Decoder;
 static uint64_t decoded_frames;
 
 static uint32_t align(uint32_t value, uint32_t to) { return (value+to-1)&~(to-1); }
@@ -148,8 +155,12 @@ static ABI int32_t create_decoder(const ConfigInfo *config, const MemoryInfo *me
     *out=d;
     return 0;
 }
+static void drop_queued(Decoder *d) {
+    while (d->queued_count) av_frame_free(&d->queued[--d->queued_count]);
+}
 static ABI int32_t delete_decoder(Decoder *d) {
     if (!d) return ERR_DECODER_INSTANCE;
+    drop_queued(d);
     avcodec_free_context(&d->codec); av_packet_free(&d->packet); av_frame_free(&d->frame); av_frame_free(&d->nv12);
     sws_freeContext(d->sws);
     free(d);
@@ -160,12 +171,19 @@ static ABI int32_t delete_decoder(Decoder *d) {
  * aligned to 64 and the height aligned to 16 (the last rows repeated), then its picture info. */
 static int32_t picture(Decoder *d, FrameBuffer *buffer, OutputInfo *out) {
     AVFrame *f=d->frame;
-    if (f->format!=AV_PIX_FMT_NV12) {
-        av_frame_unref(d->nv12);
-        d->nv12->format=AV_PIX_FMT_NV12; d->nv12->width=f->width; d->nv12->height=f->height;
+    /* The software H.264 decoder gives planar YUV 4:2:0: its chroma is interleaved below while
+     * copying, with no conversion pass. Any other format goes through swscale into an NV12
+     * frame kept from one picture to the next. */
+    const int planar=f->format==AV_PIX_FMT_YUV420P || f->format==AV_PIX_FMT_YUVJ420P;
+    if (f->format!=AV_PIX_FMT_NV12 && !planar) {
+        if (!d->nv12->data[0] || d->nv12->width!=f->width || d->nv12->height!=f->height) {
+            av_frame_unref(d->nv12);
+            d->nv12->format=AV_PIX_FMT_NV12; d->nv12->width=f->width; d->nv12->height=f->height;
+            if (av_frame_get_buffer(d->nv12,0)<0) return ERR_API_FAIL;
+        }
         d->sws=sws_getCachedContext(d->sws,f->width,f->height,(enum AVPixelFormat)f->format,
                                     f->width,f->height,AV_PIX_FMT_NV12,SWS_FAST_BILINEAR,NULL,NULL,NULL);
-        if (!d->sws || av_frame_get_buffer(d->nv12,0)<0 ||
+        if (!d->sws ||
             sws_scale(d->sws,(const uint8_t *const *)f->data,f->linesize,0,f->height,d->nv12->data,d->nv12->linesize)<0)
             return ERR_API_FAIL;
         f=d->nv12;
@@ -180,7 +198,13 @@ static int32_t picture(Decoder *d, FrameBuffer *buffer, OutputInfo *out) {
         memcpy(luma+(size_t)y*pitch,f->data[0]+(size_t)from*(size_t)f->linesize[0],width);
         if (y<rows/2) {
             uint32_t c=y<height/2 ? y : height/2-1;
-            memcpy(chroma+(size_t)y*pitch,f->data[1]+(size_t)c*(size_t)f->linesize[1],width);
+            unsigned char *row=chroma+(size_t)y*pitch;
+            if (!planar) memcpy(row,f->data[1]+(size_t)c*(size_t)f->linesize[1],width);
+            else {
+                const unsigned char *u=f->data[1]+(size_t)c*(size_t)f->linesize[1], *v=f->data[2]+(size_t)c*(size_t)f->linesize[2];
+                for (uint32_t x=0;x<width/2;++x) { row[2*x]=u[x]; row[2*x+1]=v[x]; }
+                if (width&1) row[width-1]=u[width/2];
+            }
         }
     }
     buffer->is_accepted=true;
@@ -206,9 +230,28 @@ static int32_t picture(Decoder *d, FrameBuffer *buffer, OutputInfo *out) {
 }
 static int32_t receive(Decoder *d, FrameBuffer *buffer, OutputInfo *out) {
     av_frame_unref(d->frame);
+    if (d->queued_count) { /* pictures set aside come out first, in order */
+        av_frame_move_ref(d->frame,d->queued[0]);
+        av_frame_free(&d->queued[0]);
+        memmove(d->queued,d->queued+1,(size_t)--d->queued_count*sizeof(*d->queued));
+        return picture(d,buffer,out);
+    }
     int r=avcodec_receive_frame(d->codec,d->frame);
     if (r==AVERROR(EAGAIN) || r==AVERROR_EOF) return 0;
     return r<0 ? ERR_API_FAIL : picture(d,buffer,out);
+}
+/* After avcodec_send_packet refused an access unit (EAGAIN: pictures are waiting to be taken,
+ * an access unit that produced two), sets them aside so the unit is accepted; 0 when it can
+ * be sent again. One picture still leaves per call. */
+static int set_aside(Decoder *d) {
+    while (d->queued_count<(int)(sizeof(d->queued)/sizeof(*d->queued))) {
+        AVFrame *f=av_frame_alloc();
+        if (!f) return -1;
+        int r=avcodec_receive_frame(d->codec,f);
+        if (r<0) { av_frame_free(&f); return r==AVERROR(EAGAIN) || r==AVERROR_EOF ? 0 : -1; }
+        d->queued[d->queued_count++]=f;
+    }
+    return 0;
 }
 static int32_t check(Decoder *d, FrameBuffer *buffer, OutputInfo *out) {
     if (!d) return ERR_DECODER_INSTANCE;
@@ -231,6 +274,7 @@ static ABI int32_t decode(Decoder *d, const InputData *input, FrameBuffer *buffe
     d->packet->pts=(int64_t)input->pts_data; d->packet->dts=(int64_t)input->dts_data;
     d->packet->opaque=(void *)(uintptr_t)input->attached_data;
     int sent=avcodec_send_packet(d->codec,d->packet);
+    if (sent==AVERROR(EAGAIN) && !set_aside(d)) sent=avcodec_send_packet(d->codec,d->packet);
     if (sent==AVERROR_EOF) { avcodec_flush_buffers(d->codec); sent=avcodec_send_packet(d->codec,d->packet); } /* after a flush */
     d->packet->data=NULL; d->packet->size=0;
     return sent<0 ? ERR_API_FAIL : receive(d,buffer,out);
@@ -244,6 +288,7 @@ static ABI int32_t flush(Decoder *d, FrameBuffer *buffer, OutputInfo *out) {
 }
 static ABI int32_t reset(Decoder *d) {
     if (!d) return ERR_DECODER_INSTANCE;
+    drop_queued(d);
     avcodec_flush_buffers(d->codec);
     return 0;
 }

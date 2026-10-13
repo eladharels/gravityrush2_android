@@ -211,12 +211,15 @@ if (WIN32)
     # uc3: libSceFiber (ninja -C out/gpu fiber-test).
     add_executable(fiber-test EXCLUDE_FROM_ALL ../tests/test_fiber.c)
     add_executable(videodec2-test EXCLUDE_FROM_ALL ../tests/test_videodec2.c ../src/compat_win.c)
-    foreach(test mp3-test videodec-test services-test fiber-test videodec2-test)
+    add_executable(memory-test EXCLUDE_FROM_ALL ../tests/test_memory.c ../src/compat_win.c)
+    foreach(test mp3-test videodec-test services-test fiber-test videodec2-test memory-test)
         set_target_properties(${test} PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
         target_compile_options(${test} PRIVATE -Wall -Wextra -Werror)
         target_include_directories(${test} PRIVATE .. ../src)
         target_link_libraries(${test} PRIVATE atrac9 PkgConfig::FFMPEG bcrypt -pthread)
     endforeach()
+    target_link_libraries(memory-test PRIVATE onecore) # VirtualAlloc2, MapViewOfFile3
+    target_link_options(memory-test PRIVATE -Wl,--disable-high-entropy-va) # the PS4 range must be free
     add_executable(pad-map-test EXCLUDE_FROM_ALL ../tests/test_pad_map.c ../src/compat_win.c)
     set_target_properties(pad-map-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
     target_compile_options(pad-map-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)

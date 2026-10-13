@@ -330,15 +330,6 @@ extern uintptr_t gow3_damage_multiplier(int taken);
 extern uintptr_t gow3_orb_pickup_multiplier(unsigned kind);
 extern void gow3_stat_multipliers_status(int damage, int orb_pickup);
 
-/* uc3: the God of War III hooks below are only searched for in God of War III (the title IDs
- * of scripts/patches.py): in another game a chance signature match would patch unrelated code. */
-static int is_gow3_title(const char *title_id) {
-    static const char *const ids[] = {"CUSA01623", "CUSA01715", "CUSA01720"};
-    for (size_t i = 0; i < sizeof(ids) / sizeof(*ids); ++i)
-        if (!strcmp(title_id, ids[i])) return 1;
-    return 0;
-}
-
 /* The hooks below find their sites by signature (src/signature.h), so they work in any region
  * and version of the game whose code matches; a site that is not found leaves its feature off. */
 static void install_cheats(Segment *segments, uint64_t count, uint64_t size) {
@@ -571,7 +562,7 @@ int main(int argc, char **argv) {
     runtime_memory_reserve();
     runtime_thread_tcb_offset();
 #endif
-    int cpu_only = 0, strict_imports = 0, check_imports = 0;
+    int cpu_only = 0, strict_imports = 0, check_imports = 0, game_hooks = 0;
     unsigned timeout_seconds = 10;
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL;
     for (int i = 2; i < argc; ++i) {
@@ -582,6 +573,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
         else if (!strcmp(argv[i], "--patches") && i+1<argc) patch_file=argv[++i];
+        else if (!strcmp(argv[i], "--game-hooks")) game_hooks = 1;
         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
@@ -611,7 +603,6 @@ int main(int argc, char **argv) {
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
             runtime_savedata_configure(id);
     }
-    const int gow3_hooks = is_gow3_title(title_id);
     gow3gpu_register_kernel();
 #ifdef _WIN32
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
@@ -800,7 +791,10 @@ int main(int argc, char **argv) {
         _exit(missing ? 1 : 0); /* no destructors: GPU threads are running */
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
-    if (gpu_enabled && gow3_hooks) {
+    /* uc3: the God of War III hooks below are only searched for when run.py says the game is
+     * God of War III (its patch profile, scripts/patches.py): in another game a chance
+     * signature match would patch unrelated code. */
+    if (gpu_enabled && game_hooks) {
         install_orb_multiplier(segments, ns, size);
         install_cheats(segments, ns, size);
         install_actor_watch(segments, ns, size);

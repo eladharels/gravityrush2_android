@@ -280,26 +280,112 @@ const char *runtime_import_name(const char *name) {
     const char *symbol=runtime_symbol(canonical_name(name,canonical));
     return symbol ? symbol : "name not resolved; see analysis.json import_name_hints";
 }
-/* uc3: sceKernelDlsym: a symbol by name, through the NIDs this runtime knows the names of. */
+/* uc3: SHA-1 (FIPS 180-4) of a short message, for the NIDs below. */
+static void sha1(const unsigned char *data, size_t size, unsigned char out[20]) {
+    uint32_t h[5]={0x67452301,0xEFCDAB89,0x98BADCFE,0x10325476,0xC3D2E1F0};
+    /* Padded message: data, 0x80, zeros, 64-bit length; whole 64-byte blocks. */
+    unsigned char padded[512+64+8];
+    size_t total=((size+8)/64+1)*64;
+    if (size>512) size=512;
+    memcpy(padded,data,size); memset(padded+size,0,total-size); padded[size]=0x80;
+    uint64_t bits=(uint64_t)size*8;
+    for (int i=0;i<8;++i) padded[total-1-i]=(unsigned char)(bits>>(8*i));
+    for (size_t block=0;block<total;block+=64) {
+        uint32_t w[80];
+        const unsigned char *p=padded+block;
+        for (int i=0;i<16;++i) w[i]=(uint32_t)p[4*i]<<24|(uint32_t)p[4*i+1]<<16|(uint32_t)p[4*i+2]<<8|p[4*i+3];
+        for (int i=16;i<80;++i) { uint32_t x=w[i-3]^w[i-8]^w[i-14]^w[i-16]; w[i]=x<<1|x>>31; }
+        uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4];
+        for (int i=0;i<80;++i) {
+            uint32_t f,k;
+            if (i<20) { f=(b&c)|(~b&d); k=0x5A827999; }
+            else if (i<40) { f=b^c^d; k=0x6ED9EBA1; }
+            else if (i<60) { f=(b&c)|(b&d)|(c&d); k=0x8F1BBCDC; }
+            else { f=b^c^d; k=0xCA62C1D6; }
+            uint32_t t=(a<<5|a>>27)+f+e+k+w[i];
+            e=d; d=c; c=b<<30|b>>2; b=a; a=t;
+        }
+        h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d; h[4]+=e;
+    }
+    for (int i=0;i<5;++i) {
+        out[4*i]=(unsigned char)(h[i]>>24); out[4*i+1]=(unsigned char)(h[i]>>16);
+        out[4*i+2]=(unsigned char)(h[i]>>8); out[4*i+3]=(unsigned char)h[i];
+    }
+}
+/* uc3: the NID of a symbol name (tools/nid_names.py does the same): the first 8 bytes of
+ * SHA-1(name + the SDK's 16-byte salt), reversed, in base64 with '-' for '/' and no padding. */
+void runtime_nid(const char *symbol, char out[12]) {
+    static const unsigned char salt[16]={0x51,0x8d,0x64,0xa6,0x35,0xde,0xd8,0xc1,0xe6,0xb0,0x39,0xb1,0xc3,0xe5,0x52,0x30};
+    static const char alphabet[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
+    unsigned char data[256+16], digest[20], bytes[9]={0};
+    size_t n=strlen(symbol); if (n>256) n=256;
+    memcpy(data,symbol,n); memcpy(data+n,salt,16);
+    sha1(data,n+16,digest);
+    for (int i=0;i<8;++i) bytes[i]=digest[7-i];
+    for (int i=0;i<11;++i) { /* 8 bytes = 11 base64 characters (the 12th would be padding) */
+        unsigned bit=6u*(unsigned)i, byte=bit/8, shift=bit%8;
+        unsigned v=(((unsigned)bytes[byte]<<8|bytes[byte+1])>>(10-shift))&63u;
+        out[i]=alphabet[v];
+    }
+    out[11]=0;
+}
+/* uc3: sceKernelDlsym: a symbol by name. Its NID is computed from the name, so any function
+ * the runtime serves is found, not only the ones in the import tables; the libraries tried
+ * are the ones those tables mention. The tables' own entries come last, for a symbol they
+ * list under another library. */
 uintptr_t runtime_resolve_symbol(const char *symbol) {
-    for (size_t i=0;symbol && i<sizeof(import_names)/sizeof(*import_names);++i) {
+    if (!symbol || strlen(symbol)>256) return 0;
+    static const char *libraries[64]; static size_t library_count;
+    if (!library_count) {
+        for (size_t i=0;i<sizeof(import_names)/sizeof(*import_names) && library_count<64;++i) {
+            const char *lib=strchr(import_names[i].nid,'#');
+            if (!lib) continue;
+            size_t j=0;
+            while (j<library_count && strcmp(libraries[j],lib)) ++j;
+            if (j==library_count) libraries[library_count++]=lib;
+        }
+    }
+    char nid[12], name[300];
+    runtime_nid(symbol,nid);
+    for (size_t i=0;i<library_count;++i) {
+        snprintf(name,sizeof(name),"%s%s",nid,libraries[i]);
+        uintptr_t found=runtime_resolve(name,0);
+        if (found) return found;
+    }
+    for (size_t i=0;i<sizeof(import_names)/sizeof(*import_names);++i) {
         if (strcmp(symbol,import_names[i].symbol)) continue;
         uintptr_t found=runtime_resolve(import_names[i].nid,0);
         if (found) return found;
     }
     return 0;
 }
-/* uc3: arguments after the program name (GOW3_GUEST_ARGS, space-separated). The collection
- * menu starts Uncharted 3 through sceSystemServiceLoadExec with "eboot.bin ispartofuccollection". */
+/* uc3: arguments after the program name. One variable each (GOW3_GUEST_ARG_COUNT and
+ * GOW3_GUEST_ARG_<i>, as LoadExec sets them: an argument may hold spaces), or, by hand,
+ * GOW3_GUEST_ARGS space-separated. The collection menu starts Uncharted 3 through
+ * sceSystemServiceLoadExec with "eboot.bin ispartofuccollection". */
 int runtime_guest_args(const char **out, int max) {
-    static char buffer[512];
+    static char buffer[16][256];
     static const char *args[16];
     static int count=-1;
     if (count<0) {
         count=0;
-        const char *env=getenv("GOW3_GUEST_ARGS");
-        snprintf(buffer,sizeof(buffer),"%s",env ? env : "");
-        for (char *p=strtok(buffer," "); p && count<16; p=strtok(NULL," ")) args[count++]=p;
+        const char *env=getenv("GOW3_GUEST_ARG_COUNT");
+        if (env) {
+            int n=atoi(env);
+            for (int i=0;i<n && i<16;++i) {
+                char key[32]; snprintf(key,sizeof(key),"GOW3_GUEST_ARG_%d",i);
+                const char *arg=getenv(key);
+                snprintf(buffer[i],sizeof(buffer[i]),"%s",arg ? arg : "");
+                args[count++]=buffer[i];
+            }
+        } else if ((env=getenv("GOW3_GUEST_ARGS"))) {
+            char joined[512];
+            snprintf(joined,sizeof(joined),"%s",env);
+            for (char *p=strtok(joined," "); p && count<16; p=strtok(NULL," ")) {
+                snprintf(buffer[count],sizeof(buffer[count]),"%s",p);
+                args[count]=buffer[count]; ++count;
+            }
+        }
     }
     int n=count<max ? count : max;
     for (int i=0;i<n;++i) out[i]=args[i];

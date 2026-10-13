@@ -380,22 +380,24 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
     if (flags & MAP_FIXED_FLAG) {
         if (!address || address%PAGE) return INVALID;
         if ((flags & MAP_NO_OVERWRITE) && overlaps(address,address+size,1)) return NO_MEMORY;
-        /* uc3: the mapping replaced here is gone for the GPU too, as for an unmap; its cached
-         * buffers and images otherwise outlive the new contents (Uncharted 3 maps its 1 MiB
-         * pool chunks over themselves when a level is loaded again). */
-        if (kind!=KIND_RESERVED)
-            for (size_t i=vma_index(address); i<vma_count && vmas[i].start<address+size; ++i)
-                if (vmas[i].kind!=KIND_RESERVED) {
-                    uintptr_t a=vmas[i].start>address ? vmas[i].start : address;
-                    uintptr_t b=vmas[i].end<address+size ? vmas[i].end : address+size;
-                    queue_hook(HOOK_UNMAP,a,b-a);
-                    ++fixed_replaced;
-                }
     } else {
         address=find_free(address,size,alignment);
         if (!address) return NO_MEMORY;
     }
     if (host_map(address,size,host_prot(prot),kind==KIND_RESERVED,phys)) return NO_MEMORY;
+    /* uc3: the mapping replaced here is gone for the GPU too, as for an unmap; its cached
+     * buffers and images otherwise outlive the new contents (Uncharted 3 maps its 1 MiB
+     * pool chunks over themselves when a level is loaded again). Queued only once the host
+     * mapping is in place: had it failed above, the old mapping (and the GPU's view of it)
+     * would still be in use. */
+    if ((flags & MAP_FIXED_FLAG) && kind!=KIND_RESERVED)
+        for (size_t i=vma_index(address); i<vma_count && vmas[i].start<address+size; ++i)
+            if (vmas[i].kind!=KIND_RESERVED) {
+                uintptr_t a=vmas[i].start>address ? vmas[i].start : address;
+                uintptr_t b=vmas[i].end<address+size ? vmas[i].end : address+size;
+                queue_hook(HOOK_UNMAP,a,b-a);
+                ++fixed_replaced;
+            }
     void *mapped=(void *)address;
     drop_range(address,address+size);
     if (vma_insert(vma_index(address),(Vma){address,address+size,kind,prot,type,phys})) return NO_MEMORY;
@@ -783,25 +785,9 @@ int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t s
     read_unlock();
     return ok;
 }
-/* uc3: reads through the backing view, past GPU read protection (precise readbacks): the GPU's
- * own upload copies faulted there and waited for the GPU thread, which waited for them. 0 when
- * part of the range has no backing (nothing copied is relied on then). */
-int runtime_memory_read_backing(uintptr_t address, void *data, uint64_t size) {
-    read_lock();
-    int ok=1;
-    for (uintptr_t at=address, end=address+size; at<end && ok;) {
-        size_t i=vma_index(at);
-        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) { ok=0; break; }
-        uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
-        memcpy((unsigned char *)data+(at-address),backing_base+vmas[i].phys+(at-vmas[i].start),n);
-        at+=n;
-    }
-    read_unlock();
-    return ok;
-}
 /* Per-thread cache of recently found regions for the GPU's per-draw queries:
  * entries hold for as long as the table generation they were read at. */
-typedef struct { uint64_t generation; uintptr_t start, end; int kind; } CachedRegion;
+typedef struct { uint64_t generation; uintptr_t start, end; int kind; uint64_t phys; } CachedRegion;
 static __thread CachedRegion region_cache[8];
 static __thread unsigned region_cache_next;
 static const CachedRegion *cached_region(uintptr_t address) {
@@ -817,7 +803,7 @@ static const CachedRegion *cached_region(uintptr_t address) {
 static void cache_region(size_t i) {
     uint64_t generation=__atomic_load_n(&table_generation,__ATOMIC_ACQUIRE);
     if (i==vma_count || (generation & 1)) return;
-    region_cache[region_cache_next++ % 8]=(CachedRegion){generation,vmas[i].start,vmas[i].end,vmas[i].kind};
+    region_cache[region_cache_next++ % 8]=(CachedRegion){generation,vmas[i].start,vmas[i].end,vmas[i].kind,vmas[i].phys};
 }
 /* Mapped length from address, up to size, across adjacent mappings. */
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size) {
@@ -835,17 +821,31 @@ uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size) {
 }
 /* Region around address: [start,end) mapped or a gap; 0 past the last mapping. */
 int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, int *mapped) {
+    return runtime_memory_region_backing(address,start,end,mapped,NULL);
+}
+/* uc3: runtime_memory_region, plus where the backing view holds the byte at address (NULL when
+ * nothing is mapped there). The backing view skips any GPU page protection: the GPU's own
+ * upload copies read guest memory through it in the precise readback mode (the copy threads
+ * cannot wait for the GPU thread, which waits for them). One lookup serves both answers. */
+int runtime_memory_region_backing(uintptr_t address, uintptr_t *start, uintptr_t *end, int *mapped,
+                                  const unsigned char **backing) {
     const CachedRegion *c=(runtime_disabled_optimizations & 1) ? NULL : cached_region(address);
-    if (c) { *start=c->start; *end=c->end; *mapped=c->kind!=KIND_RESERVED; return 1; }
+    if (c) {
+        *start=c->start; *end=c->end; *mapped=c->kind!=KIND_RESERVED;
+        if (backing) *backing=*mapped ? backing_base+c->phys+(address-c->start) : NULL;
+        return 1;
+    }
     read_lock();
     size_t i=vma_index(address);
     int found=i<vma_count;
     if (found && vmas[i].start<=address) {
         cache_region(i);
         *start=vmas[i].start; *end=vmas[i].end; *mapped=vmas[i].kind!=KIND_RESERVED;
+        if (backing) *backing=*mapped ? backing_base+vmas[i].phys+(address-vmas[i].start) : NULL;
     } else if (found) {
         *start=i ? vmas[i-1].end : 0; *end=vmas[i].start; *mapped=0;
-    }
+        if (backing) *backing=NULL;
+    } else if (backing) *backing=NULL;
     read_unlock();
     return found;
 }
