@@ -26,8 +26,9 @@ recompilação completa, e a Naughty Dog colocou boa parte do motor nas SPUs.
 
 ## Situação
 
-**O Uncharted 3 chega ao menu principal** (vídeo de abertura, som, controle, saves). Próximo:
-o gameplay e os artefatos gráficos do menu. Detalhes no [devlog](docs/uc3/DEVLOG.md).
+**O Uncharted 3 é jogável do início ao combate** (menu, som, controle, saves, cutscenes), mas
+**o cenário (paredes, chão, teto) não aparece** no gameplay. O shadPS4 0.19.0 desenha o cenário,
+então o problema é do port. Investigação em andamento; detalhes no [devlog](docs/uc3/DEVLOG.md).
 
 Para jogar: `powershell -ExecutionPolicy Bypass -File tools\run_uc3.ps1` (log em `out\last-run.log`).
 

@@ -4,6 +4,65 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — Cenário: argumentos indiretos descartados, memória do runtime, modo preciso
+
+O cenário **continua sumido** no modo normal depois de tudo abaixo (testado pelo usuário).
+
+### 1. Os desenhos indiretos não são o cenário
+A captura com `ReadMemory` dos argumentos (`5fb48bf`) mostrou valores normais calculados pela
+GPU: `36 1 0 0 0`, `24 …`, `36 …`, `1236 …` (índices, instâncias). 36 índices = uma caixa,
+1236 = uma esfera: são **volumes de luz** da iluminação adiada (só profundidade, depois cor).
+A conclusão da entrada anterior ("é o cenário") estava errada; a pista foi descartada.
+
+### 2. Descoberta do usuário: o cenário depende do carregamento
+- Primeiro "Novo jogo": no banheiro o cenário falha **por um instante e depois aparece**.
+- Voltar ao menu e carregar de novo: **some e não volta**.
+- Ao contrário, as listras na areia da tela de título **se corrigem** ao voltar ao menu depois
+  de um carregamento.
+→ Dados velhos/novos na memória entre carregamentos: aponta para sincronização CPU↔GPU ou
+gerência de memória, não para tradução de shaders.
+
+### 3. Gerência de memória do runtime
+- **Mapeamento fixo por cima de outro** (`MAP_FIXED`) não avisava a GPU que o conteúdo antigo
+  sumiu. Corrigido (`53499e4`: `place()` enfileira `HOOK_UNMAP` antes do `HOOK_MAP`; log
+  "(over a mapping)"). **Não acontece no Uncharted** (0 ocorrências), mas o bug era real.
+- Log de mapeamentos com endereço físico, apelidos e os 40 primeiros desmapeamentos (`b733295`).
+  Resultado: só há duas alocações físicas (1,6 GiB em `0x1000000000` e 2,9 GiB em
+  `0x1100000000`). O jogo **move blocos de 1 MiB** do heap: desmapeia `0x100fc00000` e mapeia a
+  mesma memória física (`phys=0xfc00000`) em `0x1300000000`. Nenhum apelido simultâneo.
+  O desmapeamento no núcleo (`UnmapMemory`) é idêntico ao do shadPS4 0.19.0 (comparado com o
+  código oficial).
+- **Bug herdado do GoW3** (`3305573`): `split_at` só ajustava o endereço físico da parte direita
+  de um mapeamento **direto**. Num mapeamento **flexível** dividido (ex.: `mprotect` parcial), a
+  parte direita ficava com o endereço físico da esquerda e, ao ser liberada, **zerava e
+  devolvia ao pool páginas ainda em uso**. Corrigido; não resolveu o cenário.
+
+### 4. Modo de leitura preciso (`GOW3_READBACKS=2`)
+O shadPS4 que desenha o cenário usa `readbacks_mode: 2` (preciso); o port usa relaxado (1) por
+padrão, e o preciso nunca tinha sido testado (`-Set GOW3_READBACKS=2`).
+- Primeiro resultado: **tela preta** logo no início. As pilhas (lldb) mostraram um impasse: as
+  threads de cópia do port (`CopySparseMemory`) liam páginas protegidas contra leitura, a falta
+  pedia à thread da GPU o *readback*, e a thread da GPU esperava essas mesmas cópias
+  (`WaitHostCopies`).
+- Correção (`3305573`): no modo preciso as cópias leem pela visão física sem proteção
+  (`runtime_memory_read_backing`, par do `write_backing`).
+- Agora chega à tela de título a 60 FPS, mas o jogo encerra na assertiva `m_gfxEopTick`
+  (`fg-draw-mgr.cpp:234`, "GPU quadros para trás"; pior quadro 349 ms). O caminho de escrita do
+  EOP e o `DownloadMemory` são iguais aos do shadPS4. Causa ainda não encontrada.
+
+### Onde parou
+- Modo normal: cenário sumido, sem pista ativa. Hipótese principal: algo entre CPU e GPU que o
+  modo preciso resolveria no shadPS4 (dados escritos pela GPU e lidos pela CPU do jogo).
+- Próximos caminhos:
+  1. fazer o modo preciso passar da tela de título (entender a assertiva `m_gfxEopTick` nele) e
+     ver se o cenário aparece;
+  2. atualizar o núcleo gráfico para o shadPS4 0.19.0 (~70 commits: buffer cache, memory
+     tracker, page manager).
+- Diagnóstico de travamentos com CPU ocupada: o `uc3_hang_probe.py` só detecta jogo parado; para
+  laços, rodar o jogo, esperar e usar `lldb -p PID -b -o 'thread backtrace all' -o 'process detach'`.
+
+---
+
 ## 2026-10-14 — Investigação: o cenário some (gameplay); estado atual
 
 ### Sintomas (vistos pelo usuário no bar de Londres, cap. 1)
