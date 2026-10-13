@@ -331,7 +331,7 @@ static int split_at(uintptr_t a) {
     if (i==vma_count || vmas[i].start>=a) return 0;
     Vma right=vmas[i];
     right.start=a;
-    if (right.kind==KIND_DIRECT) right.phys+=a-vmas[i].start;
+    if (right.kind!=KIND_RESERVED) right.phys+=a-vmas[i].start; /* uc3: flexible too (was direct only) */
     vmas[i].end=a;
     return vma_insert(i+1,right);
 }
@@ -778,6 +778,22 @@ int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t s
         if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) { ok=0; break; }
         uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
         memcpy(backing_base+vmas[i].phys+(at-vmas[i].start),(const unsigned char *)data+(at-address),n);
+        at+=n;
+    }
+    read_unlock();
+    return ok;
+}
+/* uc3: reads through the backing view, past GPU read protection (precise readbacks): the GPU's
+ * own upload copies faulted there and waited for the GPU thread, which waited for them. 0 when
+ * part of the range has no backing (nothing copied is relied on then). */
+int runtime_memory_read_backing(uintptr_t address, void *data, uint64_t size) {
+    read_lock();
+    int ok=1;
+    for (uintptr_t at=address, end=address+size; at<end && ok;) {
+        size_t i=vma_index(at);
+        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) { ok=0; break; }
+        uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
+        memcpy((unsigned char *)data+(at-address),backing_base+vmas[i].phys+(at-vmas[i].start),n);
         at+=n;
     }
     read_unlock();
