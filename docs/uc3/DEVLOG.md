@@ -4,6 +4,65 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — Nightly `23c4133` do shadPS4 fundida; crash da captura F11; sessão de 2 h na 0.19.0 (`e90e5fd`)
+
+### Sessão do jogador na 0.19.0 (`c8b0bf7`)
+1h55 de jogo sem crash, do museu até os templos (áreas nunca rodadas antes). FPS por janela de
+5 s: mediana 32, mínimo 13. Nos 7099 quadros lentos: 229 s esperando a GPU, **166 s em tratadores
+de falha de leitura** (56 mil falhas, ~3 ms cada: cada uma baixa a janela da GPU e espera a fila
+inteira) e 103 s em falhas de escrita. Alguns glitches visuais (16 capturas F11 em
+`user/captures/frame_20261013-19*`), a investigar. Log em `out/player-0.19.0-session.log`.
+
+### Crash depois do F11 (`c8b0bf7`)
+O processo sumia poucos segundos após a captura, sem "Fault", sem assertiva e sem registro do
+Windows. Causa provável: a captura lia os buffers **pelo ponteiro do jogo**; no modo preciso uma
+página escrita pela GPU está protegida contra leitura e a falha era tratada no próprio thread de
+*binding*, de onde ela pode recursar até estourar a pilha (um estouro mata o processo antes de o
+tratador escrever qualquer coisa). Correções: a captura copia pela cópia de apoio
+(`CopySparseMemory`); `SetThreadStackGuarantee` em todos os threads, para que um estouro vire
+"Fault: exception 0xc00000fd" no log; o fechamento da janela passa a escrever
+"Window closed (SDL quit event)" (era `LOG_INFO`, oculto, e parecia crash). Captura por arquivo
+(`GOW3_CAPTURE_TRIGGER`) testada nas ruas: processo sobrevive. `tools/uc3_sendkey.ps1` ganhou
+`-Hold` (teclado do port: Espaço = X, Enter = Options) e `-Post`.
+
+### Nightly 23c4133 (12/10): 71 commits depois da 0.19.0, 40 no subconjunto vendorado
+Mesmo método (ramos `upstream2`/`port2` em `D:/Uncharted/ref/merge`), 18 arquivos em conflito.
+- **Cache de texturas** (`texture_cache.*`, `image.*`, `sampler.*`, `common/lru_cache.h`): fica a
+  versão do port. A reestruturação #5219 (tabela de páginas, LRU intrusiva, samplers em slot
+  vector, mutex por imagem) colide com o aliasing, a fila de *readbacks* e os caches de
+  `FindImage`/`UpdateImage` do port; a mesclagem automática produzia uma mistura incoerente.
+  Transplantados: metadados CMask/FMask/HTile com dono e contagem de amostras (#5046, inclusive o
+  preenchimento do CMask no `buffer_cache`), `AssociateStencil` também na cópia de profundidade
+  (#5296), `RefreshImage` das subresources novas no overlap de profundidade (#5229).
+- **Levados do upstream:** index buffer limitado à capacidade do `IndexBufferSize` e buffer nulo
+  quando nada está mapeado (#5278/#5327, `bindIndexBuffer2KHR` com maintenance5/6), `bound_buffers`
+  com o tipo de acesso (#5262), `DrawIndirectCountMulti` (#5341), `is_indirect` na runtime info
+  (#5348), `depth_before_shader`, `NormalizeMinMaxBlend` por cima do *blend rewrite* do port,
+  `SurfaceFormat` constexpr no header (o `TrySurfaceFormat` do port continua), `CompMapping` do
+  AmdGpu nas views, subresources em `u16`, `OpNClamp` acrescentado ao sirit (#5346).
+- **Bug encontrado no caminho:** o upstream subiu `NUM_BUFFERS` de 40 para 56 e os índices
+  `motion_param`/`scene_size` que o port acrescenta ao bloco de *push constants* passaram a
+  apontar além dos membros declarados. SPIR-V inválido (`spirv-val` acusa na hora), e o compilador
+  do driver AMD **cai** em `createComputePipeline` em vez de recusar: crash na inicialização,
+  "Fault: write access ... amdvlk64.dll". Agora o bloco declara quatro membros de offsets (56
+  bytes), `motion_param` em 72 e `scene_size` em 76, com `static_assert` dos dois lados.
+  `GOW3_DUMP_SHADERS=1` + `spirv-val` em todos os dumps: 725 shaders válidos.
+- `ExtendWriteFault` reescrito sobre o region manager novo (#5277: `UpdateProtection`/`UpdateState`).
+
+### Resultado
+Templo (checkpoint do jogador, cena de combate): nightly 18–20 FPS contra 22–24 FPS dos últimos
+minutos da sessão na 0.19.0 (condições não idênticas: o probe fica parado levando tiro). A
+decomposição dos quadros lentos é a mesma nas duas: ~30 ms de espera pela GPU e ~25 ms em falhas
+de leitura (2200/min, 3,7 ms cada). **A nightly não muda o gargalo**, que é do port.
+
+### Próximo alvo: o custo das falhas de leitura do modo preciso
+Cada falha de leitura (`Rasterizer::ReadMemory` → `DownloadMemory` → `scheduler.Finish()`) drena
+a fila da GPU inteira, ~3 a 4 ms, e há dezenas por quadro nas cenas pesadas. Caminhos: esperar só
+o *tick* da última escrita naquela janela em vez de `Finish()`; baixar na EOP as faixas que a CPU
+leu no quadro anterior (previsão); ou marcar como "lidas pela CPU" e baixar em lote por quadro.
+
+---
+
 ## 2026-10-13 — Núcleo gráfico atualizado para o shadPS4 v.0.19.0 (`7628587`)
 
 ### O que foi feito
