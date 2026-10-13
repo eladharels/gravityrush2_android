@@ -47,6 +47,14 @@ memory tracker / page manager posteriores ao `b4e7ae7` valem também para desemp
 - `tools/uc3_saves_to_shadps4.py`: saves do port → shadPS4 (backup automático dos do shadPS4).
 - O *probe* carrega o checkpoint do jogador direto ("Continuar" é o primeiro item do menu).
 
+### Decisão: atualizar o núcleo gráfico (opção 1)
+Plano: (1) clonar o shadPS4 em `ref/shadPS4`; (2) diferença entre o `gpu/shadps4` vendorizado
+(subconjunto `common`, `core`, `shader_recompiler`, `video_core`: 372 arquivos, 88 com marcas
+`gow3`, 383 linhas marcadas, mais edições sem marca e as `uc3`) e o `b4e7ae7` → `port.patch`;
+(3) alvo `v.0.19.0` primeiro, nightly depois; (4) copiar o subconjunto do alvo e reaplicar o
+`port.patch` em três vias, adaptando `gpu/shim` às APIs; (5) build, testes, *probe* com capturas,
+comparar FPS com o nightly (41 FPS no checkpoint do museu).
+
 ### Próximos passos (do port)
 1. Desempenho do modo preciso (~30 FPS nas cenas pesadas; ~170 submissões por quadro lento).
 2. Piscadas em preto: não reapareceram; rastreio (`GOW3_FLASH_TRACE=1`) pronto se voltarem.
