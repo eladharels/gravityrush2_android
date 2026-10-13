@@ -2098,8 +2098,14 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         if (ring) {
             // Copied by the GPU command thread into the constant ring (read-only).
             if (FrameCapture::Active() && memory->IsValidGpuMapping(ring->address, 0)) {
-                FrameCapture::Buffer(stage.pgm_hash, buffer_index, ring->address,
-                                     reinterpret_cast<const void*>(ring->address), ring->size);
+                // uc3: through the backing view, never the guest pointer: in precise mode a
+                // GPU-written page is read-protected and the fault would be handled inline on
+                // this thread, inside the binding (a deadlock after the F11 capture).
+                FrameCapture::CapturedBytes bytes;
+                memory->CopySparseMemory(ring->address, bytes.data(),
+                                         std::min<u64>(ring->size, bytes.size()));
+                FrameCapture::Buffer(stage.pgm_hash, buffer_index, ring->address, bytes.data(),
+                                     ring->size);
             }
             if (!desc.IsSpecial()) {
                 if (ring->size == 864 && gbuffer_draw &&
@@ -2183,9 +2189,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             }
             if (FrameCapture::Active() && vsharp.base_address != 0 && vsharp.GetSize() != 0 &&
                 memory->IsValidGpuMapping(vsharp.base_address, 0)) {
+                // uc3: backing view, not the guest pointer (see the ring case above).
+                const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+                FrameCapture::CapturedBytes bytes;
+                memory->CopySparseMemory(vsharp.base_address, bytes.data(),
+                                         std::min<u64>(size, bytes.size()));
                 FrameCapture::Buffer(stage.pgm_hash, binding.buffer, vsharp.base_address,
-                                     reinterpret_cast<const void*>(vsharp.base_address),
-                                     memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()));
+                                     bytes.data(), size);
             }
             if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);

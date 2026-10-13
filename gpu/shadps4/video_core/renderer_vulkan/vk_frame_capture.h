@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <array>
+
 #include <atomic>
 #include <cstdio>
 #include <string>
@@ -42,6 +44,8 @@ public:
     static void Dispatch(u64 cs_hash, u32 x, u32 y, u32 z);
     static void Sampled(const VideoCore::ImageInfo& info, bool storage);
     /// Contents of a bound buffer (first 1 KiB), kept for small passes and a pass's first draw.
+    /// uc3: callers copy at most this much of a guest buffer (Buffer prints 1 KiB).
+    using CapturedBytes = std::array<u8, 1024>;
     static void Buffer(u64 stage_hash, u32 slot, VAddr address, const void* data, u64 size);
     static void Note(const char* text);
 

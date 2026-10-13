@@ -258,7 +258,9 @@ extern "C" int gow3gpu_init(const Gow3GpuConfig* config) {
         while (window->PollEvents()) {
             SDL_Delay(2);
         }
-        LOG_INFO(Frontend, "Window closed by user");
+        // uc3: always in the log (the GPU log level hides LOG_INFO): a close request ends the
+        // process without any fault report, which otherwise looks like a silent crash.
+        std::printf("Window closed (SDL quit event): exiting\n");
         std::fflush(stdout);
         std::_Exit(0);
     });

@@ -1,12 +1,13 @@
 # uc3: sends keystrokes to a window of the named process (SendKeys syntax, e.g. "n" or "{ENTER}").
 # Used to drive shadPS4 (keyboard: n = Cross, enter = Options, arrows = d-pad) for comparisons.
+# -Post sends WM_KEYDOWN/WM_KEYUP to the window directly (SDL key events such as F11).
 # -Hold <ms> presses one key for that long instead (the port's pad polls the key state per frame,
 # so an instantaneous SendKeys press is missed): key names space, enter, escape, up, down, left,
 # right, or a single character. Port keyboard: Space = Cross, Left Shift = Circle, Enter = Options.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File tools\uc3_sendkey.ps1 shadPS4 n
 #        powershell -NoProfile -ExecutionPolicy Bypass -File tools\uc3_sendkey.ps1 gow3-probe space -Hold 150
 param([Parameter(Mandatory = $true)][string]$ProcessName, [Parameter(Mandatory = $true)][string]$Keys,
-      [int]$Hold = 0)
+      [int]$Hold = 0, [switch]$Post)
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type @'
 using System;
@@ -16,6 +17,7 @@ public static class Uc3Key {
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
     [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam);
 }
 '@
 $proc = Get-Process $ProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
@@ -23,8 +25,18 @@ if (-not $proc) { Write-Host "no window for $ProcessName"; exit 1 }
 [Uc3Key]::ShowWindow($proc.MainWindowHandle, 9) | Out-Null
 [Uc3Key]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
 Start-Sleep -Milliseconds 150
-if ($Hold -gt 0) {
-    $names = @{ space = 0x20; enter = 0x0D; escape = 0x1B; up = 0x26; down = 0x28; left = 0x25; right = 0x27; tab = 0x09 }
+$names = @{ space = 0x20; enter = 0x0D; escape = 0x1B; up = 0x26; down = 0x28; left = 0x25; right = 0x27; tab = 0x09; f11 = 0x7A; f12 = 0x7B }
+if ($Post) {
+    # -Post: WM_KEYDOWN/WM_KEYUP straight to the window (SDL key events; no focus needed).
+    $vk = if ($names.ContainsKey($Keys.ToLower())) { $names[$Keys.ToLower()] } else { [int][char]$Keys.ToUpper()[0] }
+    $scan = [Uc3Key]::MapVirtualKey($vk, 0)
+    $down = [IntPtr]((1) -bor ($scan -shl 16))
+    $up = [IntPtr]((1) -bor ($scan -shl 16) -bor 0xC0000000)
+    [Uc3Key]::PostMessage($proc.MainWindowHandle, 0x100, [UIntPtr]::new([uint64]$vk), $down) | Out-Null
+    Start-Sleep -Milliseconds ([Math]::Max($Hold, 60))
+    [Uc3Key]::PostMessage($proc.MainWindowHandle, 0x101, [UIntPtr]::new([uint64]$vk), $up) | Out-Null
+    Write-Host "posted '$Keys' to $ProcessName"
+} elseif ($Hold -gt 0) {
     $vk = if ($names.ContainsKey($Keys.ToLower())) { $names[$Keys.ToLower()] } else { [int][char]$Keys.ToUpper()[0] }
     $scan = [Uc3Key]::MapVirtualKey($vk, 0)
     [Uc3Key]::keybd_event([byte]$vk, [byte]$scan, 0, [UIntPtr]::Zero)

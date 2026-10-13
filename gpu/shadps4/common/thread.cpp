@@ -176,6 +176,10 @@ bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanosec
 void SetCurrentThreadName(const char* name) {
     // gow3: guest thread names are kept by the C runtime.
     SetThreadDescription(GetCurrentThread(), UTF8ToUTF16W(name).data());
+    // uc3: stack kept free for the fault handler, so a stack overflow is reported ("Fault:
+    // exception 0xc00000fd") instead of ending the process without a word.
+    ULONG guarantee = 64 * 1024;
+    SetThreadStackGuarantee(&guarantee);
 }
 
 void SetThreadName(void* thread, const char* name) {

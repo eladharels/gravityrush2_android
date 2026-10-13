@@ -131,9 +131,11 @@ void runtime_thread_attach_host(const char *name) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"%s",name ? name : "host");
 }
+static void stack_guarantee(void);
 void runtime_thread_attach_main(void) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"main");
+    stack_guarantee();
 }
 static GuestThread *find_thread(void *handle) {
     GuestThread *found=NULL;
@@ -252,10 +254,18 @@ static void set_host_name(const char *name) {
 #define exit_setjmp(t) setjmp((t)->exit_jump)
 #define exit_longjmp(t) longjmp((t)->exit_jump,1)
 #endif
+#ifdef _WIN32
+/* uc3: stack kept free for the fault handler (probe.c), so a stack overflow is reported
+ * instead of ending the process in silence. */
+static void stack_guarantee(void) { ULONG bytes=64*1024; SetThreadStackGuarantee(&bytes); }
+#else
+static void stack_guarantee(void) {}
+#endif
 static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
+    stack_guarantee();
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited; pthread_mutex_unlock(&lock);
