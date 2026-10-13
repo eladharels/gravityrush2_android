@@ -4,6 +4,48 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — Cabelo branco e pontos de poeira: defeitos do núcleo (iguais no shadPS4 0.19.0)
+
+### Sintomas (museu de Cartagena, jovem Drake, capítulo 2)
+- Cabelo do Drake **branco/brilhante** ao carregar do checkpoint ("Continuar"); num "Novo jogo"
+  fica normal. Permanente enquanto a cena dura.
+- **Pontos amarelos** no ar em toda a cena: as partículas de poeira, que no jogo original são
+  quase invisíveis (captura de um gameplay nativo enviada pelo usuário).
+
+### O que foi descartado no port
+- Interruptores: com **todas** as otimizações do GoW3 desligadas ao vivo (`GOW3_TOGGLE_FILE`,
+  máscara **decimal** 2251796593508351 = 0x7ffff400fffff; o arquivo é lido com `%llu`, hex vira 0
+  e a primeira tentativa foi inválida por isso), cabelo e pontos continuam iguais.
+- Formatos: nenhuma textura amostrada no quadro usa formato sem suporte na GPU (captura F11).
+- *Hash* das imagens pequenas (`MaybeCpuDirty`): corrigido para a imagem inteira (`43de974`),
+  sem efeito no cabelo.
+- `GOW3_READBACK_ALL`: desligado (ver entrada anterior), sem efeito nestes dois.
+
+### Teste decisivo: shadPS4 0.19.0 no mesmo checkpoint
+Os saves do port foram copiados para o shadPS4 (`tools/uc3_saves_to_shadps4.py`: gera o
+`param.sfo` de cada pasta a partir de um modelo, com o nome da pasta e os textos do `param.bin`).
+"Continuar" lá carrega o museu, e a imagem é **idêntica**: cabelo branco e pontos amarelos
+(`out/shad-hair.png` vs `out/hair-base3.png`). O shadPS4 cai na assertiva `m_gfxEopTick` na
+primeira tentativa (compila shaders na thread da GPU) e passa na segunda, com o cache quente.
+→ Os dois defeitos são do núcleo gráfico (commit base `b4e7ae7`, mesmo comportamento na
+0.19.0). Hipótese para os dois: superfícies com alfa (fios de cabelo e partículas suaves) saindo
+opacas e claras. Fica para quando trouxermos commits posteriores do shadPS4; não é prioridade
+do port.
+
+### Ferramentas desta etapa
+- `tools/uc3_screenshot.ps1`: captura a janela do jogo (ou `-ProcessName shadPS4`) em PNG, trazendo
+  a janela para a frente antes; permite ver o resultado sem o usuário.
+- `tools/uc3_sendkey.ps1`: manda teclas a uma janela (shadPS4: `n` = X, `enter` = Options, setas).
+- `tools/uc3_saves_to_shadps4.py`: saves do port → shadPS4 (backup automático dos do shadPS4).
+- O *probe* carrega o checkpoint do jogador direto ("Continuar" é o primeiro item do menu).
+
+### Próximos passos (do port)
+1. Desempenho do modo preciso (~30 FPS nas cenas pesadas; ~170 submissões por quadro lento).
+2. Piscadas em preto: não reapareceram; rastreio (`GOW3_FLASH_TRACE=1`) pronto se voltarem.
+3. Estabilidade: desde `6681ee4` sem crashes relatados.
+
+---
+
 ## 2026-10-13 — Texturas quebradas ao recarregar: culpa do *readback* agrupado (desligado) (`afb0bfa`)
 
 ### Experimento do usuário
