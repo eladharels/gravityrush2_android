@@ -32,6 +32,14 @@ primeira tentativa (compila shaders na thread da GPU) e passa na segunda, com o 
 opacas e claras. Fica para quando trouxermos commits posteriores do shadPS4; não é prioridade
 do port.
 
+### shadPS4 nightly de 2026-10-12 (`23c4133`): o mesmo
+Baixado em `tools/shadps4-nightly` (config e saves copiados; `--template` no script de saves para
+uma instalação nova). Precisa de 3 execuções até o cache de shaders cobrir o carregamento (cai na
+assertiva nas duas primeiras). Resultado: **cabelo branco e pontos iguais** (`out/nightly-hair.png`),
+a 41 FPS na mesma cena em que o port faz 32–35. Ou seja, ainda não está corrigido no shadPS4 em
+12/10, e o núcleo puro está mais rápido que o nosso modo preciso ali: os commits de buffer cache /
+memory tracker / page manager posteriores ao `b4e7ae7` valem também para desempenho.
+
 ### Ferramentas desta etapa
 - `tools/uc3_screenshot.ps1`: captura a janela do jogo (ou `-ProcessName shadPS4`) em PNG, trazendo
   a janela para a frente antes; permite ver o resultado sem o usuário.
