@@ -27,6 +27,8 @@ uintptr_t runtime_memory_resolve(const char *name);
 void runtime_memory_report(void);
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 const char *runtime_import_name(const char *name);
+/* uc3: the game executable's file name (GOW3_EXECUTABLE, default eboot.bin): argv[0], progname. */
+const char *runtime_executable_name(void);
 uintptr_t runtime_rwlock_resolve(const char *name);
 void runtime_rwlock_report(void);
 void runtime_set_libc_tls(const void *data, uint64_t filesz, uint64_t memsz);

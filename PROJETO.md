@@ -26,14 +26,15 @@ recompilação completa, e a Naughty Dog colocou boa parte do motor nas SPUs.
 
 ## Situação
 
-**Aguardando o dump do jogo.** O ambiente compila, e o código específico do GoW3 que poderia
-atrapalhar outro jogo foi isolado. Detalhes no [devlog](docs/uc3/DEVLOG.md).
+**Fase 3 — implementar o que falta.** O executável do Uncharted 3 (`big3-ps4_Shipping.elf`,
+versão 01.02) já é preparado e carregado pelo port; faltam 69 funções do sistema, listadas em
+[docs/uc3/IMPORTS.md](docs/uc3/IMPORTS.md). Detalhes no [devlog](docs/uc3/DEVLOG.md).
 
 | Fase | Objetivo | Status |
 |---|---|---|
 | 0 | Ambiente de build, estudo do código, organização | concluída |
 | 1 | Separar o que é específico do GoW3 do que é genérico | concluída (launcher fica para a fase 5) |
-| 2 | Preparar o eboot do Uncharted e listar as funções faltantes (`--check-imports`) | precisa do dump |
+| 2 | Preparar o executável do Uncharted 3 e listar as funções faltantes (`--check-imports`) | concluída: 69 faltando ([IMPORTS.md](docs/uc3/IMPORTS.md)) |
 | 3 | Implementar o runtime até o jogo abrir (menus) | precisa do dump |
 | 4 | Gameplay: gráficos, áudio, cutscenes, saves | precisa do dump |
 | 5 | Launcher, patches (resolução, FPS), polimento | — |
@@ -54,6 +55,18 @@ No ambiente desta máquina, o MSYS2 está em `D:\msys64`:
 ```bash
 export MSYS2_ROOT=/d/msys64
 bash build.sh        # gera out/gow3-probe.exe
+```
+
+## Rodar o Uncharted 3
+
+No terminal MSYS2 CLANG64 (ou com as variáveis definidas no PowerShell):
+
+```bash
+export MSYS2_ROOT=D:/msys64
+export GOW3_GAME_DIR=D:/Uncharted/CUSA02344/app0
+export GOW3_PATCH_DIR=D:/Uncharted/CUSA02344/patch
+export GOW3_EXECUTABLE=big3-ps4_Shipping.elf
+python run.py --check-imports   # lista as funções que faltam; sem a opção, roda o jogo
 ```
 
 Há também um ambiente de apoio no **WSL (Ubuntu 26.04)**, em `~/uncharted/uc3_pc`, para os

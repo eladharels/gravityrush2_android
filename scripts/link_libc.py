@@ -71,8 +71,8 @@ def module(path):
                 sha256=hashlib.sha256(source).hexdigest(), missing=missing)
 
 
-def link(game, out):
-    main = module(game/'eboot.bin')
+def link(game, out, executable='eboot.bin'):
+    main = module(game/executable)
     libc = module(game/'sce_module/libc.prx')
     raw = (out/'boot.bin').read_bytes()
     magic, size, entry, ns, nr, ni, flags = unpack('<8s6Q', raw, 0)
@@ -208,5 +208,6 @@ if __name__=='__main__':
     import argparse
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('game',type=Path);p.add_argument('--out',type=Path,default=Path(__file__).resolve().parent.parent/'out')
+    p.add_argument('--executable',default='eboot.bin')
     a=p.parse_args()
-    link(a.game,a.out)
+    link(a.game,a.out,a.executable)

@@ -195,8 +195,8 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
         static int32_t need_libc_internal = 1; /* SDK marker variable referenced by Fios2 */
         if (!strcmp(name, "f7uOxY9mM1U#libkernel")) return (uintptr_t)&stack_canary;
         if (!strcmp(name, "ZT4ODD2Ts9o#libSceLibcInternal")) return (uintptr_t)&need_libc_internal;
-        static const char *progname = "eboot.bin";
-        if (!strcmp(name, "djxxOmW6-aw#libkernel")) return (uintptr_t)&progname;
+        static const char *progname;
+        if (!strcmp(name, "djxxOmW6-aw#libkernel")) { progname = runtime_executable_name(); return (uintptr_t)&progname; }
         return 0;
     }
     /* Exact imports; the suffix is the exporting library. */
@@ -273,4 +273,8 @@ const char *runtime_import_name(const char *name) {
     char canonical[128];
     const char *symbol=runtime_symbol(canonical_name(name,canonical));
     return symbol ? symbol : "name not resolved; see analysis.json import_name_hints";
+}
+const char *runtime_executable_name(void) {
+    const char *name=getenv("GOW3_EXECUTABLE");
+    return name && *name ? name : "eboot.bin";
 }

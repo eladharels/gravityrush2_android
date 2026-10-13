@@ -838,7 +838,9 @@ int main(int argc, char **argv) {
     }
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
-    struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};
+    static char program[256];
+    snprintf(program, sizeof(program), "/app0/%s", runtime_executable_name());
+    struct { uint64_t argc; const char *argv[2]; } params = {1, {program, NULL}};
 #ifdef _WIN32
     typedef void (ABI *Entry)(void *, void (ABI *)(void));
     ((Entry)(image + entry))(&params, guest_exit);

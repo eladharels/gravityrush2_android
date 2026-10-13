@@ -131,8 +131,10 @@ def main():
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
 
     game = Path(env.get('GOW3_GAME_DIR', PORT.parent / 'CUSA01623'))
-    if not (game / 'eboot.bin').is_file():
-        fail(f'No eboot.bin in {game} (set GOW3_GAME_DIR).')
+    # uc3: GOW3_EXECUTABLE picks the game executable (big3-ps4_Shipping.elf: Uncharted 3).
+    executable = env.get('GOW3_EXECUTABLE', 'eboot.bin')
+    if not (game / executable).is_file():
+        fail(f'No {executable} in {game} (set GOW3_GAME_DIR).')
     update_view = None
     if env.get('GOW3_PATCH_DIR'):
         import game_update
@@ -149,9 +151,9 @@ def main():
                            '--enabled', env.get('GOW3_MODS_ENABLED', '1'), capture=True).strip())
     mod_view = game if game.resolve() != original_game else None
     try:
-        run_script('prepare.py', game, '--out', out)
-        run_script('link_libc.py', game, '--out', out)
-        run_script('link_modules.py', game, '--out', out)
+        run_script('prepare.py', game, '--out', out, '--executable', executable)
+        run_script('link_libc.py', game, '--out', out, '--executable', executable)
+        run_script('link_modules.py', game, '--out', out, '--executable', executable)
         run_script('content_profile.py', game, '--out', out, '--sku', env.get('GOW3_CONTENT_SKU', 'full'))
 
         import patches

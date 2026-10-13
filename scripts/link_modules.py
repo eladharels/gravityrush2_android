@@ -97,12 +97,12 @@ def patch_fs_loads(image, ph, base):
     return patched
 
 
-def link(game, out, module_names=DEFAULT_MODULES, optional=()):
+def link(game, out, module_names=DEFAULT_MODULES, optional=(), executable='eboot.bin'):
     absent = [name for name in module_names if name in optional and not (game / 'sce_module' / name).is_file()]
     for name in absent:
         print(f'Linked modules: {name} not shipped with this game, its imports go to the host runtime')
     module_names = [name for name in module_names if name not in absent]
-    main = module(game / 'eboot.bin')
+    main = module(game / executable)
     raw = (out / 'boot.bin').read_bytes()
     magic, size, entry, ns, nr, ni, flags = unpack('<8s6Q', raw, 0)
     if magic != b'G3PROBE2':
@@ -256,8 +256,10 @@ if __name__ == '__main__':
     p.add_argument('game', type=Path)
     p.add_argument('--out', type=Path, default=Path(__file__).resolve().parent.parent / 'out')
     p.add_argument('--modules', nargs='*', default=None)
+    p.add_argument('--executable', default='eboot.bin')
     a = p.parse_args()
     if a.modules is None:
-        link(a.game, a.out, DEFAULT_MODULES, optional=set(DEFAULT_MODULES) - set(REQUIRED_MODULES))
+        link(a.game, a.out, DEFAULT_MODULES, optional=set(DEFAULT_MODULES) - set(REQUIRED_MODULES),
+             executable=a.executable)
     else:
-        link(a.game, a.out, a.modules)
+        link(a.game, a.out, a.modules, executable=a.executable)

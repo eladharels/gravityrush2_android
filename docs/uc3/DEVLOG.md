@@ -4,6 +4,76 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — Fase 2: o Uncharted 3 passa pelo loader; 69 funções faltando
+
+### Executável escolhível
+- `prepare.py`, `link_libc.py` e `link_modules.py` ganharam `--executable` (padrão
+  `eboot.bin`, então o GoW3 continua igual).
+- `run.py` lê **`GOW3_EXECUTABLE`** e repassa aos scripts.
+- O runtime usa o mesmo nome no `argv[0]` (`/app0/big3-ps4_Shipping.elf`), no `getargv` e no
+  `__progname` (`runtime_executable_name()` em `src/runtime.c`).
+
+Comando completo:
+```powershell
+$env:GOW3_GAME_DIR='D:/Uncharted/CUSA02344/app0'
+$env:GOW3_PATCH_DIR='D:/Uncharted/CUSA02344/patch'
+$env:GOW3_EXECUTABLE='big3-ps4_Shipping.elf'
+python run.py --check-imports     # no MSYS2 CLANG64; MSYS2_ROOT=D:/msys64
+```
+
+### Resultado
+O `big3` 01.02 é preparado e linkado sem erro, e a GPU inicializa (327 funções HLE). **69
+importações sem implementação**, 68 delas identificadas. A lista, organizada por prioridade,
+está em **[IMPORTS.md](IMPORTS.md)**, que é o checklist da fase 3. Resumo:
+
+| Grupo | Qtd | Tipo |
+|---|---|---|
+| `libSceFiber` (fibras) | 7 | **real**, prioridade máxima |
+| `libSceVideodec2` (cutscenes) | 10 | real (reaproveitar o FFmpeg do `runtime_videodec.c`) |
+| Módulos/executáveis (`LoadStartModule`, `Dlsym`, `LoadExec`, unwind) | 4 | real |
+| `libScePosix` (arquivos, rede) | 17 | mapear / stub de rede |
+| kernel, controle, relógio, PlayGo, AppContent | 15 | mapear / stub |
+| online e diálogos (NpTus, NpSignaling, ErrorDialog…) | 16 | stub |
+
+### O que as strings do `big3` mostram
+- **Fibras por toda parte:** `NdJobWorkerThread %d`, `NdJob Fiber (%lu KiB)`, `CreateFiber`,
+  `SwitchToFiber`, `Suspending fiber job`. É o sistema de jobs da palestra da Naughty Dog na
+  GDC 2015 (*Parallelizing the Naughty Dog Engine Using Fibers*). Os travamentos antigos do
+  shadPS4 (`NdJobWorkerThread`, `condvar`) vinham daqui, então **`libSceFiber` precisa ser
+  sólida**: cada fibra tem pilha e registradores próprios, e trocar de fibra não pode
+  confundir o TLS/TCB da thread (que o loader redireciona para o slot TLS do TEB no Windows).
+- Referências a `/app0/eboot.bin`, `/app0/big2-ps4_Shipping.elf` e
+  `/app0/big3-ps4_Shipping.elf`: o `sceSystemServiceLoadExec` é o "voltar ao menu" e o
+  "trocar de jogo".
+- Carrega módulos do sistema em tempo de execução (`libSceFiber.prx`, `libSceNpManager.prx`,
+  `libSceAjm.prx`…). O runtime já serve essas bibliotecas, então o `LoadStartModule` só precisa
+  de um handle coerente.
+- Caminho de build original: `d:/dev/CP9/u3final-ps4/big3/...`.
+
+### Bug corrigido: a visão "jogo + atualização" não era removida no Windows
+Na primeira execução, a limpeza da visão temporária falhou (`WinError 145` em `sce_sys`).
+Causa, no `game_update.py` original do GoW3: sem o modo de desenvolvedor, os links são
+*junctions*/*hard links*, guardados num registro interno (`mods.LINKED`). Quando a atualização
+também tem `sce_sys`, o link vira uma pasta de verdade, mas o nome **ficava no registro**, e a
+limpeza tentava remover a pasta como se fosse link.
+- Correção: `remove()` tira o caminho do `LINKED` ao remover um link.
+- **O dump não foi afetado:** contagem conferida antes e depois (app0 15.165 arquivos,
+  58,58 GB; patch 208, 2,05 GB). A sobra foi removida apagando só *hard links* e *junctions*,
+  sem entrar nelas.
+- Efeito colateral bom: **2 testes que falhavam no GoW3 original no Windows passaram**
+  (`test_game_update`: `removing_the_view_leaves_the_dumps_whole` e
+  `folders_the_update_leaves_alone_are_linked_whole`). Windows: 9 falhas (eram 11), todas
+  limitações conhecidas da plataforma.
+
+### Ferramenta
+`tools/nid_names.py`: dá nome aos NIDs de um log do `--check-imports`, calculando o hash de
+nomes candidatos do SDK.
+
+### Próximo passo: fase 3
+Seguir o [IMPORTS.md](IMPORTS.md): primeiro os stubs e mapeamentos baratos (para o jogo
+avançar) e o `LoadStartModule`; depois **fibras** e **Videodec2**. Em seguida, rodar de
+verdade e corrigir o que parar.
+
 ## 2026-10-13 — Dump do jogo extraído
 
 ### O pacote

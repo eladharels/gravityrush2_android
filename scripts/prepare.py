@@ -125,8 +125,9 @@ def inspect_libc(path):
     return evidence
 
 
-def prepare(game, out):
-    source = (game / 'eboot.bin').read_bytes()
+def prepare(game, out, executable='eboot.bin'):
+    # uc3: a collection ships one executable per game (big3-ps4_Shipping.elf is Uncharted 3).
+    source = (game / executable).read_bytes()
     elf, header, ph, segments, missing = parse_self(source)
     loads = [p for p in ph if p['type'] in (1, 0x61000010)]
     def mapped(addr, size=8):
@@ -232,7 +233,7 @@ def prepare(game, out):
         if path.is_file():
             resources[path.relative_to(game / 'dvdroot_ps4').parts[0]] += 1
             total_bytes += path.stat().st_size
-    report = dict(source_sha256=hashlib.sha256(source).hexdigest(), source_bytes=len(source),
+    report = dict(executable=executable, source_sha256=hashlib.sha256(source).hexdigest(), source_bytes=len(source),
                   sfo=sfo((game / 'sce_sys/param.sfo').read_bytes()), entry=hex(header[4]),
                   image_bytes=size, program_headers=ph, self_segments=segments,
                   unavailable_metadata_headers=missing, needed=[string(v) for t, v in dyn if t == 1],
@@ -254,10 +255,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('game', type=Path)
     parser.add_argument('--out', type=Path, default=Path(__file__).resolve().parent.parent / 'out')
+    parser.add_argument('--executable', default='eboot.bin', help='game executable in the game folder')
     args = parser.parse_args()
     # The title is printed; a console or pipe in a legacy code page cannot encode every language.
     sys.stdout.reconfigure(errors='replace')
     try:
-        prepare(args.game, args.out)
+        prepare(args.game, args.out, args.executable)
     except (ValueError, OSError, StopIteration, KeyError, IndexError) as error:
         parser.exit(1, f'prepare failed: {error}\n')

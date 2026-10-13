@@ -10,7 +10,7 @@ from pathlib import Path
 import shutil
 import tempfile
 
-from mods import is_link, make_link
+from mods import LINKED, is_link, make_link
 
 
 def overlay(source, dest):
@@ -41,6 +41,9 @@ def remove(path):
             os.rmdir(path)
         else:
             path.unlink()
+        # uc3: forget the link, or a real folder made later at the same path (overlay) would
+        # still count as one, and removing the view would fail on it (Windows junctions).
+        LINKED.pop(str(path), None)
     elif path.is_dir():
         for child in list(path.iterdir()):
             remove(child)
