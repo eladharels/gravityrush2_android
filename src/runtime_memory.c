@@ -91,7 +91,7 @@ typedef struct { int kind; uintptr_t address; uint64_t size; } PendingHook;
 /* uc3: grows as needed. Uncharted 3 maps direct memory in hundreds of 1 MiB pieces, and one
  * unmap or protect over the whole range queues a notification per piece (64 slots overflowed). */
 static PendingHook *pending; static size_t pending_count, pending_capacity;
-static size_t allocations, maps, flexible_maps, protects, queries;
+static size_t allocations, maps, flexible_maps, protects, queries, fixed_replaced;
 static uint64_t live_bytes, flexible_bytes;
 
 static int valid_alignment(uint64_t a) { return a >= PAGE && a <= POOL_SIZE && !(a & (a-1)); }
@@ -380,6 +380,17 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
     if (flags & MAP_FIXED_FLAG) {
         if (!address || address%PAGE) return INVALID;
         if ((flags & MAP_NO_OVERWRITE) && overlaps(address,address+size,1)) return NO_MEMORY;
+        /* uc3: the mapping replaced here is gone for the GPU too, as for an unmap; its cached
+         * buffers and images otherwise outlive the new contents (Uncharted 3 maps its 1 MiB
+         * pool chunks over themselves when a level is loaded again). */
+        if (kind!=KIND_RESERVED)
+            for (size_t i=vma_index(address); i<vma_count && vmas[i].start<address+size; ++i)
+                if (vmas[i].kind!=KIND_RESERVED) {
+                    uintptr_t a=vmas[i].start>address ? vmas[i].start : address;
+                    uintptr_t b=vmas[i].end<address+size ? vmas[i].end : address+size;
+                    queue_hook(HOOK_UNMAP,a,b-a);
+                    ++fixed_replaced;
+                }
     } else {
         address=find_free(address,size,alignment);
         if (!address) return NO_MEMORY;
@@ -450,10 +461,13 @@ static int32_t map_direct_locked(void **out, uint64_t size, int prot, int flags,
 }
 static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, int64_t physical, uint64_t alignment) {
     write_lock();
+    size_t replaced=fixed_replaced;
     int32_t result=map_direct_locked(out,size,prot,flags,physical,alignment);
+    replaced=fixed_replaced-replaced;
     write_unlock();
     flush_hooks();
-    if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x\n", *out, size, prot);
+    if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x%s\n", *out, size, prot,
+                        replaced ? " (over a mapping)" : "");
     return result;
 }
 static ABI int32_t direct_map_named(void **out, uint64_t size, int prot, int flags, int64_t physical,
@@ -836,5 +850,6 @@ void runtime_memory_report(void) {
            allocations, maps, live_bytes, POOL_SIZE);
     printf("Runtime: flexible maps=%zu, in use=%" PRIu64 ", protects=%zu, queries=%zu, regions=%zu\n",
            flexible_maps, flexible_bytes, protects, queries, vma_count);
+    printf("Runtime: fixed maps over mapped memory=%zu\n", fixed_replaced);
 }
 
