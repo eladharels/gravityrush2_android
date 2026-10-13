@@ -4,6 +4,80 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-14 — Investigação: o cenário some (gameplay); estado atual
+
+### Sintomas (vistos pelo usuário no bar de Londres, cap. 1)
+- **Paredes, chão e teto do cenário não aparecem** (fundo liso). Personagens, objetos soltos e
+  divisórias aparecem. Personagem do fundo fica preto (sem a iluminação do cenário).
+- Atraso no rosto, roupa entrando no corpo, textura esticando em cenas rápidas, NPC piscando.
+- Tela de título: listras laranja na areia (**também no shadPS4**: defeito do núcleo, não do port);
+  falta a névoa/gradiente do céu (**só no port**).
+- FPS: 30–46 em combate (GPU 53–77%).
+
+### Teste decisivo: shadPS4 0.19.0 desenha o cenário
+`tools/shadps4` (portátil: `user/` ao lado do exe; `user/config.json` com
+`direct_memory_access_enabled`, `readbacks_mode: 2`, `redzone_patches`). Ele precisa das
+pastas reais com os nomes `CUSA02344` e `CUSA02344-UPDATE` (junctions confundem o relançamento),
+então o jogo foi reorganizado (contagens conferidas, nada perdido):
+```
+D:\Uncharted\CUSA02344\CUSA02344          jogo base (real)
+D:\Uncharted\CUSA02344\CUSA02344-UPDATE   1.02 (real)
+D:\Uncharted\CUSA02344\app0, patch        junctions para o port
+```
+Comando: `shadPS4.exe -g D:\Uncharted\CUSA02344\CUSA02344\eboot.bin` (menu → Uncharted 3).
+No bar, **o cenário aparece no shadPS4** → o problema é do port. O shadPS4 cai mais adiante na
+assertiva `m_gfxEopTick` (compila shaders na thread da GPU; ela fica quadros para trás).
+
+### Descartado (o cenário continua sumido)
+| Hipótese | Teste |
+|---|---|
+| Leituras adiadas/"stale" da GPU | desligadas no menu (`deferred_readback=0`, `stale_readback=0`; o FPS melhorou e ficou assim) |
+| Otimizações do GoW3 | todas desligadas ao vivo (`GOW3_TOGGLE_FILE`, máscara `0x7ffff400fffff`) |
+| Pipeline de desenho em duas threads | `GOW3_DRAW_PIPE=0` desde o início |
+| Compilação de shaders em segundo plano | desligada (sem ela: assertiva `m_gfxEopTick`, como no shadPS4; religada no `gow3.ini`) |
+| *Direct memory access* | `GOW3_DIRECT_MEMORY_ACCESS=1` com cache de shaders novo |
+| Desenhos descartados pelo port | `uc3 draw stats`: ~600 desenhos/quadro, **0** sem pipeline; `FilterDraw` e `RefreshGraphicsKey` iguais ao upstream |
+| Consultas de oclusão / modo PS4 Pro | iguais ao upstream / `sceKernelIsNeoMode` = 0 |
+| Carregamento de arquivos | `GOW3_FILE_TRACE`: `ldn-pub-bathroom.pak` (11,9 MB) lido, **0 falhas** de leitura/abertura |
+| Correções do recompilador 0.19.0 | 2f40f87b5 (ballot/MBCNT), d9cf41ba0, 4c7b287f1 trazidas (`4ae3bbb`) |
+
+### O que o analisador de quadros mostrou (bar, ~60 etapas)
+Adaptado ao Uncharted (`5fb48bf`): grava a partir da primeira etapa depois de armado e registra
+desenhos/dispatches indiretos. Disparo automático: `GOW3_CAPTURE_TRIGGER=<arquivo>` + criar o
+arquivo; saída em `user/captures/`. Estrutura do quadro:
+- `#0` pré-profundidade (58 desenhos) · `#2` passagem principal (130, RGBA16F + D32S8) ·
+  `#4`/`#7` sombras.
+- **`#8`–`#15`: 4 pares (só profundidade, depois cor em 2× RGBA16F) com 1 `DrawIndexIndirect`
+  cada** (`max 1`, passo 20, argumentos em `0x1127020200/220/240/260`). **É o cenário**,
+  desenhado pela GPU.
+- Os argumentos são escritos pelo **compute `9bd0e806`** (etapa `#6`, 4 dispatches de 1×1×1;
+  *slots* 2/3/5 entradas, 4/6 = buffers de índices de 3 MiB, 7 = argumentos). Antes dele, o
+  compute `6a6422a9` (768 grupos).
+- No desenho: CPU vê `0 0 0 0 0`, o cache diz **`cpu modified 0, gpu modified 1`** → o port usa
+  o valor da GPU (sincronização correta).
+
+### Onde parou
+Falta saber **o valor que a GPU calculou** para os argumentos. Já está no código (`5fb48bf`,
+compilar antes de testar): com captura ativa, `DrawIndirect` chama `ReadMemory(args, 20, true)`
+para trazer o valor da GPU antes do desenho, e a nota da captura mostra os 5 números.
+- **Contagem 0** → o problema está no compute de descarte (`9bd0e806`/`6a6422a9`): tradução do
+  shader, entradas (*user data*, DMA) ou dados que ele lê.
+- **Contagem normal** → os desenhos saem invisíveis: buffers de índices/vértices (os de 3 MiB),
+  estado (profundidade, viewport) ou *vertex shader* `1bf62085`.
+
+Rodar: `tools/uc3_hang_probe.py` (aperta X sozinho, chega ao banheiro em ~110 s) com
+`GOW3_CAPTURE_TRIGGER` e um gatilho criado aos ~105 s.
+
+### Outras descobertas desta etapa
+- **Modo coletânea:** o menu (`eboot.bin`) roda no port (0 importações faltando com `unlink`) e o
+  `LoadExec` reinicia o port com `big3` + `eboot.bin ispartofuccollection` (`ba38fdd`). Mas o
+  `big3` nesse modo fica em **tela cinza** no port (a 60 FPS, sem threads presas); no shadPS4
+  segue normal. Possivelmente a mesma causa do cenário (espera algo que não fica pronto).
+- O analisador original caía num buffer sem cópia na CPU (corrigido).
+- Diferenças restantes para a 0.19.0: ~70 commits do núcleo não trazidos (buffer cache/memory
+  tracker, page_manager, user data via *flat buffer* `8c91be2b4`, `ConstructSharpFetch`
+  `41c0fca5e`…). Atualizar o núcleo inteiro é a alternativa se a investigação pontual travar.
+
 ## 2026-10-14 — "Novo jogo" travava: impasse na GPU; a cutscene de abertura roda
 
 ### Sintoma
