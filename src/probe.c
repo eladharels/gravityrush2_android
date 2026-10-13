@@ -148,8 +148,13 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
     if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2) {
-        /* GPU page tracking (write-protected guest pages) is resolved first. */
-        if (gpu_enabled && gow3gpu_handle_fault(info,(void *)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
+        /* uc3: a speculative read gives up first. Resolving its fault through GPU page tracking
+         * would wait for the GPU thread (a readback) while the reader holds locks that thread
+         * needs: a draw-preparation worker keeps the pipeline cache shared-locked, and the GPU
+         * thread waited for it exclusively (Uncharted 3, New Game). The GPU thread redoes that
+         * work itself. */
+        if (!runtime_fault_recover && gpu_enabled && gow3gpu_handle_fault(info,(void *)record->ExceptionInformation[1]))
+            return EXCEPTION_CONTINUE_EXECUTION;
         if (runtime_fault_recover) {
             /* A speculative guest memory read (GPU draw preparation) faulted: the thread resumes
              * in gow3_longjmp, outside the exception dispatcher, back at its recovery point. */
@@ -197,8 +202,9 @@ static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
 #endif
 #ifndef _WIN32
 static void fault(int sig, siginfo_t *info, void *context) {
-    /* GPU page tracking (write-protected guest pages) is resolved first. */
-    if (gpu_enabled && sig == SIGSEGV && gow3gpu_handle_fault(context, info->si_addr)) return;
+    /* GPU page tracking (write-protected guest pages) is resolved first, except for a speculative
+     * read, which gives up instead of waiting for the GPU thread (see vectored_fault). */
+    if (gpu_enabled && sig == SIGSEGV && !runtime_fault_recover && gow3gpu_handle_fault(context, info->si_addr)) return;
     /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
     if ((sig == SIGSEGV || sig == SIGBUS) && runtime_fault_recover) {
         sigjmp_buf *recover = runtime_fault_recover;
