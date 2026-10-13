@@ -88,7 +88,9 @@ typedef void (*GpuRange)(uintptr_t address, uint64_t size);
 static GpuRange hook_map, hook_unmap, hook_invalidate;
 enum { HOOK_MAP, HOOK_UNMAP, HOOK_INVALIDATE };
 typedef struct { int kind; uintptr_t address; uint64_t size; } PendingHook;
-static PendingHook pending[64]; static size_t pending_count;
+/* uc3: grows as needed. Uncharted 3 maps direct memory in hundreds of 1 MiB pieces, and one
+ * unmap or protect over the whole range queues a notification per piece (64 slots overflowed). */
+static PendingHook *pending; static size_t pending_count, pending_capacity;
 static size_t allocations, maps, flexible_maps, protects, queries;
 static uint64_t live_bytes, flexible_bytes;
 
@@ -268,7 +270,12 @@ static void host_discard(uint64_t phys, uint64_t size) {
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
     GpuRange hook = kind==HOOK_MAP ? hook_map : kind==HOOK_UNMAP ? hook_unmap : hook_invalidate;
     if (!hook) return;
-    if (pending_count==sizeof(pending)/sizeof(*pending)) { fputs("STOP: GPU hook queue overflow\n",stderr); exit(21); }
+    if (pending_count==pending_capacity) {
+        size_t capacity=pending_capacity ? pending_capacity*2 : 256;
+        PendingHook *grown=realloc(pending,capacity*sizeof(*pending));
+        if (!grown) { fputs("STOP: GPU hook queue allocation failed\n",stderr); exit(21); }
+        pending=grown; pending_capacity=capacity;
+    }
     pending[pending_count++]=(PendingHook){kind,address,size};
 }
 /* Runs queued GPU notifications; callers invoke it after dropping the lock. */
