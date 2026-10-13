@@ -4,6 +4,37 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — Texturas quebradas ao recarregar: culpa do *readback* agrupado (desligado) (`afb0bfa`)
+
+### Experimento do usuário
+Com a versão `6681ee4` (modo preciso, *readback* agrupado ligado): **Continuar** do checkpoint →
+quase tudo certo (só o cabelo do Drake errado); **voltar ao menu → Novo jogo** → texturas e
+*lightmaps* quebrados (manchas pretas e ciano nas paredes e no teto do banheiro), igual ao
+"sumiço ao recarregar" do início do projeto. Sem crash em 20 min, 30 FPS com quedas.
+Com `GOW3_READBACK_ALL=0`, a mesma sequência: **texturas certas**, e o desempenho pareceu
+**melhor**, não pior.
+
+### Por quê
+`DownloadAllGpuModified` baixa **todas** as faixas marcadas como modificadas pela GPU, de todas
+as arenas, e grava na memória do jogo. Uma faixa é marcada ao ser *ligada* como escrita
+(`is_written`), não quando a GPU escreve de fato; e quando o jogo reaproveita essa memória para
+dados novos escritos pela CPU (texturas lidas do disco depois de recarregar), a cópia velha da
+arena é gravada por cima dos dados novos. O download por janela do shadPS4 só toca o trecho que
+a CPU está lendo, onde o dado da GPU é justamente o esperado. O agrupado fica como opção
+(`GOW3_READBACK_ALL=1`), **desligado por padrão**. As medições anteriores de "97 → 16 quadros
+lentos" valem só para o percurso do *probe*; na prática o custo (600 MB/s de downloads e
+varredura das arenas) não compensa.
+
+### Em aberto
+- **Cabelo do Drake branco/brilhante** ao carregar do checkpoint (intermitente; o resto do
+  personagem e a cena normais). Separado das texturas do cenário.
+- Desempenho do modo preciso: continua a espera por página; sem o agrupado, ~30 FPS nas cenas
+  pesadas. Alvo: descobrir o que a CPU lê a cada quadro e tratar essas faixas em bloco **sem**
+  tocar nas demais (ex.: só as faixas que a GPU escreveu de verdade, por página do rastreador).
+- Corrida no `ProcessCommands` corrigida em `6681ee4`: sem crashes desde então.
+
+---
+
 ## 2026-10-13 — Crash na área externa do museu: corrida no `ProcessCommands` (`6681ee4`)
 
 ### Sintomas (usuário, modo preciso, Cartagena/jovem Drake)
