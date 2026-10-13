@@ -4,6 +4,56 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-14 — "Novo jogo" travava: impasse na GPU; a cutscene de abertura roda
+
+### Sintoma
+Depois de "Novo jogo" (diálogo de save, barra de progresso, segundo decodificador de vídeo), o
+jogo **parava no carregamento** com quase nenhuma CPU em uso. Em outra execução, caiu numa
+assertiva do próprio motor:
+```
+ASSERTION: GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick
+  Function: FrameBegin   File: ndlib\render\fg-draw-mgr.cpp   Line: 234
+```
+O motor confere que a GPU sinalizou o fim (EOP) de um quadro antigo antes de liberar a memória
+dele. A GPU nunca terminou o quadro.
+
+### Diagnóstico
+`lldb -p <pid> -b -o 'thread backtrace all'` com o jogo parado (o `lldb` vem no toolchain
+CLANG64). O depurador anexa, captura e solta sem matar o processo.
+- **Thread da GPU** (`Liverpool::ProcessCompute` → `PipelineCache::GetProgram`): esperando o
+  `programs_mutex` do cache de pipelines de forma **exclusiva**.
+- **11 threads** em `PageManager::GuestFaultSignalHandler` → `Rasterizer::ReadMemory` →
+  `Liverpool::SendCommand`: falharam ao ler uma página monitorada e esperavam a thread da GPU
+  devolver os dados.
+- Entre elas, **trabalhadores de preparação de desenho** (otimização do port do GoW3,
+  `vk_draw_prep`, `GetProgram` com `sel.worker`). Eles seguram o `programs_mutex`
+  **compartilhado** enquanto leem memória do jogo de forma especulativa
+  (`runtime_fault_recover`: uma falha deveria só abandonar o trabalho).
+
+Ciclo: o trabalhador segura o *lock* e espera a GPU; a GPU espera o *lock*. O loader tratava a
+falha passando **primeiro** pelo rastreamento de páginas da GPU (que espera a thread da GPU) e só
+depois pelo ponto de recuperação, então o "abandonar" nunca acontecia. Bug latente do port do
+GoW3 que o padrão de memória do Uncharted dispara.
+
+### Correção (`4e8bbdb`)
+`src/probe.c` (Windows e Linux): com `runtime_fault_recover` ativo, a falha volta direto ao
+ponto de recuperação, sem consultar o rastreamento da GPU. A thread da GPU refaz o trabalho, e
+as falhas dela são tratadas na hora.
+Resultado: **a cutscene de abertura roda**, sem erros no log.
+
+### Ferramenta: `tools/uc3_hang_probe.py`
+Leva o jogo ao "Novo jogo" apertando X por script (`GOW3_PAD_FILE`, lido pelo
+`runtime_pad.c`) e, quando o log para (ignorando o eco do próprio script) com pouca CPU, salva
+as pilhas de todas as threads em `out/hang-backtrace-full.txt`.
+Cuidado: parar o script pelo gerenciador de tarefas fecha o jogo junto (processo filho).
+
+### Visto pelo usuário na cutscene
+**"Delay de render" no rosto dos personagens.** Hipótese: algo do rosto (animação facial ou
+*skinning*) usa dados do quadro anterior. A parte gráfica do GoW3 tem leituras adiadas e cópias
+do quadro anterior (`GOW3_DEFERRED_READBACK`, `GOW3_STALE_READBACK`) e o pipeline de desenho em
+duas threads (`GOW3_DRAW_PIPE`). `tools/run_uc3.ps1 -Set CHAVE=VALOR,...` liga e desliga essas
+opções para comparar.
+
 ## 2026-10-14 — Fase 3: **o Uncharted 3 chega ao menu principal**
 
 ### Importações: 69 → 0
