@@ -4,6 +4,82 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-13 — Núcleo gráfico atualizado para o shadPS4 v.0.19.0 (`7628587`)
+
+### O que foi feito
+O `gpu/shadps4` saiu do commit `b4e7ae7` (24/09) para a tag **v.0.19.0** (`c7e065d1`, 02/10): 79
+commits do upstream, 96 arquivos do subconjunto vendorado alterados (+2703/−2743). O método foi
+uma mesclagem de três vias com o git, num repositório de trabalho à parte
+(`D:/Uncharted/ref/merge`: ramos `base` = subconjunto em b4e7ae7, `upstream` = v.0.19.0, `port` =
+a árvore vendorada; quebras de linha normalizadas). O clone de consulta fica em
+`D:/Uncharted/ref/shadPS4` (worktrees `shadPS4-b4e7ae7` e `shadPS4-v0.19.0`). O port muda 81
+arquivos do núcleo (~11,5 mil linhas) e acrescenta 45; só 25 arquivos entraram em conflito, e
+quase sempre "o port reescreveu a região e o upstream mexeu ao lado".
+
+### Decisões por área
+- **Rastreador de memória** (`region_manager.h`, `memory_tracker.h`, `page_manager.*`): versão
+  **inteira do upstream** (reescrita #5100: bitsets por palavra, mutex em vez de spin lock,
+  tabela de páginas em dois níveis que exige `PageManager::OnGpuMap` para cada mapeamento, já
+  chamado em `Rasterizer::MapMemory`), com os acréscimos do port reaplicados: janela de falha
+  (`ExtendWriteFault`), checagem sem lock dos *bindings* só de leitura, vigias de leitura dos
+  *readbacks* de imagem (`UpdatePageWatchers(addr, size, write_op, read_op)`), `PageState::Perms`
+  negando tudo enquanto há vigia de leitura (`page_state.h` mantido, com o teste), o tratador de
+  falhas com `IsGpuSideThread`/`OnWriteFault`/estatísticas e a sonda de 8 bytes limitada à página
+  (#5150). **Removido:** `GOW3_HOT_PAGES` (opt-in, medido como prejudicial); `tracker_faults`
+  passa a contar falhas, não páginas.
+- **Dados de usuário dos shaders:** o upstream (#5181) lê os registradores do *flatbuf* em vez de
+  *push constants*; adotado. `PushData` perde `ud_regs` e fica com `motion_param` em 56 e
+  `scene_size` em 60 (64 bytes). Caches de shader/pipeline invalidados (versões 8/8/6).
+- **Fetch shader:** o decodificador novo do upstream (por palavra, sem o `GcnDecodeContext`)
+  dentro do embrulho do port (*snapshot* do compilador assíncrono e cache por thread);
+  `ParseFetchShader` tem as duas formas (bool + `optional`), e `Gcn::ToOptional` converte o
+  `FetchShaderData` por valor do upstream (`Empty()`) para o `optional` que a seleção de pipeline
+  do port usa. O campo `semantic` virou o índice do atributo.
+- **Scheduler:** as "sessões" com *command buffer* de upload do upstream **não** entraram (ninguém
+  as usa na 0.19.0 e conflitam com a gravação em thread do port).
+- **Barreiras (`vk_runtime`):** listas de intervalos por buffer do upstream (o `BarrierTracker`
+  foi removido lá), com o memo e o arredondamento das leituras a 4 KiB do port por cima.
+- **Rasterizer:** `OnFence()` = `ProcessDownloadImages()` do port (drena o *draw pipe* antes);
+  `BufferCache::TickFrame` passa a ser dono do `fault_process_pending`; rejeição de S# inválidos
+  (#5137) dentro do `BindSamplers` do port; `GetDrawOffsets` continua com `optional`.
+- Demais 70 arquivos: versão do port com as correções pequenas do upstream aplicadas pelo git.
+
+### Shim e build
+- `shim/common/logging/log.h` apagado: vale o `log.h` do upstream (classes como enum, `VLog`);
+  `shim/common/logging/log.cpp` implementa `g_class_levels` + `VLog` com a saída em stderr de
+  sempre (`GOW3_GPU_LOG`). `common/logging/classes.cpp` e `common/slot_vector.cpp` entram no
+  CMake. `EmulatorSettingsImpl::IsInlineFetchShader()` = false. `gpu/VENDOR.txt` atualizado.
+- Cadeias de `#include` que vinham do `log.h` antigo (`<algorithm>`, `path_util.h`) explicitadas.
+
+### Testes
+31 alvos passam (`memory-test`, `videodec2-test`, `page-state-test`, `pipeline-binary-cache-test`,
+`async-fetch-snapshot-test`, `aliasing-test`, …). Ajustados: `test_scene_resolution.cpp`
+(`SlotVector::Insert`/`IsAllocated`, capacidade no construtor), `test_async_fetch_snapshot.cpp`
+(stubs do log novo), `test_gpu_runtime_stubs.cpp` (`sigjmp_buf` no Windows, stub de
+`runtime_memory_region_backing`). Não contam: `upscaler-support-test` (`setenv`, só Linux),
+`cheat-hooks-test` (offsets do GoW3) e `scene-resolution`/`taa-shader`/`camera-motion`
+(chamada ao endereço 0 **também no commit anterior**, verificado numa worktree em
+`D:/Uncharted/ref/uc3-base`: testes feitos para Lavapipe, nunca rodaram no Windows).
+
+### Resultado no jogo
+Probe no modo preciso (`GOW3_READBACKS=2`, padrão do `run_uc3.ps1`), `GOW3_FRAME_STATS=1`, sem
+cache de shaders: título e menu a 60 FPS, "Continuar" carrega o museu de Cartagena corretamente
+(`out/update-4.png`: cenário completo, iluminação igual à de antes). No museu, parado no
+checkpoint: **32–48 FPS, mediana ~40** (antes da atualização: 32–35; shadPS4 nightly: 41), pior
+quadro 34–50 ms, sem crash, sem assertiva, sem `Stall` por *readback* (0 ms em 74 quadros lentos;
+o tempo vai para espera da GPU e para os tratadores de falha de leitura/escrita). O cabelo claro
+e os pontos de poeira continuam iguais (defeitos do núcleo também na 0.19.0, ver entrada
+anterior). Falta o teste do jogador: sessão longa, mudança de área e um "Novo jogo" (as texturas
+ao recarregar) com o núcleo novo.
+
+### Próximos passos
+1. Nightly `23c4133` (71 commits depois da 0.19.0: otimizações do cache de texturas #5219,
+   rastreio de vertex/index/indirect #5262, `TryWriteBacking` #5316): mesmo método, a partir do
+   repositório de mesclagem.
+2. Desempenho do modo preciso e os defeitos do núcleo (cabelo, poeira) continuam em aberto.
+
+---
+
 ## 2026-10-13 — Cabelo branco e pontos de poeira: defeitos do núcleo (iguais no shadPS4 0.19.0)
 
 ### Sintomas (museu de Cartagena, jovem Drake, capítulo 2)
