@@ -222,6 +222,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         if (host<0) {
             e=errno;
             if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
+            else printf("Runtime: open(%s, flags 0x%x) -> host error %d\n",guest,flags,e); /* uc3 */
             return -e;
         }
         if (host_fstat(host,&s)) memset(&s,0,sizeof(s));
@@ -245,6 +246,10 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     ++opens;
     pthread_mutex_unlock(&lock);
+    /* uc3: GOW3_FILE_TRACE=1 lists every file opened (compared with shadPS4's log). */
+    static int file_trace=-1;
+    if (file_trace<0) { const char *t=getenv("GOW3_FILE_TRACE"); file_trace=t && t[0]=='1'; }
+    if (file_trace) printf("File trace: open(%s, flags 0x%x) -> fd %d, %lld bytes\n",guest,flags,fd,(long long)s.st_size);
     if (audio_trace() && strstr(guest,"sound/")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
     const char *mod_trace=getenv("GOW3_MOD_TRACE"), *mod_root=getenv("GOW3_MODS_DIR");
     if (mod_trace && mod_trace[0]=='1' && mod_root) {
@@ -294,12 +299,20 @@ static void touch_for_write(void *buffer,uint64_t size) {
         *b=*b;
     }
 }
+/* uc3: a failed read is always reported (the first 50): on Windows a read into a guest page the
+ * GPU tracker protected again after touch_for_write fails instead of faulting. */
+static void read_failed(const char *op,int fd,const void *buffer,uint64_t size,int64_t offset,int e) {
+    static unsigned reported;
+    if (__atomic_fetch_add(&reported,1,__ATOMIC_RELAXED)>=50) return;
+    printf("Runtime: %s(fd %d %s, %llu bytes @%lld into %p) failed, errno %d\n",op,fd,
+           fd>=3 && fd<MAX_FILES ? files[fd].path : "?",(unsigned long long)size,(long long)offset,buffer,e);
+}
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
     touch_for_write(buffer,size);
     ssize_t n=host_read(h,buffer,size);
-    if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,errno); return -errno; }
+    if (n<0) { int e=errno; read_failed("read",fd,buffer,size,-1,e); return -e; }
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
@@ -308,7 +321,7 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     if (h<0) return -EBADF;
     touch_for_write(buffer,size);
     ssize_t n=pread(h,buffer,size,offset);
-    if (n<0) { if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,errno); return -errno; }
+    if (n<0) { int e=errno; read_failed("pread",fd,buffer,size,offset,e); return -e; }
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
