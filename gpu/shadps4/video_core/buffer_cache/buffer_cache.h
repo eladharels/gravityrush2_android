@@ -6,6 +6,7 @@
 #include "gow3_copy.h"
 
 #include <deque>
+#include <span>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -137,6 +138,15 @@ private:
     /// uc3: brings every GPU-modified range of every arena back to guest memory with one
     /// GPU wait (precise readbacks; see ReadMemory).
     void DownloadAllGpuModified();
+    /// uc3: downloads several windows (any arenas) with one GPU wait (GOW3_READBACK_HOT).
+    struct DownloadWindow {
+        const Buffer* arena;
+        VAddr start;
+        u64 size;
+    };
+    void DownloadWindows(std::span<const DownloadWindow> windows);
+    /// uc3: remembers a readback window and returns the other recently read ones.
+    void NoteHotWindow(VAddr start, boost::container::small_vector<VAddr, 16>& others);
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
@@ -174,6 +184,14 @@ private:
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
     bool fault_process_pending{};
+    /// uc3: readback windows the CPU faulted on recently (GOW3_READBACK_HOT), and the frame
+    /// of the last fault on each.
+    struct HotWindow {
+        VAddr start{};
+        u64 frame{};
+    };
+    std::array<HotWindow, 32> hot_windows{};
+    u64 frame_index{};
 
     std::array<const Buffer*, MAX_ARENA_PAGES> address_space{};
     u64 arena_page_bits{MAX_ARENA_PAGE_BITS};

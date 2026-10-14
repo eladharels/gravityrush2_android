@@ -133,6 +133,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 void BufferCache::TickFrame() {
+    ++frame_index;
     if (std::exchange(fault_process_pending, false)) {
         fault_manager->ProcessFaultBuffer();
     }
@@ -194,6 +195,36 @@ static bool ReadbackAll() {
     return all;
 }
 
+// uc3: the CPU reads the same GPU-written windows frame after frame (7 faults, 20 ms in one
+// 50 ms frame at The Chateau), and each fault drains the GPU queue on its own.
+// GOW3_READBACK_HOT=1: a fault also brings back the other windows faulted on in the last
+// few frames, if the GPU wrote them again, under the same wait; the faults that would follow
+// in this frame find them clean. Unlike GOW3_READBACK_ALL it only touches windows the CPU has
+// been reading, where the GPU's data is what it wants. OFF by default until measured.
+static bool ReadbackHot() {
+    static const bool hot = EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise &&
+                            EmulatorSettingsImpl::Flag("GOW3_READBACK_HOT", false);
+    return hot;
+}
+
+void BufferCache::NoteHotWindow(VAddr start, boost::container::small_vector<VAddr, 16>& others) {
+    constexpr u64 HotFrames = 4;
+    HotWindow* slot = nullptr;
+    for (auto& window : hot_windows) {
+        if (window.start == start) {
+            slot = &window;
+        } else if (window.start && frame_index - window.frame <= HotFrames &&
+                   others.size() < others.capacity()) {
+            others.push_back(window.start);
+        }
+    }
+    if (!slot) {
+        // Reuse the oldest slot.
+        slot = &*std::ranges::min_element(hot_windows, {}, &HotWindow::frame);
+    }
+    *slot = HotWindow{start, frame_index};
+}
+
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write] {
         if (ReadbackAll()) {
@@ -215,7 +246,29 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
         const VAddr window_end = std::min<VAddr>(
             std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
-        DownloadMemory(arena, window_start, window_end - window_start);
+        if (ReadbackHot()) {
+            boost::container::small_vector<VAddr, 16> others;
+            NoteHotWindow(window_start, others);
+            boost::container::small_vector<DownloadWindow, 17> windows;
+            windows.push_back({arena, window_start, window_end - window_start});
+            for (const VAddr start : others) {
+                if (!memory_tracker->IsRegionGpuModified(start, WindowSize)) {
+                    continue;
+                }
+                const auto* other = GetArena(start >> block_shift,
+                                             (start + WindowSize - 1) >> block_shift);
+                const VAddr end = std::min<VAddr>(start + WindowSize,
+                                                  other->cpu_addr + other->size_bytes);
+                windows.push_back({other, std::max<VAddr>(start, other->cpu_addr),
+                                   end - std::max<VAddr>(start, other->cpu_addr)});
+            }
+            Gow3Stats::uc3_readback_hot.fetch_add(1, std::memory_order_relaxed);
+            Gow3Stats::uc3_readback_hot_windows.fetch_add(windows.size() - 1,
+                                                          std::memory_order_relaxed);
+            DownloadWindows(windows);
+        } else {
+            DownloadMemory(arena, window_start, window_end - window_start);
+        }
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
         }
@@ -267,6 +320,61 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
                                 copy.size);
     }
     memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
+}
+
+void BufferCache::DownloadWindows(std::span<const DownloadWindow> windows) {
+    struct WindowCopies {
+        const DownloadWindow* window;
+        boost::container::small_vector<vk::BufferCopy, 4> copies;
+    };
+    boost::container::small_vector<WindowCopies, 17> work;
+    u64 total_size_bytes = 0;
+    for (const auto& window : windows) {
+        WindowCopies entry{&window};
+        const VAddr arena_base = window.arena->cpu_addr;
+        memory_tracker->ForEachDownloadRange<false>(
+            window.start, window.size, [&](u64 address, u64 size) {
+                gpu_modified_ranges.ForEachInRange(address, size, [&](VAddr start, VAddr end) {
+                    entry.copies.push_back(vk::BufferCopy{
+                        .srcOffset = start - arena_base,
+                        .dstOffset = total_size_bytes,
+                        .size = end - start,
+                    });
+                    constexpr u64 align = 64ULL;
+                    total_size_bytes += (end - start + align - 1) & ~(align - 1);
+                });
+                gpu_modified_ranges.Subtract(address, size);
+            });
+        if (!entry.copies.empty()) {
+            work.push_back(std::move(entry));
+        }
+    }
+    if (total_size_bytes == 0) {
+        return;
+    }
+    const auto download = staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached);
+    for (auto& entry : work) {
+        for (auto& copy : entry.copies) {
+            copy.dstOffset += download.offset;
+        }
+        runtime.CopyBuffer(entry.window->arena, download.buffer, entry.copies);
+    }
+    scheduler.Finish();
+
+    download.buffer->Invalidate(download.offset, download.size);
+    for (const auto& entry : work) {
+        const VAddr arena_base = entry.window->arena->cpu_addr;
+        for (const auto& copy : entry.copies) {
+            auto* dst_addr = std::bit_cast<u8*>(arena_base + copy.srcOffset);
+            Gow3WriteLog::NoteDownload(reinterpret_cast<u64>(dst_addr),
+                                       download.mapped + (copy.dstOffset - download.offset), copy.size);
+            memory->TryWriteBacking(dst_addr, download.mapped + (copy.dstOffset - download.offset),
+                                    copy.size);
+        }
+    }
+    for (const auto& window : windows) {
+        memory_tracker->UnmarkRegionAsGpuModified(window.start, window.size, false);
+    }
 }
 
 void BufferCache::DownloadAllGpuModified() {

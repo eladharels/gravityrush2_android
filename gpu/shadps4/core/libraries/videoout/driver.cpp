@@ -485,13 +485,15 @@ void VideoOutDriver::Flip(const Request& req) {
             // uc3: draws left out for want of a pipeline (pending compiles included).
             std::printf("uc3 draw stats: %llu draws, %llu without pipeline (%u of them pending "
                         "compiles), %llu indirect, %llu indirect without pipeline; readbacks: "
-                        "%llu all-at-once, %.1f MB\n",
+                        "%llu all-at-once, %.1f MB; %llu with hot windows (+%llu windows)\n",
                         (unsigned long long)(Gow3Stats::draws.load() - uc3_window_draws),
                         (unsigned long long)Gow3Stats::uc3_no_pipeline_draws.exchange(0), pending_draws,
                         (unsigned long long)Gow3Stats::uc3_indirect_draws.exchange(0),
                         (unsigned long long)Gow3Stats::uc3_no_pipeline_indirect.exchange(0),
                         (unsigned long long)Gow3Stats::uc3_readback_all.exchange(0),
-                        Gow3Stats::uc3_readback_all_bytes.exchange(0) / 1e6);
+                        Gow3Stats::uc3_readback_all_bytes.exchange(0) / 1e6,
+                        (unsigned long long)Gow3Stats::uc3_readback_hot.exchange(0),
+                        (unsigned long long)Gow3Stats::uc3_readback_hot_windows.exchange(0));
             uc3_window_draws = Gow3Stats::draws.load();
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);
             const u64 faults = Gow3Stats::tracker_faults.exchange(0);

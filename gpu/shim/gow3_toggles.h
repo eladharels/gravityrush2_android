@@ -92,6 +92,9 @@ inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
 inline std::atomic<std::uint64_t> uc3_no_pipeline_draws{0}, uc3_no_pipeline_indirect{0}, uc3_indirect_draws{0};
 /// uc3: precise readbacks that brought back every GPU-modified range at once, and their bytes.
 inline std::atomic<std::uint64_t> uc3_readback_all{0}, uc3_readback_all_bytes{0};
+/// uc3: precise readbacks with GOW3_READBACK_HOT=1, and the hot windows they brought back
+/// along with the requested one (each one a later fault avoided if the CPU reads it again).
+inline std::atomic<std::uint64_t> uc3_readback_hot{0}, uc3_readback_hot_windows{0};
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).

@@ -4,6 +4,39 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-14 — Readback antecipado (`GOW3_READBACK_HOT=1`, desligado por padrão): museu +11%, ruas +6%
+
+No modo preciso, cada leitura da CPU numa página escrita pela GPU baixa uma janela de 512 KB e
+espera a GPU (`scheduler.Finish()`). Esperar só o tick da última escrita não ajuda: `Finish()`
+já espera só o tick atual e a fila roda em ordem. O que dá para cortar é o **número** de esperas.
+
+**O que mudou** (`buffer_cache.cpp`/`.h`, `gow3_toggles.h`, `driver.cpp`):
+- O cache guarda as últimas 32 janelas que sofreram read fault, com o quadro em que isso
+  aconteceu (`NoteHotWindow`, `frame_index` sobe em `TickFrame`).
+- Com `GOW3_READBACK_HOT=1` (só no modo preciso), um read fault baixa a janela pedida **e** as
+  janelas quentes dos últimos 4 quadros que ainda estão modificadas pela GPU, numa única cópia
+  com um único `Finish()` (`DownloadWindows`, no molde de `DownloadAllGpuModified`).
+- "uc3 draw stats" mostra `N with hot windows (+M windows)`.
+- `medir_hot.bat` em `D:\Uncharted` roda com `GOW3_FRAME_STATS=1,GOW3_READBACK_HOT=1`.
+
+**Medições** (janela, vsync ligado, parado no ponto do save, ~50 s, logs em `out/fps-*-{museu,ruas}.log`):
+
+| Lugar (save) | FPS base | FPS HOT | read faults/quadro lento | tempo neles |
+|---|---|---|---|---|
+| Museu (2%, slot 035) | ~38,5 | ~42,8 | 10,4 → 3,3 | 32 → 24 ms |
+| Ruas (5%, slot 036) | ~16,5 | ~17,5 | 6,4 → 3,0 | 30 → 28 ms |
+
+Imagem sem defeitos visíveis nos dois lugares. Nas ruas o número de faults cai pela metade,
+mas o tempo quase não muda: cada espera ainda pega o quadro inteiro da GPU, que lá é o
+gargalo (GPU ticks ~52% do tempo, ~16 FPS). As ruas são o ponto mais lento medido até agora.
+
+**Armadilha:** carregar um save e continuar faz o jogo gravar o checkpoint de volta no mesmo
+slot. Os testes reescreveram 035 e 036; os originais foram restaurados a partir de
+`D:\antigo\uc3_pc`, e as versões gravadas no teste ficaram em `out/saves-apos-teste/`.
+
+**Próximo:** deixar desligado por padrão até uma sessão longa jogando com ele ligado. O ganho
+grande nas ruas não está no readback, está no custo da GPU por quadro.
+
 ## 2026-10-14 — Máquina nova (D:\Uncharted); janela ganha 2–3 FPS sobre tela cheia
 
 Repositório restaurado do pacote de continuidade (bundle git, `e1fb21d`) em `D:\Uncharted\uc3_pc`;
