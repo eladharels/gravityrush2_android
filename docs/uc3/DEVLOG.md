@@ -4,6 +4,23 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-14 — Máquina nova (D:\Uncharted); janela ganha 2–3 FPS sobre tela cheia
+
+Repositório restaurado do pacote de continuidade (bundle git, `e1fb21d`) em `D:\Uncharted\uc3_pc`;
+jogo em `D:\Uncharted\CUSA02344` (1.00) e `CUSA02344-UPDATE` (1.02), sem as junctions
+`app0`/`patch` (o `tools/run_uc3.ps1` cai nessas pastas quando `app0` não existe). Saves copiados da
+instalação antiga (`D:\antigo\uc3_pc\user\savedata`). Compilação, testes (memory, fiber,
+readback-queue, page-state) e `--check-imports` (0 faltando) ok na RX 6750 XT.
+
+Medição do jogador, mesma cena: **tela cheia 21–22 FPS, janela 24–27 FPS**. No port, "Fullscreen"
+é exclusivo no modo da área de trabalho (`WindowSDL::ApplyDisplayMode`); "Windowed" cria a janela
+com o tamanho da imagem do jogo (1920x1080). O monitor do jogador também é 1920x1080, então o tamanho
+do swapchain é o mesmo nos dois modos: a diferença não vem de resolução. Ainda sem causa medida
+(candidatos: apresentação exclusiva/FIFO do driver AMD versus composição do DWM). `gow3.ini` ficou
+com `display_mode=windowed`.
+
+---
+
 ## 2026-10-13 — O Castelo (27%): port, shadPS4 0.19.0 e nightly no mesmo nível; readback preciso custa pouco aqui (`ad17165`)
 
 Checkpoint `SAVEDATA038` ("O Castelo", combate), mesma cena nas quatro execuções:

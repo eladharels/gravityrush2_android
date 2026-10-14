@@ -7,8 +7,14 @@
 param([string[]]$Set = @(), [string[]]$Extra = @())
 $port = Split-Path -Parent $PSScriptRoot
 $env:MSYSTEM = 'CLANG64'; $env:CHERE_INVOKING = '1'; $env:MSYS2_ROOT = 'D:/msys64'
-$env:GOW3_GAME_DIR = 'D:/Uncharted/CUSA02344/app0'
-$env:GOW3_PATCH_DIR = 'D:/Uncharted/CUSA02344/patch'
+# Layout antigo: junctions CUSA02344\app0 e \patch. Layout novo: jogo em CUSA02344, atualizacao em CUSA02344-UPDATE.
+if (Test-Path 'D:/Uncharted/CUSA02344/app0') {
+    $env:GOW3_GAME_DIR = 'D:/Uncharted/CUSA02344/app0'
+    $env:GOW3_PATCH_DIR = 'D:/Uncharted/CUSA02344/patch'
+} else {
+    $env:GOW3_GAME_DIR = 'D:/Uncharted/CUSA02344'
+    $env:GOW3_PATCH_DIR = 'D:/Uncharted/CUSA02344-UPDATE'
+}
 $env:GOW3_EXECUTABLE = 'big3-ps4_Shipping.elf'
 # Leituras precisas da GPU (readbacks_mode 2 do shadPS4): o modo em que o cenario aparece.
 # -Set GOW3_READBACKS=1 volta ao modo relaxado (padrao do port do GoW3).
