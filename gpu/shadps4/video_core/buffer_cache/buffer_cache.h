@@ -192,6 +192,32 @@ private:
     };
     std::array<HotWindow, 32> hot_windows{};
     u64 frame_index{};
+    /// uc3: scheduler tick of the last GPU write bound in each 512 KiB window, direct-mapped
+    /// (a slot holds the window it belongs to). Read on precise readback faults.
+    struct WriteTick {
+        std::atomic<VAddr> window{};
+        std::atomic<u64> tick{};
+    };
+    static constexpr u64 WriteTickShift = 19;
+    std::array<WriteTick, 4096> write_ticks{};
+    /// Writes too large to note per window (whole arenas) raise this instead.
+    std::atomic<u64> big_write_tick{};
+    void NoteGpuWrite(VAddr device_addr, u64 size);
+    void ClassifyFault(VAddr window_start);
+    /// Tick of the last GPU write noted in [start, start + size); ~0 when a window's slot
+    /// belongs to another window.
+    u64 LastWriteTick(VAddr start, u64 size) const;
+    struct SideCopies {
+        const Buffer* arena;
+        std::span<const vk::BufferCopy> copies;
+    };
+    /// uc3 (GOW3_READBACK_FAST): copies on the side when the GPU already finished the writes
+    /// (write_tick), without submitting and draining the command buffer being recorded.
+    /// False: the caller does the usual copy and Finish().
+    bool SideDownload(std::span<const SideCopies> work, const Buffer* staging, u64 write_tick);
+    vk::CommandPool side_pool{};
+    vk::CommandBuffer side_cmdbuf{};
+    vk::Fence side_fence{};
 
     std::array<const Buffer*, MAX_ARENA_PAGES> address_space{};
     u64 arena_page_bits{MAX_ARENA_PAGE_BITS};

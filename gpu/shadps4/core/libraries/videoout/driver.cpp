@@ -482,10 +482,14 @@ void VideoOutDriver::Flip(const Request& req) {
             const double guest_wait_ms = Vulkan::g_gow3_guest_wait_ns.exchange(0) / 1e6;
             const u32 pending_draws = Vulkan::g_gow3_pending_draws.exchange(0);
             static u64 uc3_window_draws = 0;
+            const u64 uc3_rb_inflight = Gow3Stats::uc3_rb_inflight.exchange(0);
             // uc3: draws left out for want of a pipeline (pending compiles included).
             std::printf("uc3 draw stats: %llu draws, %llu without pipeline (%u of them pending "
                         "compiles), %llu indirect, %llu indirect without pipeline; readbacks: "
-                        "%llu all-at-once, %.1f MB; %llu with hot windows (+%llu windows)\n",
+                        "%llu all-at-once, %.1f MB; %llu with hot windows (+%llu windows); "
+                        "fault write ticks: %llu open, %llu in flight (%.1f ticks behind), "
+                        "%llu done, %llu unknown; fast path: %llu side copies (%.2f ms), "
+                        "%llu full waits\n",
                         (unsigned long long)(Gow3Stats::draws.load() - uc3_window_draws),
                         (unsigned long long)Gow3Stats::uc3_no_pipeline_draws.exchange(0), pending_draws,
                         (unsigned long long)Gow3Stats::uc3_indirect_draws.exchange(0),
@@ -493,7 +497,17 @@ void VideoOutDriver::Flip(const Request& req) {
                         (unsigned long long)Gow3Stats::uc3_readback_all.exchange(0),
                         Gow3Stats::uc3_readback_all_bytes.exchange(0) / 1e6,
                         (unsigned long long)Gow3Stats::uc3_readback_hot.exchange(0),
-                        (unsigned long long)Gow3Stats::uc3_readback_hot_windows.exchange(0));
+                        (unsigned long long)Gow3Stats::uc3_readback_hot_windows.exchange(0),
+                        (unsigned long long)Gow3Stats::uc3_rb_open.exchange(0),
+                        (unsigned long long)uc3_rb_inflight,
+                        uc3_rb_inflight ? double(Gow3Stats::uc3_rb_inflight_ticks.exchange(0)) /
+                                              double(uc3_rb_inflight)
+                                        : 0.0,
+                        (unsigned long long)Gow3Stats::uc3_rb_done.exchange(0),
+                        (unsigned long long)Gow3Stats::uc3_rb_unknown.exchange(0),
+                        (unsigned long long)Gow3Stats::uc3_rb_side.exchange(0),
+                        Gow3Stats::uc3_rb_side_ns.exchange(0) / 1e6,
+                        (unsigned long long)Gow3Stats::uc3_rb_full.exchange(0));
             uc3_window_draws = Gow3Stats::draws.load();
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);
             const u64 faults = Gow3Stats::tracker_faults.exchange(0);

@@ -4,6 +4,47 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-14 — Cópia lateral do readback (`GOW3_READBACK_FAST=1`, desligada): funciona, mas não ganha FPS
+
+Seguindo a investigação do Fable (`/mnt/project-files/uc3/investigacao-fable.md`, seção 1.4).
+
+**Passo 0, diagnóstico** (sempre ligado, na linha "uc3 draw stats"): o cache guarda o tick do
+scheduler da última escrita da GPU em cada janela de 512 KiB (`NoteGpuWrite`, chamado em
+`ObtainBuffer`), e cada read fault é classificado (`ClassifyFault`). `GOW3_READBACK_TRACE=1`
+imprime as 200 primeiras falhas. Nas ruas, por 5 s: ~190 com a escrita no command buffer
+aberto, **~710 com a escrita já concluída na GPU**, 0 em voo. Zero "em voo" porque cada falha
+anterior já esvaziou a fila com `Finish()`.
+
+**Passo A, versão simples** (`GOW3_READBACK_FAST=1`, desligado por padrão): quando a escrita
+da janela já terminou na GPU, a cópia vai num command buffer próprio na mesma fila gráfica
+(`Scheduler::SubmitSide`, sob o `submit_mutex`), com uma barreira global antes. Ela roda logo
+depois do trabalho já submetido e não submete nem espera o command buffer que está sendo
+gravado. Não usei uma segunda fila: dispensa mudar o modo de compartilhamento das arenas.
+O tick anotado é o de quando o buffer foi ligado; o desenho pode cair no command buffer
+seguinte se houver um submit no meio, então a cópia lateral exige que o tick **seguinte**
+também tenha terminado. O detalhe que o Fable apontou no `GOW3_READBACK_HOT` foi
+corrigido (limitar a janela à arena antes de consultar `IsRegionGpuModified`).
+
+| Lugar | Base | HOT | FAST | FAST + HOT |
+|---|---|---|---|---|
+| Ruas | ~16,5 | ~17,5 | ~17,1 | — |
+| Museu | ~38,5 | ~42,8 | ~40,0 | ~43,2 |
+
+FAST leva ~57% das falhas pelo caminho lateral (0,2 ms cada nas ruas, 0,6 ms no museu), sem
+defeito visível, mas o tempo nos tratadores de falha por quadro lento quase não muda
+(ruas ~29 ms). **Conclusão:** as falhas baratas já eram baratas, porque a falha anterior
+tinha acabado de esvaziar a fila. O custo está na primeira falha de cada rajada, que lê dados
+do command buffer aberto e tem de esperar a GPU de qualquer forma. Para isso só servem a
+fence EOP honesta (passo B do Fable) ou menos trabalho de GPU.
+
+**As ruas são limitadas pela GPU**, não pelo readback: ~65 ms por quadro, 1.100 desenhos e
+1.300 a 3.100 dispatches por quadro, GPU ticks ~52% do tempo. É o próximo alvo: descobrir
+qual trabalho da GPU custa tanto ali (captura F11 com tempos de GPU).
+
+Logs: `out/diag-ruas.log`, `out/fast-ruas.log`, `out/fast-museu.log`, `out/fasthot-museu.log`.
+Atalhos: `medir_rapido.bat` e `medir_rapido_hot.bat` em `D:\Uncharted`. Os saves 035 e 036
+foram restaurados de novo depois dos testes.
+
 ## 2026-10-14 — Readback antecipado (`GOW3_READBACK_HOT=1`, desligado por padrão): museu +11%, ruas +6%
 
 No modo preciso, cada leitura da CPU numa página escrita pela GPU baixa uma janela de 512 KB e

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <limits>
 #include <array>
 #include <map>
 #include <unordered_map>
@@ -23,6 +24,7 @@
 #include "video_core/buffer_cache/region_definitions.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -130,7 +132,15 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     }
 }
 
-BufferCache::~BufferCache() = default;
+BufferCache::~BufferCache() {
+    const vk::Device device = instance.GetDevice();
+    if (side_fence) {
+        device.destroyFence(side_fence);
+    }
+    if (side_pool) {
+        device.destroyCommandPool(side_pool);
+    }
+}
 
 void BufferCache::TickFrame() {
     ++frame_index;
@@ -225,6 +235,148 @@ void BufferCache::NoteHotWindow(VAddr start, boost::container::small_vector<VAdd
     *slot = HotWindow{start, frame_index};
 }
 
+void BufferCache::NoteGpuWrite(VAddr device_addr, u64 size) {
+    const u64 tick = scheduler.CurrentTick();
+    const VAddr first = device_addr >> WriteTickShift;
+    const VAddr last = (device_addr + size - 1) >> WriteTickShift;
+    // Huge bindings (whole arenas) would touch every slot; the readback windows are small.
+    if (last - first >= 64) {
+        big_write_tick.store(tick, std::memory_order_relaxed);
+        return;
+    }
+    for (VAddr window = first; window <= last; ++window) {
+        auto& slot = write_ticks[window % write_ticks.size()];
+        slot.window.store(window, std::memory_order_relaxed);
+        slot.tick.store(tick, std::memory_order_relaxed);
+    }
+}
+
+u64 BufferCache::LastWriteTick(VAddr start, u64 size) const {
+    u64 tick = big_write_tick.load(std::memory_order_relaxed);
+    const VAddr last = (start + size - 1) >> WriteTickShift;
+    for (VAddr window = start >> WriteTickShift; window <= last; ++window) {
+        const auto& slot = write_ticks[window % write_ticks.size()];
+        if (slot.window.load(std::memory_order_relaxed) != window) {
+            return ~0ULL;
+        }
+        tick = std::max(tick, slot.tick.load(std::memory_order_relaxed));
+    }
+    return tick;
+}
+
+// uc3: most precise readback faults (about 85% in the streets of Cartagena) read windows whose
+// last GPU write has already finished; the fault still submitted the command buffer being
+// recorded and waited for all of it. GOW3_READBACK_FAST=1 copies those on the side: a command
+// buffer of its own on the graphics queue runs right after the finished work. The noted tick
+// is the one current when the buffer was bound; the draw can land in the next command buffer
+// if a submit comes between, so the tick after it must be finished too.
+static bool ReadbackFast() {
+    static const bool fast = EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise &&
+                             EmulatorSettingsImpl::Flag("GOW3_READBACK_FAST", false);
+    return fast;
+}
+
+bool BufferCache::SideDownload(std::span<const SideCopies> work, const Buffer* staging,
+                               u64 write_tick) {
+    if (!ReadbackFast() || write_tick == ~0ULL) {
+        return false;
+    }
+    auto* semaphore = scheduler.GetWorkSemaphore();
+    if (semaphore->KnownGpuTick() < write_tick + 1) {
+        semaphore->Refresh();
+        if (semaphore->KnownGpuTick() < write_tick + 1) {
+            return false;
+        }
+    }
+    const vk::Device device = instance.GetDevice();
+    if (!side_pool) {
+        side_pool = Vulkan::Check<"create readback command pool">(device.createCommandPool({
+            .flags = vk::CommandPoolCreateFlagBits::eTransient |
+                     vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+            .queueFamilyIndex = instance.GetGraphicsQueueFamilyIndex(),
+        }));
+        const vk::CommandBufferAllocateInfo alloc_info = {
+            .commandPool = side_pool,
+            .level = vk::CommandBufferLevel::ePrimary,
+            .commandBufferCount = 1U,
+        };
+        Vulkan::Check<"allocate readback command buffer">(
+            device.allocateCommandBuffers(&alloc_info, &side_cmdbuf));
+        side_fence = Vulkan::Check<"create readback fence">(device.createFence({}));
+    }
+    const auto start = std::chrono::steady_clock::now();
+    Vulkan::Check(side_cmdbuf.reset());
+    Vulkan::Check(side_cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
+    const vk::MemoryBarrier2 before = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+    };
+    side_cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .memoryBarrierCount = 1U,
+        .pMemoryBarriers = &before,
+    });
+    for (const auto& entry : work) {
+        side_cmdbuf.copyBuffer(entry.arena->Handle(), staging->Handle(),
+                               static_cast<u32>(entry.copies.size()), entry.copies.data());
+    }
+    const vk::MemoryBarrier2 after = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+    };
+    side_cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .memoryBarrierCount = 1U,
+        .pMemoryBarriers = &after,
+    });
+    Vulkan::Check(side_cmdbuf.end());
+    scheduler.SubmitSide(side_cmdbuf, side_fence);
+    Vulkan::Check(device.waitForFences(side_fence, true, std::numeric_limits<u64>::max()));
+    Vulkan::Check(device.resetFences(side_fence));
+    Gow3Stats::uc3_rb_side.fetch_add(1, std::memory_order_relaxed);
+    Gow3Stats::uc3_rb_side_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                             start)
+            .count(),
+        std::memory_order_relaxed);
+    return true;
+}
+
+// uc3: where the last GPU write to a faulting window stands (see Gow3Stats::uc3_rb_*);
+// GOW3_READBACK_TRACE=1 also prints the first 200 faults.
+void BufferCache::ClassifyFault(VAddr window_start) {
+    const VAddr window = window_start >> WriteTickShift;
+    const auto& slot = write_ticks[window % write_ticks.size()];
+    const u64 write_tick =
+        slot.window.load(std::memory_order_relaxed) == window ? slot.tick.load(std::memory_order_relaxed)
+                                                              : 0;
+    const u64 current = scheduler.CurrentTick();
+    auto* semaphore = scheduler.GetWorkSemaphore();
+    semaphore->Refresh();
+    const u64 gpu = semaphore->KnownGpuTick();
+    if (write_tick == 0) {
+        Gow3Stats::uc3_rb_unknown.fetch_add(1, std::memory_order_relaxed);
+    } else if (write_tick >= current) {
+        Gow3Stats::uc3_rb_open.fetch_add(1, std::memory_order_relaxed);
+    } else if (write_tick > gpu) {
+        Gow3Stats::uc3_rb_inflight.fetch_add(1, std::memory_order_relaxed);
+        Gow3Stats::uc3_rb_inflight_ticks.fetch_add(current - write_tick, std::memory_order_relaxed);
+    } else {
+        Gow3Stats::uc3_rb_done.fetch_add(1, std::memory_order_relaxed);
+    }
+    static const bool trace = EmulatorSettingsImpl::Flag("GOW3_READBACK_TRACE", false);
+    static std::atomic<int> traced{0};
+    if (trace && traced.fetch_add(1, std::memory_order_relaxed) < 200) {
+        std::printf("readback fault: window=0x%llx write_tick=%llu current_tick=%llu gpu_tick=%llu "
+                    "frame=%llu\n",
+                    (unsigned long long)window_start, (unsigned long long)write_tick,
+                    (unsigned long long)current, (unsigned long long)gpu,
+                    (unsigned long long)frame_index);
+    }
+}
+
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write] {
         if (ReadbackAll()) {
@@ -246,21 +398,22 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
         const VAddr window_end = std::min<VAddr>(
             std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
+        ClassifyFault(Common::AlignDown(device_addr, WindowSize));
         if (ReadbackHot()) {
             boost::container::small_vector<VAddr, 16> others;
             NoteHotWindow(window_start, others);
             boost::container::small_vector<DownloadWindow, 17> windows;
             windows.push_back({arena, window_start, window_end - window_start});
             for (const VAddr start : others) {
-                if (!memory_tracker->IsRegionGpuModified(start, WindowSize)) {
-                    continue;
-                }
                 const auto* other = GetArena(start >> block_shift,
                                              (start + WindowSize - 1) >> block_shift);
+                const VAddr begin = std::max<VAddr>(start, other->cpu_addr);
                 const VAddr end = std::min<VAddr>(start + WindowSize,
                                                   other->cpu_addr + other->size_bytes);
-                windows.push_back({other, std::max<VAddr>(start, other->cpu_addr),
-                                   end - std::max<VAddr>(start, other->cpu_addr)});
+                if (end <= begin || !memory_tracker->IsRegionGpuModified(begin, end - begin)) {
+                    continue;
+                }
+                windows.push_back({other, begin, end - begin});
             }
             Gow3Stats::uc3_readback_hot.fetch_add(1, std::memory_order_relaxed);
             Gow3Stats::uc3_readback_hot_windows.fetch_add(windows.size() - 1,
@@ -308,8 +461,14 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     for (auto& copy : copies) {
         copy.dstOffset += download.offset;
     }
-    runtime.CopyBuffer(arena, download.buffer, copies);
-    scheduler.Finish();
+    const SideCopies side{arena, copies};
+    if (!SideDownload(std::span{&side, 1}, download.buffer, LastWriteTick(device_addr, size))) {
+        runtime.CopyBuffer(arena, download.buffer, copies);
+        scheduler.Finish();
+        if (ReadbackFast()) {
+            Gow3Stats::uc3_rb_full.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 
     download.buffer->Invalidate(download.offset, download.size);
     for (const auto& copy : copies) {
@@ -353,13 +512,24 @@ void BufferCache::DownloadWindows(std::span<const DownloadWindow> windows) {
         return;
     }
     const auto download = staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached);
+    u64 write_tick = 0;
+    boost::container::small_vector<SideCopies, 17> side;
     for (auto& entry : work) {
         for (auto& copy : entry.copies) {
             copy.dstOffset += download.offset;
         }
-        runtime.CopyBuffer(entry.window->arena, download.buffer, entry.copies);
+        write_tick = std::max(write_tick, LastWriteTick(entry.window->start, entry.window->size));
+        side.push_back({entry.window->arena, entry.copies});
     }
-    scheduler.Finish();
+    if (!SideDownload(side, download.buffer, write_tick)) {
+        for (auto& entry : work) {
+            runtime.CopyBuffer(entry.window->arena, download.buffer, entry.copies);
+        }
+        scheduler.Finish();
+        if (ReadbackFast()) {
+            Gow3Stats::uc3_rb_full.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 
     download.buffer->Invalidate(download.offset, download.size);
     for (const auto& entry : work) {
@@ -566,6 +736,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     }
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
+        NoteGpuWrite(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};
 }

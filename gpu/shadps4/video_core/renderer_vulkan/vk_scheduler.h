@@ -689,6 +689,10 @@ public:
     /// recording into a submitted buffer crashes AMD's driver).
     void WaitSubmitted(std::source_location caller = std::source_location::current());
 
+    /// uc3: submits a command buffer on the graphics queue outside the timeline: it runs after
+    /// everything already submitted, without the command buffer being recorded.
+    void SubmitSide(vk::CommandBuffer cmdbuf, vk::Fence fence);
+
     /// Waits for the given tick to trigger on the GPU.
     void Wait(u64 tick, std::source_location caller = std::source_location::current(),
               u64 submit_ns = 0);

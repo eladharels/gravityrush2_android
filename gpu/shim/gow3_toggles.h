@@ -95,6 +95,14 @@ inline std::atomic<std::uint64_t> uc3_readback_all{0}, uc3_readback_all_bytes{0}
 /// uc3: precise readbacks with GOW3_READBACK_HOT=1, and the hot windows they brought back
 /// along with the requested one (each one a later fault avoided if the CPU reads it again).
 inline std::atomic<std::uint64_t> uc3_readback_hot{0}, uc3_readback_hot_windows{0};
+// uc3: precise readback faults by where the last GPU write to the window stands when the fault
+// comes: still in the open command buffer, submitted but not finished, already finished, or
+// never seen. Decides whether waiting for the write's own tick (not the current one) would pay.
+inline std::atomic<std::uint64_t> uc3_rb_open{0}, uc3_rb_inflight{0}, uc3_rb_done{0},
+    uc3_rb_unknown{0}, uc3_rb_inflight_ticks{0};
+// uc3: GOW3_READBACK_FAST downloads: done on the side (no queue drain) / the full wait, and the
+// time spent waiting for the side copies.
+inline std::atomic<std::uint64_t> uc3_rb_side{0}, uc3_rb_side_ns{0}, uc3_rb_full{0};
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).

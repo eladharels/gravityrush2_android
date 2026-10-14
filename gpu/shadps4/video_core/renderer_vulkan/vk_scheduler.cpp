@@ -351,6 +351,16 @@ void Scheduler::Finish(std::source_location caller) {
     Wait(presubmit_tick, caller, submit_ns);
 }
 
+void Scheduler::SubmitSide(vk::CommandBuffer cmdbuf, vk::Fence fence) {
+    std::scoped_lock lk{submit_mutex};
+    const vk::SubmitInfo submit_info = {
+        .commandBufferCount = 1U,
+        .pCommandBuffers = &cmdbuf,
+    };
+    auto submit_result = instance.GetGraphicsQueue().submit(submit_info, fence);
+    ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+}
+
 void Scheduler::WaitSubmitted(std::source_location caller) {
     const u64 tick = CurrentTick();
     if (tick > 1) {
