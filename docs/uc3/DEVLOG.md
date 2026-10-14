@@ -16,7 +16,22 @@ Medição do jogador, mesma cena: **tela cheia 21–22 FPS, janela 24–27 FPS**
 é exclusivo no modo da área de trabalho (`WindowSDL::ApplyDisplayMode`); "Windowed" cria a janela
 com o tamanho da imagem do jogo (1920x1080). O monitor do jogador também é 1920x1080, então o tamanho
 do swapchain é o mesmo nos dois modos: a diferença não vem de resolução. Ainda sem causa medida
-(candidatos: apresentação exclusiva/FIFO do driver AMD versus composição do DWM). `gow3.ini` ficou
+(candidatos: apresentação exclusiva/FIFO do driver AMD versus composição do DWM).
+
+Medição controlada (mesmo ponto parado do checkpoint `SAVEDATA038`, `GOW3_FRAME_STATS=1`, ~50 s
+cada; logs `out/fps-*-castelo.log`):
+
+| Modo | FPS | Mediana do quadro |
+|---|---|---|
+| Janela, VSync on | 32–33 | 33,2 ms |
+| Tela cheia exclusiva, VSync on | 35–37 | 33,0 ms |
+| Janela, VSync off (Immediate) | 32–33 | 33,2 ms |
+
+Aqui a tela cheia **não** é mais lenta, e desligar o VSync não muda nada: o quadro fica em ~33 ms
+porque ~55 % do tempo é espera pelos *ticks* da GPU (linhas `Stall:`), não apresentação. A diferença
+que o jogador viu (21–22 vs. 24–27) foi em outra cena/momento; não reproduz parado. Nos quadros
+lentos aparecem também falhas de leitura do readback preciso (ex.: 7 falhas = 20 ms num quadro de
+50 ms), então o próximo passo de desempenho é o readback. `gow3.ini` ficou
 com `display_mode=windowed`.
 
 ---
