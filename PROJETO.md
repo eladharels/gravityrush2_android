@@ -26,19 +26,26 @@ recompilação completa, e a Naughty Dog colocou boa parte do motor nas SPUs.
 
 ## Situação
 
-**O Uncharted 3 é jogável do início ao combate** (menu, som, controle, saves, cutscenes), mas
-**o cenário (paredes, chão, teto) não aparece** no gameplay. O shadPS4 0.19.0 desenha o cenário,
-então o problema é do port. Investigação em andamento; detalhes no [devlog](docs/uc3/DEVLOG.md).
+**Jogável do início até O Castelo (27 %)**, com menu, som, controle, saves e cutscenes, sem
+crash do port numa sessão de 2 h. Núcleo gráfico: shadPS4 nightly `23c4133` (12/10/2026),
+atualizado por mesclagem de três vias. O modo de *readback* preciso (`GOW3_READBACKS=2`, padrão)
+é o que desenha o cenário. Desempenho: 60 FPS em menus, 30–48 no museu, 18–24 nas ruas e no
+castelo, no mesmo nível do próprio shadPS4 nessas cenas. Em aberto: o custo do *readback*
+preciso onde ele domina, glitches visuais relatados, e dois defeitos do núcleo (cabelo branco
+após carregar checkpoint, pontos de poeira) que o shadPS4 também tem.
 
-Para jogar: `powershell -ExecutionPolicy Bypass -File tools\run_uc3.ps1` (log em `out\last-run.log`).
+**Para continuar o trabalho numa sessão nova, leia [docs/uc3/HANDOFF.md](docs/uc3/HANDOFF.md).**
+Detalhes e histórico no [devlog](docs/uc3/DEVLOG.md).
+
+Para jogar: `powershell -ExecutionPolicy Bypass -File toolsun_uc3.ps1` (log em `out\last-run.log`).
 
 | Fase | Objetivo | Status |
 |---|---|---|
 | 0 | Ambiente de build, estudo do código, organização | concluída |
 | 1 | Separar o que é específico do GoW3 do que é genérico | concluída (launcher fica para a fase 5) |
-| 2 | Preparar o executável do Uncharted 3 e listar as funções faltantes (`--check-imports`) | concluída: 69 faltando ([IMPORTS.md](docs/uc3/IMPORTS.md)) |
-| 3 | Implementar o runtime até o jogo abrir (menus) | **concluída: menu principal, som e "Novo jogo"** |
-| 4 | Gameplay: gráficos, áudio, cutscenes, saves | em andamento |
+| 2 | Preparar o executável do Uncharted 3 e listar as funções faltantes (`--check-imports`) | concluída: 0 faltando ([IMPORTS.md](docs/uc3/IMPORTS.md)) |
+| 3 | Implementar o runtime até o jogo abrir (menus) | concluída |
+| 4 | Gameplay: gráficos, áudio, cutscenes, saves | **jogável até 27 %; desempenho e glitches em andamento** |
 | 5 | Launcher, patches (resolução, FPS), polimento | — |
 
 ## O que é preciso
@@ -88,7 +95,10 @@ D:\Uncharted\
 ├── tools\pkgtool\       ← PkgTool (LibOrbisPkg), extrai o .pkg
 ├── ref\gow3_pc\         ← port do GoW3 original, só referência
 ├── ref\bloodborne_pc\   ← port do Bloodborne (Windows), só referência
-└── tools\shadps4\       ← shadPS4 0.19.0, para comparar o comportamento do jogo
+├── tools\shadps4\       ← shadPS4 0.19.0, para comparar o comportamento do jogo
+├── tools\shadps4-nightly\ ← shadPS4 nightly 23c4133 (lançar pelo ELF: veja o HANDOFF)
+├── ref\shadPS4\         ← clone do shadPS4 (consulta; worktrees shadPS4-b4e7ae7, shadPS4-v0.19.0)
+└── ref\merge\           ← repositório de mesclagem do núcleo gráfico (ramos base/upstream/port…)
 
 D:\msys64\               ← MSYS2 (build do Windows)
 D:\WSL\Ubuntu\           ← disco do Ubuntu no WSL (repositório em ~/uncharted/uc3_pc)
