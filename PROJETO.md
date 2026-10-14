@@ -37,7 +37,7 @@ após carregar checkpoint, pontos de poeira) que o shadPS4 também tem.
 **Para continuar o trabalho numa sessão nova, leia [docs/uc3/HANDOFF.md](docs/uc3/HANDOFF.md).**
 Detalhes e histórico no [devlog](docs/uc3/DEVLOG.md).
 
-Para jogar: `powershell -ExecutionPolicy Bypass -File toolsun_uc3.ps1` (log em `out\last-run.log`).
+Para jogar: `powershell -ExecutionPolicy Bypass -File tools\run_uc3.ps1` (log em `out\last-run.log`).
 
 | Fase | Objetivo | Status |
 |---|---|---|
