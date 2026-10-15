@@ -898,6 +898,10 @@ private:
 
     void SubmitExecution(SubmitInfo& info, bool async = false);
 
+    /// R.9.13: records the end of the command buffer and its submission (signal_value) for
+    /// the recording thread.
+    void DeferSubmission(SubmitInfo info, u64 signal_value);
+
     /// Calls vkQueueSubmit; the caller holds submit_mutex.
     void QueueSubmit(vk::CommandBuffer cmdbuf, SubmitInfo& info);
 

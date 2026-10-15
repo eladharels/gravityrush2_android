@@ -4,6 +4,22 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 (noite, 3) — R.9.13: o envio antecipado não espera mais a thread de gravação (`GOW3_DEFERRED_SUBMIT=1`, desligado): ruas ~56 → ~58,5 FPS
+
+Teste nas ruas (save 036, início), com `medir_r913.bat`: R.8.4 + HLE + R.9.1 (128 pacotes / 1 ms) + R.9.4 + R.9.6 + R.9.12, sem perfil.
+
+- **Causa:** cada envio antecipado à GPU (~3000 por segundo) custava ~38 µs na etapa B. Desse tempo, ~21 µs eram a espera da thread de gravação Vulkan terminar o command buffer (`SyncRecording`), mais o `end()` e o novo command buffer.
+- **R.9.13 (`GOW3_DEFERRED_SUBMIT=1`, requer `GOW3_ASYNC_SUBMIT=1`):** no envio assíncrono com gravação em thread, a etapa B registra o fim do command buffer como mais um comando (`Scheduler::DeferSubmission`) e segue em frente. A thread de gravação, ao chegar nele:
+  1. espera as cópias de memória anotadas até ali e as threads de cópia;
+  2. dá `end()`;
+  3. põe o command buffer na fila da thread de envio;
+  4. começa o próximo command buffer.
+
+  O pool de command buffers só é usado por essa thread enquanto a gravação está adiada. Os outros envios (síncronos, `Finish`, fallback quando o `on_submit` grava direto) esperam a gravação antes, para manter a ordem na fila. Os sparse binds do `on_submit` tomam o `submit_mutex`.
+- **Resultado:** 57–58,6 FPS, imagem correta, a etapa B fica 68% ocupada. A etapa B agora espera a thread de cópia do anel 8,9% do tempo (ela fica 48% ocupada).
+
+---
+
 ## 2026-10-15 (noite, 2) — R.9.12: cópias do anel de constantes numa thread própria (`GOW3_RING_COPY_THREAD=1`, desligado): ruas ~48 → ~55–56 FPS; T3/T3b sem ganho
 
 Teste nas ruas (save 036, início), com R.8.4 + HLE + R.9.1 + R.9.4 + R.9.6.

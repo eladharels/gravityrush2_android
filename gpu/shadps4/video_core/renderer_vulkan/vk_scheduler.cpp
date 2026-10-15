@@ -518,17 +518,35 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info, bool async) {
+    // gow3 R.9.13 (GOW3_DEFERRED_SUBMIT=1, with GOW3_ASYNC_SUBMIT=1): an asynchronous
+    // submission does not wait here for the recording thread. Its end is recorded like any
+    // command (DeferSubmission): the recording thread ends the command buffer, queues it for
+    // the submit thread and begins the next one, while this thread goes on.
+    static const bool deferred_on = [] {
+        const char* env = std::getenv("GOW3_DEFERRED_SUBMIT");
+        return env && env[0] == '1';
+    }();
+    bool deferred = deferred_on && async && async_submit && IsRecordingDeferred();
+    if (deferred_on && recording_threaded && !deferred) {
+        // Submissions the recording thread still holds reach the queue first.
+        SyncRecording();
+    }
     // gow3 R.9.4: earlier submissions reach the queue first (timeline order, sparse binds).
     // The submit thread takes submit_mutex, so the wait happens without it; re-checked under
     // it in case another thread queued one in between.
     std::unique_lock lk{submit_mutex, std::defer_lock};
-    while (true) {
-        WaitAsyncSubmits();
-        lk.lock();
-        if (async_pending.load(std::memory_order_acquire) == 0) {
-            break;
+    const auto order_after_async = [&] {
+        while (true) {
+            WaitAsyncSubmits();
+            lk.lock();
+            if (async_pending.load(std::memory_order_acquire) == 0) {
+                break;
+            }
+            lk.unlock();
         }
-        lk.unlock();
+    };
+    if (!deferred) {
+        order_after_async();
     }
     SubmitStep step;
     const u64 signal_value = work_semaphore.NextTick();
@@ -542,7 +560,14 @@ void Scheduler::SubmitExecution(SubmitInfo& info, bool async) {
 #endif
 
     if (on_submit) {
+        // R.9.13: sparse binds go to the queue here; the submit thread may be using it.
+        if (deferred) {
+            lk.lock();
+        }
         on_submit(info);
+        if (deferred) {
+            lk.unlock();
+        }
     }
     step.Mark(0);
 
@@ -551,6 +576,24 @@ void Scheduler::SubmitExecution(SubmitInfo& info, bool async) {
     if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
         // Until the next submission's first timestamp: mostly the GPU waiting for it.
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
+    }
+    if (deferred) {
+        if (IsRecordingDeferred()) {
+            DeferSubmission(info, signal_value);
+            step.Mark(2);
+            work_semaphore.Refresh();
+            // The next command buffer starts with the commands recorded from here on.
+            dynamic_state.Invalidate();
+            PopPendingOperations();
+            step.Mark(5);
+            if (step.last) {
+                gow3_submit_count.fetch_add(1, std::memory_order_relaxed);
+            }
+            return;
+        }
+        // on_submit recorded directly: the usual path, after the deferred submissions.
+        SyncRecording();
+        order_after_async();
     }
     SyncRecording();
     step.Mark(2);
@@ -584,6 +627,38 @@ void Scheduler::SubmitExecution(SubmitInfo& info, bool async) {
     if (step.last) {
         gow3_submit_count.fetch_add(1, std::memory_order_relaxed);
     }
+}
+
+void Scheduler::DeferSubmission(SubmitInfo info, u64 signal_value) {
+    info.AddSignal(work_semaphore.Handle(), signal_value);
+    ImGui::Core::TextureManager::Submit();
+    // This thread's batch of guest memory copies goes to the copy threads, which the
+    // recording thread waits for below.
+    Gow3Copy::FlushBatch();
+    // Host copies recorded after this point run on the recording thread after it: counted now.
+    const u64 copies = host_copies_issued.load(std::memory_order_relaxed);
+    Record([this, info, copies](vk::CommandBuffer cmdbuf) mutable {
+        while (host_copies_done.load(std::memory_order_acquire) < copies) {
+            std::this_thread::yield();
+        }
+        Gow3Copy::WaitAsync();
+        Check(cmdbuf.end());
+        {
+            std::scoped_lock alk{async_mutex};
+            async_pending.fetch_add(1, std::memory_order_relaxed);
+            async_queue.emplace_back(cmdbuf, info);
+        }
+        async_cv.notify_one();
+        // The command pool is only used on this thread while recording is deferred (others
+        // first wait for this thread: SyncRecording).
+        const vk::CommandBufferBeginInfo begin_info = {
+            .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+        };
+        current_cmdbuf = command_pool.Commit();
+        Check(current_cmdbuf.begin(begin_info));
+    });
+    // Ends the chunk here: the recording thread passes current_cmdbuf per chunk.
+    KickRecording(true);
 }
 
 void Scheduler::QueueSubmit(vk::CommandBuffer cmdbuf, SubmitInfo& info) {
