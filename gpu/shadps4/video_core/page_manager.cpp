@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <utility>
 #include "common/adaptive_mutex.h"
 #include "common/assert.h"
@@ -58,8 +60,140 @@ struct PageManager::Impl {
     static constexpr size_t NUM_ADDRESS_LOCKS = NUM_ADDRESS_PAGES / NUM_REGION_PAGES;
     inline static Vulkan::Rasterizer* rasterizer;
 
-    Impl() = default;
-    virtual ~Impl() = default;
+    inline static Impl* instance;
+
+    Impl() {
+        instance = this;
+        static const bool enabled = [] {
+            const char* value = std::getenv("GOW3_SRT_BACKING");
+            return !value || value[0] != '0';
+        }();
+        if (enabled) {
+            Shader::SetSrtWalkerHooks(SrtLoadPtr, SrtFixup);
+        }
+    }
+    virtual ~Impl() {
+        Shader::SetSrtWalkerHooks(nullptr, nullptr);
+        instance = nullptr;
+    }
+
+    // uc3 (Fable R.8.1): the SRT walker no longer reads guest pages (B.0): it follows table
+    // pointers in the backing view and records the guest source of each flattened dword
+    // (B.1'). Bytes of a read-protected page that are GPU-written are read back here, after
+    // the walk, instead of in a fault per load (B.2').
+    static constexpr u64 SrtTableReach = 64_KB;
+
+    // Only read-watched pages can hold GPU-written bytes the guest copy lacks (the guest's own
+    // loads would fault there): a cheap filter before IsGpuWritten.
+    static bool SrtPagesReadTracked(VAddr addr, u64 size) {
+        const u64 first = addr >> PM_PAGE_BITS;
+        const u64 last = (addr + size - 1) >> PM_PAGE_BITS;
+        for (u64 page = first; page <= last; ++page) {
+            const PageState* state = instance->cached_pages.find(page);
+            if (state && state->num_read_watchers != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool SrtReadBack(VAddr addr, u64 size) {
+        if (!Shader::SrtWalkerSyncAllowed() || !SrtPagesReadTracked(addr, size) ||
+            !rasterizer->IsGpuWritten(addr, size)) {
+            return false;
+        }
+        rasterizer->ReadMemory(addr, size, rasterizer->IsGpuSideThread());
+        return true;
+    }
+
+    static const u8* SrtBacking(VAddr addr, u64 need) {
+        uintptr_t start = 0, end = 0;
+        int mapped = 0;
+        const unsigned char* backing = nullptr;
+        if (addr == 0 || !runtime_memory_region_backing(addr, &start, &end, &mapped, &backing) ||
+            !mapped || !backing || end - addr < need) {
+            return nullptr;
+        }
+        return backing;
+    }
+
+    // Diagnosis: GOW3_SRT_MODE bits (default 7): 1 = pointers read from the backing view,
+    // 2 = tables read from the backing view, 4 = fixup after the walk, 8 = also on threads
+    // that are not GPU-side.
+    static u32 SrtMode() {
+        static const u32 mode = [] {
+            const char* value = std::getenv("GOW3_SRT_MODE");
+            return value ? static_cast<u32>(std::strtoul(value, nullptr, 0)) : 7u;
+        }();
+        return mode;
+    }
+
+    static Shader::SrtPtr PS4_SYSV_ABI SrtLoadPtr(const u8* host_base, u64 guest_base, u64 off) {
+        const u8* src = host_base + off;
+        // Other threads keep the guest view: their faults read back in full (no R.7 there).
+        const bool gpu_side = (SrtMode() & 8) || rasterizer->IsGpuSideThread();
+        if (guest_base != 0 && (SrtMode() & 1) && gpu_side) {
+            const VAddr guest_src = guest_base + off;
+            if (SrtReadBack(guest_src, sizeof(u64))) {
+                Gow3Stats::uc3_srt_ptr_sync.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (const u8* backing = SrtBacking(guest_src, sizeof(u64))) {
+                src = backing;
+            }
+        }
+        u64 value;
+        std::memcpy(&value, src, sizeof(value));
+        value &= 0xFFFFFFFFFFFFULL;
+        // A table near the end of its mapping keeps the guest address (its loads fault).
+        const u8* table = (SrtMode() & 2) && gpu_side ? SrtBacking(value, SrtTableReach) : nullptr;
+        static const bool trace = std::getenv("GOW3_SRT_TRACE") != nullptr;
+        static std::atomic<int> traced{0};
+        if (trace && traced.fetch_add(1, std::memory_order_relaxed) < 30) {
+            std::printf("srt ptr: host_base=%p guest_base=%#llx off=%#llx -> value=%#llx table=%p\n",
+                        host_base, (unsigned long long)guest_base, (unsigned long long)off,
+                        (unsigned long long)value, table);
+        }
+        return {table ? reinterpret_cast<u64>(table) : value, value};
+    }
+
+    static void SrtFixup(const u64* src, u32* flat, size_t count) {
+        if (!(SrtMode() & 4)) {
+            return;
+        }
+        u64 last_page = ~0ULL;
+        bool tracked = false;
+        u64 synced = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const VAddr addr = src[i];
+            if (addr == 0) {
+                continue;
+            }
+            if ((addr >> PM_PAGE_BITS) != last_page) {
+                last_page = addr >> PM_PAGE_BITS;
+                tracked = SrtPagesReadTracked(addr, sizeof(u32));
+            }
+            static const bool trace = std::getenv("GOW3_SRT_TRACE") != nullptr;
+            static std::atomic<int> traced{0};
+            if (trace && tracked && traced.fetch_add(1, std::memory_order_relaxed) < 60) {
+                std::printf("srt leaf %zu: src=%#llx tracked=%d gpu=%d flat=%#x\n", i,
+                            (unsigned long long)addr, tracked,
+                            rasterizer->IsGpuWritten(addr, sizeof(u32)), flat[i]);
+            }
+            if (!tracked || !rasterizer->IsGpuWritten(addr, sizeof(u32))) {
+                continue;
+            }
+            rasterizer->ReadMemory(addr, sizeof(u32), rasterizer->IsGpuSideThread());
+            if (const u8* backing = SrtBacking(addr, sizeof(u32))) {
+                std::memcpy(&flat[i], backing, sizeof(u32));
+            }
+            ++synced;
+            last_page = ~0ULL;
+        }
+        if (synced) {
+            Gow3Stats::uc3_srt_leaf_sync.fetch_add(synced, std::memory_order_relaxed);
+            Gow3Stats::uc3_srt_sync_walks.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 
     virtual void OnMap(VAddr address, size_t size) {
         // No-op

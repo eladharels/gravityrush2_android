@@ -116,6 +116,8 @@ inline std::atomic<std::uint64_t> uc3_last_gpu_fault{0};
 // uc3: SRT walker loads on protected pages done from the backing view (bytes not GPU-written),
 // and those that still took the synchronous readback.
 inline std::atomic<std::uint64_t> uc3_srt_emulated{0}, uc3_srt_sync{0}, uc3_srt_stale{0};
+// uc3 (R.8.1): walker pointers / leaf dwords read back after the walk, walks that did.
+inline std::atomic<std::uint64_t> uc3_srt_ptr_sync{0}, uc3_srt_leaf_sync{0}, uc3_srt_sync_walks{0};
 // uc3: GPU cost counters (Fable R.3): render passes actually ended, memory barriers recorded by
 // FlushBarriers and how many of them wait on graphics stages, layout transitions that produced
 // a barrier and how many on images of 1920x1080 or more.

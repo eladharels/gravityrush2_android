@@ -4,6 +4,18 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — R.8.1 (B.0 + B.1' + B.2'): o walker SRT não falha mais nas páginas da GPU
+
+O walker JIT agora recebe um contexto (terceiro argumento). Cada ponteiro de tabela passa por uma função em C (`SrtLoadPtr`, page_manager.cpp) que lê o ponteiro, baixa os 8 bytes se vieram da GPU e devolve a visão sem proteção (backing) da tabela; as folhas leem dali e gravam o endereço de origem de cada dword numa tabela. Depois da passada, `SrtFixup` relê só os dwords cuja página tem proteção de leitura e cujos bytes a GPU escreveu (`ReadMemory` de 4 bytes). Versão do cache de shaders 9→10 (o código do walker mudou).
+
+- Só nas threads do lado da GPU: nas outras threads as tabelas seguem pela memória do jogo (com o backing nelas o jogo travava no menu com o assert `m_gfxEopTick`).
+- O filtro é a página com observador de leitura; checar `IsGpuWritten` por página em cada passada custava caro (museu 41 FPS).
+- Ruas (036): ~25,0 FPS, imagem correta; 375 passadas/s, cada uma com exatamente 1 dword escrito pela GPU. Museu (035): ~49,8 FPS (48 com o caminho do R.7 na mesma cena).
+- Sem ganho de FPS ainda: cada dword lido de volta é um `ReadMemory` síncrono. Próximo: B.3 + B.4 do Fable (mascarar as comparações e copiar os 4 bytes na GPU).
+- Diagnóstico: `GOW3_SRT_MODE` (bits: 1 ponteiros, 2 tabelas, 4 fixup, 8 todas as threads; padrão 7), `GOW3_SRT_TRACE=1`.
+
+---
+
 ## 2026-10-15 — Teste A do R.8: os valores escritos pela GPU que o walker achata mudam a imagem
 
 `GOW3_SRT_STALE=1` (experimento, desligado) deixa o walker ler o valor antigo da memória do jogo quando os 4 bytes vieram da GPU, sem esperar. Nas ruas, a iluminação e as sombras somem: a cena fica chapada, com manchas pretas nas bordas. O FPS cai para ~16,5, porque a página nunca é baixada e cada passada do walker volta a falhar (~120 mil exceções por segundo). Conclusão: esses dwords decidem a imagem. Precisa da cópia na GPU (R.8 B).

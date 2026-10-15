@@ -519,7 +519,8 @@ void VideoOutDriver::Flip(const Request& req) {
                 std::printf("uc3 readbacks: %llu async, %.1f ms waited by faulting threads, %llu "
                             "left protected (rewritten), %llu GPU-side overlap waits; sync: %llu "
                             "GPU-side, %llu write faults, %llu other; SRT walker loads: %llu "
-                            "from backing, %llu read back, %llu stale (GOW3_SRT_STALE)\n",
+                            "from backing, %llu read back, %llu stale (GOW3_SRT_STALE); after the walk: %llu "
+                            "pointers, %llu dwords read back in %llu walks\n",
                             (unsigned long long)async, Gow3Stats::uc3_rb_async_ns.exchange(0) / 1e6,
                             (unsigned long long)Gow3Stats::uc3_rb_async_dirty.exchange(0),
                             (unsigned long long)Gow3Stats::uc3_rb_async_overlap.exchange(0),
@@ -528,7 +529,10 @@ void VideoOutDriver::Flip(const Request& req) {
                             (unsigned long long)Gow3Stats::uc3_rb_sync_other.exchange(0),
                             (unsigned long long)Gow3Stats::uc3_srt_emulated.exchange(0),
                             (unsigned long long)Gow3Stats::uc3_srt_sync.exchange(0),
-                            (unsigned long long)Gow3Stats::uc3_srt_stale.exchange(0));
+                            (unsigned long long)Gow3Stats::uc3_srt_stale.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_srt_ptr_sync.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_srt_leaf_sync.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_srt_sync_walks.exchange(0));
             }
             uc3_window_draws = Gow3Stats::draws.load();
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);

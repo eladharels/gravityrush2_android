@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
@@ -42,6 +44,45 @@ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     g_srt_codegen.db(ptr, size);
     g_srt_codegen.ready();
     return func_addr;
+}
+
+namespace {
+
+SrtPtr PS4_SYSV_ABI DefaultSrtLoadPtr(const u8* host_base, u64 guest_base, u64 off) {
+    u64 value;
+    std::memcpy(&value, host_base + off, sizeof(value));
+    value &= 0xFFFFFFFFFFFFULL;
+    return {value, value};
+}
+
+std::atomic<PFN_SrtLoadPtr> g_srt_load_ptr{DefaultSrtLoadPtr};
+std::atomic<PFN_SrtFixup> g_srt_fixup{nullptr};
+thread_local bool t_srt_sync = true;
+
+} // namespace
+
+void SetSrtWalkerHooks(PFN_SrtLoadPtr load_ptr, PFN_SrtFixup fixup) {
+    g_srt_load_ptr.store(load_ptr ? load_ptr : DefaultSrtLoadPtr);
+    g_srt_fixup.store(fixup);
+}
+
+bool SrtWalkerSyncAllowed() {
+    return t_srt_sync;
+}
+
+void RunSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat, size_t flat_dw,
+                  bool sync) {
+    thread_local std::vector<u64> src;
+    src.assign(flat_dw, 0);
+    SrtWalkCtx ctx{g_srt_load_ptr.load(std::memory_order_relaxed), src.data()};
+    const bool was_sync = t_srt_sync;
+    t_srt_sync = sync;
+    walker(user_data, flat, &ctx);
+    t_srt_sync = was_sync;
+    const auto fixup = g_srt_fixup.load(std::memory_order_relaxed);
+    if (sync && fixup) {
+        fixup(src.data(), flat, flat_dw);
+    }
 }
 
 bool DecodeSrtWalkerLoad(const void* rip, SrtWalkerLoad& load) {
@@ -600,22 +641,42 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
     }
 }
 
+// uc3 (Fable R.8.1): registers of the walker: rdi = where the current table is read (host),
+// r9 = its guest address (0 for user data), rsi = flat buffer, r8 = SrtWalkCtx. Pointers are
+// loaded by ctx->load_ptr, which reads them (back) and returns the unprotected backing view of
+// the table, so the walker does not fault on pages shared with GPU-written data. Each leaf
+// stores its guest source address in ctx->src_table for the fixup after the walk.
 static inline bool PushPtr(Xbyak::CodeGenerator& c, PassInfo& pass_info, const IR::Value& off_dw) {
-    c.push(rdi);
-    if (off_dw.IsImmediate()) {
-        c.mov(rdi, ptr[rdi + (off_dw.U32() << 2)]);
-    } else {
+    if (!off_dw.IsImmediate()) {
         ABORT_ON_FAILURE(ComputeOffset(c, r10d, pass_info, off_dw));
         c.shl(r10d, 2);
-        c.mov(r10d, r10d);
-        c.mov(rdi, ptr[rdi + r10]);
     }
-    c.mov(r10, 0xFFFFFFFFFFFFULL);
-    c.and_(rdi, r10);
+    c.push(rdi);
+    c.push(r9);
+    c.push(rsi);
+    c.push(r8);
+    c.mov(rsi, r9);
+    if (off_dw.IsImmediate()) {
+        c.mov(edx, off_dw.U32() << 2);
+    } else {
+        c.mov(edx, r10d);
+    }
+    c.mov(r11, rsp);
+    c.and_(rsp, -16);
+    c.push(r11);
+    c.push(r11);
+    c.call(ptr[r8]);
+    c.pop(r11);
+    c.pop(rsp);
+    c.pop(r8);
+    c.pop(rsi);
+    c.mov(rdi, rax);
+    c.mov(r9, rdx);
     return true;
 }
 
 static inline void PopPtr(Xbyak::CodeGenerator& c) {
+    c.pop(r9);
     c.pop(rdi);
 }
 
@@ -641,6 +702,7 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
     // TODO if this subtree is dynamically indexed, don't compact it (keep it sparse)
     for (auto [src_off_dw, use] : *use_list) {
         if (src_off_dw.IsImmediate()) {
+            c.lea(r11, ptr[r9 + (src_off_dw.U32() << 2)]);
             c.mov(r10d, ptr[rdi + (src_off_dw.U32() << 2)]);
         } else {
             if (!ComputeOffset(c, r10d, pass_info, src_off_dw)) {
@@ -649,9 +711,12 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
             }
             c.shl(r10d, 2);
             c.mov(r10d, r10d);
+            c.lea(r11, ptr[r9 + r10]);
             c.mov(r10d, dword[rdi + r10]);
         }
         c.mov(ptr[rsi + (pass_info.dst_off_dw << 2)], r10d);
+        c.mov(rax, qword[r8 + 8]);
+        c.mov(qword[rax + (pass_info.dst_off_dw << 3)], r11);
 
         SetFlatbufOffset(use, pass_info.dst_off_dw);
         pass_info.dst_off_dw++;
@@ -688,6 +753,8 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     pass_info.dst_off_dw = NUM_USER_DATA_REGS;
     ASSERT(pass_info.dst_off_dw == info.srt_info.flattened_bufsize_dw);
 
+    c.mov(r8, rdx);
+    c.xor_(r9d, r9d);
     for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
         VisitPointer(IR::Value(static_cast<u32>(sgpr_base)), root, pass_info, c);
     }
@@ -901,6 +968,16 @@ namespace Shader {
 
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     UNREACHABLE_MSG("RegisterWalkerCode unimplemented for target architecture.");
+}
+
+void SetSrtWalkerHooks(PFN_SrtLoadPtr, PFN_SrtFixup) {}
+
+bool SrtWalkerSyncAllowed() {
+    return true;
+}
+
+void RunSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat, size_t, bool) {
+    UNREACHABLE_MSG("RunSrtWalker unimplemented for target architecture.");
 }
 
 namespace Optimization {

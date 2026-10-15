@@ -33,7 +33,7 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 10u; // uc3: shadPS4 nightly 23c4133 (upstream: 9)
-static constexpr u32 ShaderMetaVersion = 9u;    // uc3: shadPS4 nightly 23c4133 (upstream: 6)
+static constexpr u32 ShaderMetaVersion = 10u;   // uc3: SRT walker context (upstream: 6)
 static constexpr u32 PipelineKeyVersion = 7u;   // uc3: shadPS4 nightly 23c4133 (upstream: 3)
 } // namespace Serialization
 
