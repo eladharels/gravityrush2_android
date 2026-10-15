@@ -4,6 +4,12 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — Teste A do R.8: os valores escritos pela GPU que o walker achata mudam a imagem
+
+`GOW3_SRT_STALE=1` (experimento, desligado) deixa o walker ler o valor antigo da memória do jogo quando os 4 bytes vieram da GPU, sem esperar. Nas ruas, a iluminação e as sombras somem: a cena fica chapada, com manchas pretas nas bordas. O FPS cai para ~16,5, porque a página nunca é baixada e cada passada do walker volta a falhar (~120 mil exceções por segundo). Conclusão: esses dwords decidem a imagem. Precisa da cópia na GPU (R.8 B).
+
+---
+
 ## 2026-10-15 — SRT walker lê pela cópia sem proteção quando os bytes não vieram da GPU (desenho do Fable, R.7)
 
 **O que mudou:** quando o SRT walker (o código JIT que copia as tabelas de descritores do jogo) falha numa página protegida, o tratador de falhas (`page_manager.cpp`, `EmulateSrtWalkerLoad`) decodifica a instrução. Se os bytes lidos não estão em `gpu_modified_ranges`, nem num readback assíncrono pendente, nem num readback de imagem pendente, ele lê o valor pela visão de backing, põe no registrador (`rdi` ou `r10d`) e pula a instrução. A página continua protegida para o jogo. `GOW3_SRT_BACKING=0` desliga.

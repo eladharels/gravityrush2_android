@@ -88,8 +88,18 @@ struct PageManager::Impl {
         if (!enabled || !Shader::DecodeSrtWalkerLoad(Common::GetRip(context), load)) {
             return false;
         }
+        // uc3 (experiment, Fable R.8 A): GOW3_SRT_STALE=1 also lets 4-byte leaf loads of
+        // GPU-written bytes read the stale guest copy (what upstream without precise readbacks
+        // flattens), to see whether those dwords change the picture.
+        static const bool stale = [] {
+            const char* value = std::getenv("GOW3_SRT_STALE");
+            return value && value[0] == '1';
+        }();
         const bool crosses = PageManager::GetNextPageAddr(addr) - addr < load.size;
-        if (crosses || rasterizer->IsGpuWritten(addr, load.size)) {
+        const bool gpu_written = !crosses && rasterizer->IsGpuWritten(addr, load.size);
+        if (gpu_written && stale && !load.to_rdi) {
+            Gow3Stats::uc3_srt_stale.fetch_add(1, std::memory_order_relaxed);
+        } else if (crosses || gpu_written) {
             Gow3Stats::uc3_srt_sync.fetch_add(1, std::memory_order_relaxed);
             static const bool trace = [] {
                 const char* value = std::getenv("GOW3_FAULT_TRACE");
