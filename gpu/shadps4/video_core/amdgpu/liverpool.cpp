@@ -356,6 +356,7 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 
 void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
     rasterizer.WaitDeferredSignals();
+    Gow3Stats::NoteFlipStage(2);
     Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
 }
 
@@ -558,6 +559,9 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
                 rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonConstRam);
             }
             const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
+            if (rasterizer) {
+                rasterizer->NoteGuestWrite(dump_const->Address<VAddr>(), dump_const->Size());
+            }
             memcpy(dump_const->Address<void*>(),
                    cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
             break;
@@ -836,6 +840,9 @@ void ScanDcb(std::span<const u32> dcb, int depth) {
 Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
                                            u64 seq) {
     FIBER_ENTER(dcb_task_name);
+    if (rasterizer) {
+        rasterizer->RingDedupClear();
+    }
     // Top-level buffers enqueued for the draw preparation workers (nested IBs are not).
     Vulkan::DrawPreparation* draw_prep =
         seq != NoSeq && rasterizer ? &rasterizer->GetDrawPreparation() : nullptr;
@@ -904,6 +911,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     // special NOP packets. For convenience lets assume that it does.
                     // gow3: after the writes before it (the buffer label: WriteData, which
                     // may still be queued on the draw recording thread).
+                    Gow3Stats::NoteFlipStage(1);
                     if (rasterizer) {
                         rasterizer->RunInOrder(&SignalFlip, header, sizeof(u32),
                                                Gow3Toggle::PipelinedMemoryWrites);
@@ -1356,6 +1364,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::MemSemaphore: {
                 const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
+                if (rasterizer) {
+                    rasterizer->RingDedupClear();
+                }
                 if (mem_semaphore->IsSignaling()) {
                     mem_semaphore->Signal();
                 } else {
@@ -1374,6 +1385,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (!rasterizer) {
                     break;
                 }
+                rasterizer->RingDedupClear();
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
                 while (!rewind->Valid()) {
                     YIELD_GFX();
@@ -1382,6 +1394,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::WaitRegMem: {
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
+                if (rasterizer) {
+                    rasterizer->RingDedupClear();
+                }
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
                 // Optimization: VO label waits are special because the emulator
                 // will write to the label when presentation is finished. So if
@@ -1437,6 +1452,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::WaitOnCeCounter: {
+                if (rasterizer) {
+                    rasterizer->RingDedupClear();
+                }
                 while (cblock.ce_count <= cblock.de_count && !ce_task.handle.done()) {
                     RESUME_GFX(ce_task);
                 }
@@ -1515,6 +1533,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
+    if (rasterizer) {
+        rasterizer->RingDedupClear();
+    }
     auto& queue = asc_queues[{vqid}];
 
     struct IndirectPatch {
@@ -1672,6 +1693,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (!rasterizer) {
                 break;
             }
+            rasterizer->RingDedupClear();
             const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
             while (!rewind->Valid()) {
                 YIELD_ASC(vqid);
@@ -1772,6 +1794,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::MemSemaphore: {
             const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
+            if (rasterizer) {
+                rasterizer->RingDedupClear();
+            }
             if (mem_semaphore->IsSignaling()) {
                 mem_semaphore->Signal();
             } else {
@@ -1784,6 +1809,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
+            if (rasterizer) {
+                rasterizer->RingDedupClear();
+            }
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             while (!wait_reg_mem->Test(regs.reg_array)) {
                 YIELD_ASC(vqid);
@@ -1803,6 +1831,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 if (queued && note_acb_fences) {
                     NotePendingReleaseMem(task.packet);
                 }
+                rasterizer->NoteGuestWrite(task.packet.Address<VAddr>(), sizeof(u64));
                 break;
             }
             // gow3: copies deferred to the recording thread precede writes the guest sees, and

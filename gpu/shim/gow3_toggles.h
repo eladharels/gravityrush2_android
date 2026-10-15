@@ -103,6 +103,17 @@ inline std::atomic<std::uint64_t> uc3_rb_open{0}, uc3_rb_inflight{0}, uc3_rb_don
 // uc3: GOW3_READBACK_FAST downloads: done on the side (no queue drain) / the full wait, and the
 // time spent waiting for the side copies.
 inline std::atomic<std::uint64_t> uc3_rb_side{0}, uc3_rb_side_ns{0}, uc3_rb_full{0};
+// gow3 R.9.7: steady_clock ns when the latest flip packet was decoded (stage A) and reached the
+// recording side (stage B, SignalFlip); the stall log measures them from the previous flip.
+inline std::atomic<std::int64_t> flip_a_ns{0}, flip_b_ns{0}, flip_game_ns{0};
+// Per flip (ring of 16 by flip number): game submit, stage A decode, stage B reached.
+inline std::atomic<std::int64_t> flip_ring[3][16]{};
+inline std::atomic<std::uint32_t> flip_seq[3]{};
+inline void NoteFlipStage(int stage) {
+    const std::int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::uint32_t n = flip_seq[stage].fetch_add(1, std::memory_order_relaxed);
+    flip_ring[stage][n % 16].store(now, std::memory_order_relaxed);
+}
 // uc3: GOW3_READBACK_ASYNC read faults: downloads submitted without draining the GPU thread, the
 // faulting threads' wait for them, ones left protected because the GPU wrote the window again
 // meanwhile, and GPU-side waits for a readback still in flight on the same window.

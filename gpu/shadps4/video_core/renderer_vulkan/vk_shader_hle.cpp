@@ -305,6 +305,7 @@ static bool CopyGuestThroughBacking(Rasterizer& rasterizer, VAddr dst, VAddr src
         !backing || end - src < size) {
         return false;
     }
+    rasterizer.NoteGuestWrite(dst, size);
     return Core::Memory::Instance()->TryWriteBacking(reinterpret_cast<void*>(dst), backing, size);
 }
 

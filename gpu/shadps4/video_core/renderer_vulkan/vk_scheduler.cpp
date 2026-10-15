@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <thread>
+#include <x86intrin.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +26,26 @@
 
 namespace Vulkan {
 
+// gow3 R.9.3: SubmitExecution time per step (GOW3_STAGEB_PROFILE=1).
+std::atomic<u64> gow3_submit_cycles[6];
+std::atomic<u64> gow3_submit_count;
+namespace {
+struct SubmitStep {
+    static bool On() {
+        static const bool on = std::getenv("GOW3_STAGEB_PROFILE") != nullptr;
+        return on;
+    }
+    u64 last = On() ? __rdtsc() : 0;
+    void Mark(u32 slot) {
+        if (last) {
+            const u64 now = __rdtsc();
+            gow3_submit_cycles[slot].fetch_add(now - last, std::memory_order_relaxed);
+            last = now;
+        }
+    }
+};
+} // namespace
+
 std::mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
@@ -40,11 +61,21 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
     AllocateWorkerCommandBuffers();
+    if (const char* async = std::getenv("GOW3_ASYNC_SUBMIT"); async && async[0] == '1') {
+        async_submit = true;
+        submit_thread = std::jthread(std::bind_front(&Scheduler::SubmitThread, this));
+    }
     priority_pending_ops_thread =
         std::jthread(std::bind_front(&Scheduler::PriorityPendingOpsThread, this));
 }
 
 Scheduler::~Scheduler() {
+    if (submit_thread.joinable()) {
+        WaitAsyncSubmits();
+        submit_thread.request_stop();
+        async_cv.notify_all();
+        submit_thread.join();
+    }
     if (recorder_thread.joinable()) {
         SyncRecording();
         recorder_thread.request_stop();
@@ -353,6 +384,46 @@ void Scheduler::Flush() {
     Flush(info);
 }
 
+void Scheduler::FlushAsync() {
+    SubmitInfo info{};
+    SubmitExecution(info, async_submit);
+}
+
+void Scheduler::WaitAsyncSubmits() {
+    if (async_pending.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+    std::unique_lock lk{async_mutex};
+    async_idle_cv.wait(lk, [this] { return async_queue.empty() && !async_busy; });
+}
+
+void Scheduler::SubmitThread(std::stop_token stoken) {
+    Common::SetCurrentThreadName("gow3:VkSubmit");
+    while (true) {
+        std::pair<vk::CommandBuffer, SubmitInfo> item;
+        {
+            std::unique_lock lk{async_mutex};
+            async_cv.wait(lk, stoken, [this] { return !async_queue.empty(); });
+            if (async_queue.empty()) {
+                return; // stop requested
+            }
+            item = async_queue.front();
+            async_queue.pop_front();
+            async_busy = true;
+        }
+        {
+            std::scoped_lock lk{submit_mutex};
+            QueueSubmit(item.first, item.second);
+        }
+        {
+            std::scoped_lock lk{async_mutex};
+            async_busy = false;
+            async_pending.fetch_sub(1, std::memory_order_release);
+        }
+        async_idle_cv.notify_all();
+    }
+}
+
 void Scheduler::Finish(std::source_location caller) {
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
@@ -446,8 +517,20 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 #endif
 }
 
-void Scheduler::SubmitExecution(SubmitInfo& info) {
-    std::scoped_lock lk{submit_mutex};
+void Scheduler::SubmitExecution(SubmitInfo& info, bool async) {
+    // gow3 R.9.4: earlier submissions reach the queue first (timeline order, sparse binds).
+    // The submit thread takes submit_mutex, so the wait happens without it; re-checked under
+    // it in case another thread queued one in between.
+    std::unique_lock lk{submit_mutex, std::defer_lock};
+    while (true) {
+        WaitAsyncSubmits();
+        lk.lock();
+        if (async_pending.load(std::memory_order_acquire) == 0) {
+            break;
+        }
+        lk.unlock();
+    }
+    SubmitStep step;
     const u64 signal_value = work_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED
@@ -461,20 +544,49 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     if (on_submit) {
         on_submit(info);
     }
+    step.Mark(0);
 
     EndRendering();
+    step.Mark(1);
     if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
         // Until the next submission's first timestamp: mostly the GPU waiting for it.
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
     }
     SyncRecording();
+    step.Mark(2);
     // Guest memory copies into staging read by this submission (copy threads).
     WaitHostCopies();
+    step.Mark(3);
     Check(current_cmdbuf.end());
 
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
 
+    ImGui::Core::TextureManager::Submit();
+    if (async) {
+        {
+            std::scoped_lock alk{async_mutex};
+            async_pending.fetch_add(1, std::memory_order_relaxed);
+            async_queue.emplace_back(current_cmdbuf, info);
+        }
+        async_cv.notify_one();
+    } else {
+        QueueSubmit(current_cmdbuf, info);
+    }
+    step.Mark(4);
+
+    work_semaphore.Refresh();
+    AllocateWorkerCommandBuffers();
+
+    // Apply pending operations
+    PopPendingOperations();
+    step.Mark(5);
+    if (step.last) {
+        gow3_submit_count.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void Scheduler::QueueSubmit(vk::CommandBuffer cmdbuf, SubmitInfo& info) {
     std::array<vk::PipelineStageFlags, std::tuple_size_v<decltype(info.wait_semas)>>
         wait_stage_masks;
     wait_stage_masks.fill(vk::PipelineStageFlagBits::eAllCommands);
@@ -492,20 +604,13 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         .pWaitSemaphores = info.wait_semas.data(),
         .pWaitDstStageMask = wait_stage_masks.data(),
         .commandBufferCount = 1U,
-        .pCommandBuffers = &current_cmdbuf,
+        .pCommandBuffers = &cmdbuf,
         .signalSemaphoreCount = info.num_signal_semas,
         .pSignalSemaphores = info.signal_semas.data(),
     };
 
-    ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
-
-    work_semaphore.Refresh();
-    AllocateWorkerCommandBuffers();
-
-    // Apply pending operations
-    PopPendingOperations();
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {

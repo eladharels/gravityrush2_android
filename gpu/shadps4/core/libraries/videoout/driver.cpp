@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <time.h>
+#include <x86intrin.h>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -342,7 +343,13 @@ void VideoOutDriver::Flip(const Request& req) {
         // gow3: every frame over 40 ms after the first, at most 10 per 5 s window.
         static bool primed = false;
         static u32 stalls_shown = 0;
-        const bool stall = primed && frame_ms > 40.0 && stalls_shown < 10;
+        // GOW3_STALL_MS lowers the threshold (R.9.5: 20 catches the frames that miss a vblank).
+        static const double stall_ms = [] {
+            const char* env = std::getenv("GOW3_STALL_MS");
+            return env ? std::max(1.0, std::atof(env)) : 40.0;
+        }();
+        static const u32 stall_limit = std::getenv("GOW3_STALL_MS") ? 40u : 10u;
+        const bool stall = primed && frame_ms > stall_ms && stalls_shown < stall_limit;
         stalls_shown += stall;
         primed = true;
         // Waits and work inside the long frame (window counters are reset every 5 s, so the
@@ -361,6 +368,68 @@ void VideoOutDriver::Flip(const Request& req) {
                         (wait_now[4] - last_wait[4]) / 1e6, (wait_now[6] - last_wait[6]) / 1e6);
         }
         std::copy(std::begin(wait_now), std::end(wait_now), std::begin(last_wait));
+        {
+            // gow3 R.9.5: the draw pipe in this frame (stage A drains, stage B busy), mid-frame
+            // submissions and the game threads' waits on async read faults.
+            static const double cycles_per_ms = [] {
+                const u64 t0 = __rdtsc();
+                const auto c0 = std::chrono::steady_clock::now();
+                while (std::chrono::steady_clock::now() - c0 < std::chrono::milliseconds(2)) {
+                }
+                return double(__rdtsc() - t0) / 2.0;
+            }();
+            static u64 last_drain, last_busy, last_eager, last_async_ns, last_async;
+            // R.9.7: this flip's packet, decoded (A) and recorded up to (B), measured from the
+            // previous flip (when the game was let go on to this frame).
+            static std::int64_t prev_flip_ns = 0;
+            const std::int64_t flip_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+            // Flip number k (as taken here) matches the k-th game submit / A decode / B arrival.
+            static u32 taken = 0;
+            const u32 k = (req.eop ? taken++ : taken - 1) % 16;
+            const auto at = [&](int stage) {
+                return prev_flip_ns
+                           ? (Gow3Stats::flip_ring[stage][k].load(std::memory_order_relaxed) -
+                              prev_flip_ns) / 1e6
+                           : 0.0;
+            };
+            const double g_ms = at(0), a_ms = at(1), b_ms = at(2);
+            static u32 game_hist[8] = {};
+            game_hist[std::min<u32>(7, u32(std::max(0.0, g_ms + 8.0) / 4.0))]++;
+            prev_flip_ns = flip_ns;
+            static u32 flip_hist[8] = {};
+            flip_hist[std::min<u32>(7, u32(std::max(0.0, b_ms) / 4.0))]++;
+            if (frames == 0 && stall_ms < 40.0) {
+                std::printf("       flip packet reached B after the previous flip (4 ms bins):");
+                for (u32& n : flip_hist) {
+                    std::printf(" %u", n);
+                    n = 0;
+                }
+                std::printf("\n       game submitted the flip after the previous flip (4 ms bins from -8 ms):");
+                for (u32& n : game_hist) {
+                    std::printf(" %u", n);
+                    n = 0;
+                }
+                std::printf("\n");
+            }
+            u64 drain = 0, busy = 0, eager = 0;
+            presenter->GetRasterizer().PipeCounters(drain, busy, eager);
+            const u64 async_ns = Gow3Stats::uc3_rb_async_ns.load();
+            const u64 async = Gow3Stats::uc3_rb_async.load();
+            if (stall || (stall_ms < 40.0 && frames == 30)) {
+                std::printf("       %s pipe: flip submitted by the game %.1f ms, packet at A %.1f ms, at B %.1f ms; stage A drains %.1f ms, stage B busy %.1f ms, "
+                            "%llu eager submissions; async fault waits %.1f ms (%llu)\n",
+                            stall ? "" : "[median-ish frame]", g_ms, a_ms, b_ms, (drain - last_drain) / cycles_per_ms,
+                            (busy - last_busy) / cycles_per_ms,
+                            static_cast<unsigned long long>(eager - last_eager),
+                            async_ns >= last_async_ns ? (async_ns - last_async_ns) / 1e6 : async_ns / 1e6,
+                            static_cast<unsigned long long>(async >= last_async ? async - last_async : async));
+            }
+            last_drain = drain;
+            last_busy = busy;
+            last_eager = eager;
+            last_async_ns = async_ns;
+            last_async = async;
+        }
         if (stall) {
             std::printf("       fault handlers: %llu read faults %.1f ms, write faults %.1f ms\n",
                         static_cast<unsigned long long>(rf - last_rf), (trf - last_trf) / 1e6,

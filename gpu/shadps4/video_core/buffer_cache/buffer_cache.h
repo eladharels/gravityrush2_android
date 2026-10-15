@@ -270,7 +270,19 @@ private:
         std::vector<Copy> copies;
         bool dirty{};                 ///< guarded by async_mutex
         std::atomic<bool> done{};
+        u32 side_slot{~0u};           ///< R.9.6: copied on the side queue, waits on this slot
     };
+    /// gow3 R.9.6: side-queue copies of windows whose last GPU write has finished.
+    struct SideQueueSlot {
+        vk::CommandBuffer cmdbuf;
+        vk::Fence fence;
+        bool busy{};
+    };
+    bool SideQueueCopy(AsyncReadback& readback,
+                       std::span<const std::pair<const Buffer*, std::span<const vk::BufferCopy>>> work);
+    vk::CommandPool sideq_pool{};
+    std::array<SideQueueSlot, 32> sideq_slots{};
+    std::mutex sideq_mutex;
     std::shared_ptr<AsyncReadback> DownloadWindowsAsync(std::span<const DownloadWindow> windows);
     void CompleteAsyncReadback(AsyncReadback& readback, VAddr device_addr, u64 size,
                                bool is_write);

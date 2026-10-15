@@ -33,6 +33,57 @@
 
 namespace Vulkan {
 
+extern std::atomic<u64> gow3_submit_cycles[6];
+extern std::atomic<u64> gow3_submit_count;
+
+// gow3 R.9.3: stage B time per sub-step (GOW3_STAGEB_PROFILE=1), printed with the pipe stats.
+namespace {
+enum StageBSlot : u32 {
+    SbTask, SbLeaf, SbSpecial, SbDispatch, SbDraw, SbPrepare, SbBind, SbBegin, SbInputs,
+    SbStamp, SbEager, SbDispHle, SbDispBind, SbDispRecord, SbBindBuffers, SbBindTextures,
+    SbBindDma, SbObtain, SbInvalidate, SbAccessed, SbADraw, SbADispatch, SbAGfxPipe, SbACsPipe,
+    SbAPost, SbAPRing, SbAPCopySrc, SbAPCopyMem, SbAPCheck, SbAPLeaves, SbAPWrite, SbAPResolve, SbAPSparse, SbAPFlush, SbCount
+};
+constexpr const char* stageb_names[SbCount] = {"tasks", "leaf copies", "special", "dispatch",
+                                               "draw", "draw:prepare", "draw:bind",
+                                               "draw:begin", "draw:inputs", "ring stamp",
+                                               "eager submit", "dispatch:hle",
+                                               "dispatch:bind", "dispatch:record",
+                                               "bind:buffers", "bind:textures", "bind:dma",
+                                               "buf:obtain", "buf:invalidate", "buf:accessed",
+                                               "A:draw", "A:dispatch", "A:gfx pipeline",
+                                               "A:cs pipeline", "A:post", "P:ring", "P:copy flat", "P:copy mem", "P:gpu check", "P:leaf readback", "P:write", "P:resolve", "P:sparse copy", "P:flush"};
+std::atomic<u64> stageb_cycles[SbCount];
+std::atomic<u64> stageb_counts[SbCount];
+u64 ring_bytes = 0;
+bool RingDedup() {
+    static const bool on = [] {
+        const char* value = std::getenv("GOW3_RING_DEDUP");
+        return value && value[0] == '1';
+    }();
+    return on;
+}
+bool StageBProfile() {
+    static const bool on = std::getenv("GOW3_STAGEB_PROFILE") != nullptr;
+    return on;
+}
+struct StageBTimer {
+    u32 slot;
+    u64 start;
+    explicit StageBTimer(u32 s) : slot(s), start(StageBProfile() ? __rdtsc() : 0) {}
+    ~StageBTimer() {
+        Stop();
+    }
+    void Stop() {
+        if (start) {
+            stageb_cycles[slot].fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+            stageb_counts[slot].fetch_add(1, std::memory_order_relaxed);
+            start = 0;
+        }
+    }
+};
+} // namespace
+
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
@@ -457,9 +508,39 @@ bool Rasterizer::IsGpuSideThreadId(u32 tid) const {
     return tid == liverpool->GetGpuCommandProcessorThreadId();
 }
 
+bool Rasterizer::RingDedupOn() {
+    return RingDedup();
+}
+
+void Rasterizer::NoteGuestWrite(VAddr address, u64 size) {
+    if (RingDedup() && size) {
+        DedupNoteWrite(address, size);
+    }
+}
+
+void Rasterizer::DedupNoteWrite(VAddr address, u64 size) {
+    ++dedup_wver;
+    for (auto& write : dedup_writes) {
+        if (address <= write.end && write.begin <= address + size) {
+            write.begin = std::min(write.begin, address);
+            write.end = std::max(write.end, address + size);
+            write.ver = dedup_wver;
+            return;
+        }
+    }
+    if (dedup_writes.size() >= 64) {
+        RingDedupClear();
+    } else {
+        dedup_writes.push_back({address, address + size, dedup_wver});
+    }
+}
+
 void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     if (!draw_pipe || !size) {
         return;
+    }
+    if (RingDedup()) {
+        DedupNoteWrite(address, size);
     }
     // Draws write the same buffers over and over: an entry for the range only moves on.
     const u64 position = draw_pipe->Head();
@@ -528,14 +609,21 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         }
         Gow3Stats::uc3_ring_copies.fetch_add(1, std::memory_order_relaxed);
         u8* dst = constant_ring->Data(*offset);
+        StageBTimer copy_timer{source ? SbAPCopySrc : SbAPCopyMem};
         if (source) {
             std::memcpy(dst, source, size);
         } else {
             // uc3: a buffer the GPU wrote, bound as a constant: precise readbacks bring its data
             // back first (the other upload paths only copy CPU-modified or GPU-clean ranges).
-            memory->ResolveHostCopy(address, size);
+            {
+                StageBTimer t{SbAPResolve};
+                memory->ResolveHostCopy(address, size);
+            }
+            StageBTimer t{SbAPSparse};
             memory->CopySparseMemory(address, dst, size);
+            ring_bytes += size;
         }
+        StageBTimer flush_timer{SbAPFlush};
         constant_ring->Flush(*offset, size);
         out.push_back({index, static_cast<u32>(size), *offset, address});
     };
@@ -568,17 +656,60 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         }
         // The stream path of BufferCache::ObtainBuffer, taken here: small, read-only, not
         // written by the GPU (now or by work still queued for the recording thread).
-        if (size == 0 || size > VideoCore::BufferCache::STREAM_THRESHOLD ||
-            buffer_cache.IsRegionGpuModified(address, size) || PendingWriteOverlaps(address, size)) {
+        {
+            StageBTimer check_timer{SbAPCheck};
+            if (size == 0 || size > VideoCore::BufferCache::STREAM_THRESHOLD ||
+                buffer_cache.IsRegionGpuModified(address, size) ||
+                PendingWriteOverlaps(address, size)) {
+                continue;
+            }
+        }
+        if (!RingDedup()) {
+            copy(index, nullptr, address, size);
             continue;
         }
+        // R.9.10: the same constants bound again in this submission: the earlier copy serves,
+        // unless guest memory changed under it since (a pending GPU write over it, data read
+        // back from the GPU, a CP copy) or the ring moved on past it.
+        if (dedup_table.empty()) {
+            dedup_table.resize(4096);
+        }
+        auto& entry = dedup_table[((address >> 4) ^ (address >> 16) ^ size) & 4095];
+        if (entry.epoch == dedup_epoch && entry.address == address && entry.size == size) {
+            bool clean = constant_ring->Position() - entry.abs < ConstantRing::Capacity / 2;
+            if (clean && entry.wver != dedup_wver) {
+                for (const auto& write : dedup_writes) {
+                    if (write.ver > entry.wver && address < write.end &&
+                        write.begin < address + size) {
+                        clean = false;
+                        break;
+                    }
+                }
+            }
+            if (clean) {
+                ++dedup_hits;
+                constant_ring->Pin(entry.abs);
+                out.push_back({index, static_cast<u32>(size),
+                               entry.abs % ConstantRing::Capacity, address});
+                continue;
+            }
+            ++dedup_stale;
+        } else {
+            ++dedup_misses;
+        }
+        const size_t before = out.size();
         copy(index, nullptr, address, size);
+        if (out.size() != before) {
+            entry = {address, constant_ring->Position() - size, dedup_wver, 0,
+                     static_cast<u32>(size), dedup_epoch};
+        }
     }
 }
 
 void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared,
                           bool is_indexed, u32 index_offset, const AmdGpu::ComputeProgram* cs,
                           const IndirectDraw* indirect) {
+    StageBTimer post_timer{SbAPost};
     auto& dirty = liverpool->pipe_dirty;
     if (!pipe_synced) {
         // Stage B has not run yet: its register copy starts as this one.
@@ -619,6 +750,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
             ring.clear();
             leaves.clear();
             if (constant_ring && !Gow3Toggle::Disabled(Gow3Toggle::ConstantRing)) {
+                StageBTimer ring_timer{SbAPRing};
                 CollectRingBindings(*stage, used_prepared, ring, leaves);
             }
             if (leaves.size() != stage->gpu_leaves.size()) {
@@ -661,6 +793,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
                                                        std::memory_order_relaxed);
                     const_cast<Shader::Info*>(stage)->gpu_leaves.clear();
                 } else {
+                    StageBTimer leaf_timer{SbAPLeaves};
                     const_cast<Shader::Info*>(stage)->ReadBackGpuLeaves();
                 }
             }
@@ -684,6 +817,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
         size += sizeof(AmdGpu::Regs);
     }
 
+    StageBTimer write_timer{SbAPWrite};
     u8* out = draw_pipe->Begin(size);
     u8* const start = out;
     auto& packet = *reinterpret_cast<DrawPacket*>(out);
@@ -750,6 +884,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     dirty.Clear();
     draw_pipe->Commit(static_cast<u32>(out - start));
+    write_timer.Stop();
     PrintPipeStats();
 }
 
@@ -783,6 +918,7 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     auto& self = *static_cast<Rasterizer*>(context);
     if (*reinterpret_cast<const PacketKind*>(data) == PacketKind::Task) {
         const auto& task = *reinterpret_cast<const TaskPacket*>(data);
+        StageBTimer timer{SbTask};
         task.task(self, data + sizeof(TaskPacket));
         return;
     }
@@ -889,16 +1025,19 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     ASSERT(static_cast<u32>(in - data) == size);
     stage_regs = &regs;
     if (packet.kind != PacketKind::Special) {
+        StageBTimer timer{SbLeaf};
         self.RecordLeafCopies();
     }
     self.pipe_cb_extent = packet.cb_extent;
     self.pipe_db_extent = packet.db_extent;
     if (packet.kind == PacketKind::Special) {
         // A draw FilterDraw handles (fast clear elimination, resolve, depth copy, skip).
+        StageBTimer timer{SbSpecial};
         FrameCapture::Poll();
         self.scheduler.PopPendingOperations();
         self.FilterDraw();
     } else if (cs) {
+        StageBTimer timer{SbDispatch};
         stage_cs = cs;
         const auto* pipeline = static_cast<const ComputePipeline*>(packet.pipeline);
         if (indirect) {
@@ -908,18 +1047,28 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         }
         stage_cs = nullptr;
     } else if (indirect) {
+        StageBTimer timer{SbDraw};
         self.DrawIndirectRecord(static_cast<const GraphicsPipeline*>(packet.pipeline),
                                 packet.is_indexed, *indirect);
     } else {
+        StageBTimer timer{SbDraw};
         self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
                         packet.is_indexed, packet.index_offset);
     }
     Shader::Info::num_ud_snapshots = 0;
     self.num_ring_stages = 0;
     if (self.constant_ring) {
+        StageBTimer timer{SbStamp};
         self.constant_ring->Stamp(packet.ring_end);
     }
+    StageBTimer eager_timer{SbEager};
     self.MaybeEagerSubmit();
+}
+
+void Rasterizer::PipeCounters(u64& drain_cycles, u64& busy_cycles, u64& eager) const {
+    drain_cycles = draw_pipe ? draw_pipe->drain_cycles : 0;
+    busy_cycles = draw_pipe ? draw_pipe->busy_cycles.load(std::memory_order_relaxed) : 0;
+    eager = eager_cuts.load(std::memory_order_relaxed);
 }
 
 void Rasterizer::MaybeEagerSubmit() {
@@ -955,7 +1104,7 @@ void Rasterizer::MaybeEagerSubmit() {
     eager_packets = 0;
     eager_last_tsc = now;
     eager_cuts.fetch_add(1, std::memory_order_relaxed);
-    scheduler.Flush();
+    scheduler.FlushAsync();
 }
 
 void Rasterizer::PrintPipeStats() {
@@ -984,6 +1133,39 @@ void Rasterizer::PrintPipeStats() {
     if (const u64 cuts = eager_cuts.load(std::memory_order_relaxed); cuts != last_cuts) {
         std::printf("  eager submissions: %.0f/s\n", (cuts - last_cuts) / seconds);
         last_cuts = cuts;
+    }
+    if (StageBProfile()) {
+        std::printf("  constant ring: %.1f MB/s, %.0f copies/s, %.0f bytes/copy\n",
+                    ring_bytes / seconds / 1e6, stageb_counts[SbAPSparse] / seconds,
+                    stageb_counts[SbAPSparse] ? double(ring_bytes) / stageb_counts[SbAPSparse] : 0.0);
+        ring_bytes = 0;
+        if (RingDedup()) {
+            std::printf("  ring dedup: %.0f hits/s, %.0f misses/s, %.0f stale/s\n",
+                        dedup_hits / seconds, dedup_misses / seconds, dedup_stale / seconds);
+            dedup_hits = dedup_misses = dedup_stale = 0;
+        }
+        std::printf("  stage B by step (%% of time, us/call):");
+        for (u32 i = 0; i < SbCount; ++i) {
+            const u64 c = stageb_cycles[i].exchange(0, std::memory_order_relaxed);
+            const u64 n = stageb_counts[i].exchange(0, std::memory_order_relaxed);
+            if (n) {
+                std::printf(" %s %.1f%% %.2f", stageb_names[i], 100.0 * c / cycles,
+                            seconds * 1e6 * c / cycles / n);
+            }
+        }
+        std::printf("\n");
+        const u64 submits = gow3_submit_count.exchange(0, std::memory_order_relaxed);
+        if (submits) {
+            static constexpr const char* steps[6] = {"on_submit", "end rendering",
+                                                     "sync recording", "host copies",
+                                                     "queue submit", "new cmdbuf+pending"};
+            std::printf("  submissions %.0f/s, us/submission:", submits / seconds);
+            for (u32 i = 0; i < 6; ++i) {
+                const u64 c = gow3_submit_cycles[i].exchange(0, std::memory_order_relaxed);
+                std::printf(" %s %.1f", steps[i], seconds * 1e6 * c / cycles / submits);
+            }
+            std::printf("\n");
+        }
     }
     std::printf("  drains by reason/s:");
     for (u32 r = 0; r < DrawPipe::NumReasons; ++r) {
@@ -1044,6 +1226,7 @@ bool Rasterizer::FilterDrawPasses() const {
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
+    StageBTimer a_timer{SbADraw};
     Gow3Stats::draws.fetch_add(1, std::memory_order_relaxed);
 
     // gow3: with the draw pipeline this thread only selects the pipeline and hands the draw
@@ -1062,7 +1245,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
             return;
         }
     }
+    StageBTimer pipe_timer{SbAGfxPipe};
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline({}, prepared);
+    pipe_timer.Stop();
     const PreparedDraw* used_prepared = pipeline_cache.UsedPrepared();
     if (prepared) {
         draw_prep->Count(pipeline != nullptr &&
@@ -1113,7 +1298,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     motion_draw = pipeline->GetGraphicsKey().motion_vectors;
     motion_geometry = 0;
 
-    PrepareRenderState(pipeline);
+    {
+        StageBTimer timer{SbPrepare};
+        PrepareRenderState(pipeline);
+    }
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
         const auto& viewport = Regs().viewports[0];
         upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
@@ -1124,28 +1312,38 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // gow3: vertex and index buffers are resolved while the helper binds textures (their
     // commands are recorded after BeginRendering, as before).
     draw_inputs = {pipeline, draw_prepared, index_offset, is_indexed, true, false};
-    const bool bound = BindResources(pipeline);
+    bool bound;
+    {
+        StageBTimer timer{SbBind};
+        bound = BindResources(pipeline);
+    }
     bind_prepared = nullptr; // indirect draws and dispatches bind without prepared sharps
     const bool inputs_resolved = draw_inputs.resolved;
     draw_inputs.pending = false;
     if (!bound) {
         return;
     }
-    const auto state = BeginRendering(pipeline);
+    const auto state = [&] {
+        StageBTimer timer{SbBegin};
+        return BeginRendering(pipeline);
+    }();
 
-    if (!inputs_resolved) {
-        ResolveVertexBuffers(pipeline, draw_prepared);
-        if (is_indexed) {
-            ResolveIndexBuffer(index_offset);
+    {
+        StageBTimer timer{SbInputs};
+        if (!inputs_resolved) {
+            ResolveVertexBuffers(pipeline, draw_prepared);
+            if (is_indexed) {
+                ResolveIndexBuffer(index_offset);
+            }
         }
-    }
-    EmitVertexBuffers();
-    if (is_indexed) {
-        EmitIndexBuffer();
-    }
+        EmitVertexBuffers();
+        if (is_indexed) {
+            EmitIndexBuffer();
+        }
 
-    if (needs_barrier) {
-        runtime.FlushBarriers();
+        if (needs_barrier) {
+            runtime.FlushBarriers();
+        }
     }
 
     // gow3: screen-space (clip disabled) draws into the upscaler's output-size images.
@@ -1451,13 +1649,16 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
+    StageBTimer a_timer{SbADispatch};
     Gow3Stats::dispatches.fetch_add(1, std::memory_order_relaxed);
     // gow3: like draws, handed to the draw recording thread after the pipeline selection.
     const bool pipelined = UseDrawPipe() && !Gow3Toggle::Disabled(Gow3Toggle::PipelinedDispatch);
     if (!pipelined) {
         DrainDrawPipe();
     }
+    StageBTimer pipe_timer{SbACsPipe};
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
+    pipe_timer.Stop();
     if (!pipeline) {
         return;
     }
@@ -1494,13 +1695,20 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (upscaler->Enabled()) {
         upscaler->OnDispatch(cs.pgm_hash);
     }
-    if (ExecuteShaderHLE(cs, Regs(), cs_program, *this)) {
-        return;
+    {
+        StageBTimer timer{SbDispHle};
+        if (ExecuteShaderHLE(cs, Regs(), cs_program, *this)) {
+            return;
+        }
     }
 
-    if (!BindResources(pipeline)) {
-        return;
+    {
+        StageBTimer timer{SbDispBind};
+        if (!BindResources(pipeline)) {
+            return;
+        }
     }
+    StageBTimer record_timer{SbDispRecord};
 
     // uc3: marked before the barrier, so its wait is charged to this dispatch, not the previous
     // label (Fable R.3).
@@ -1787,8 +1995,14 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                               stage->samplers.size());
             const PreparedStage* prepared = FindPreparedStage(*stage);
-            BindBuffers(*stage, prepared, binding, push_data, set_write_index);
-            BindTextures(*stage, prepared, binding, set_write_index, needs_barrier);
+            {
+                StageBTimer timer{SbBindBuffers};
+                BindBuffers(*stage, prepared, binding, push_data, set_write_index);
+            }
+            {
+                StageBTimer timer{SbBindTextures};
+                BindTextures(*stage, prepared, binding, set_write_index, needs_barrier);
+            }
             uses_dma |= stage->uses_dma;
         }
     } else {
@@ -1852,6 +2066,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     }
 
     if (uses_dma) {
+        StageBTimer timer{SbBindDma};
         buffer_cache.SynchronizeDmaBuffers();
     }
 
@@ -2389,8 +2604,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
                               vsharp.GetSize(), size, stage.pgm_hash);
                 }
+                StageBTimer obtain_timer{SbObtain};
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(
                     vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                obtain_timer.Stop();
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
                 const u64 adjust = offset - offset_aligned;
                 if (adjust % 4 != 0) {
@@ -2419,10 +2636,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 bound_buffers.emplace_back(buffer, offset, track_size, src_access);
                 if (desc.is_written) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
+                    StageBTimer timer{SbInvalidate};
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
                 }
+                StageBTimer accessed_timer{SbAccessed};
                 const bool accessed =
                     runtime.IsBufferAccessed(buffer, offset, track_size, desc.is_written);
+                accessed_timer.Stop();
                 needs_barrier |= accessed;
                 // uc3: GOW3_BARRIER_TRACE=<shader hash, hex>: the first 300 buffer bindings of
                 // that shader, and whether each one needed a barrier.
@@ -3393,6 +3613,7 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
         if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&
             !texture_cache.FindImageFromRange(src, num_bytes)) {
             // Both buffers were not transferred to GPU yet. Can safely copy in host memory.
+            NoteGuestWrite(dst, num_bytes);
             std::memcpy(std::bit_cast<void*>(dst), std::bit_cast<void*>(src), num_bytes);
             return;
         }

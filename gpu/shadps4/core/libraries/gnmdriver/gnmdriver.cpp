@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include "gow3_toggles.h"
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -2378,6 +2380,8 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     u32 workload, u32 count, u32* dcb_gpu_addrs[], u32* dcb_sizes_in_bytes, u32* ccb_gpu_addrs[],
     u32* ccb_sizes_in_bytes, u32 vo_handle, u32 buf_idx, u32 flip_mode, s64 flip_arg) {
     LOG_DEBUG(Lib_GnmDriver, "called [buf = {}]", buf_idx);
+    // gow3 R.9.7: when the game handed over the frame (stall log).
+    Gow3Stats::NoteFlipStage(0);
 
     if (count != 0) {
         if (!dcb_gpu_addrs) {

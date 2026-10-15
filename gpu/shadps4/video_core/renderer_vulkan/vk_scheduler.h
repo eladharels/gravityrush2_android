@@ -681,6 +681,10 @@ public:
     /// and increments the scheduler timeline semaphore.
     void Flush();
 
+    /// gow3 R.9.4: Flush() whose vkQueueSubmit runs on a submit thread (GOW3_ASYNC_SUBMIT=1),
+    /// for the mid-frame cuts. Any other submission first waits for these to reach the queue.
+    void FlushAsync();
+
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish(std::source_location caller = std::source_location::current());
 
@@ -892,7 +896,14 @@ private:
 
     void RecorderThread(std::stop_token stoken);
 
-    void SubmitExecution(SubmitInfo& info);
+    void SubmitExecution(SubmitInfo& info, bool async = false);
+
+    /// Calls vkQueueSubmit; the caller holds submit_mutex.
+    void QueueSubmit(vk::CommandBuffer cmdbuf, SubmitInfo& info);
+
+    void SubmitThread(std::stop_token stoken);
+
+    void WaitAsyncSubmits();
 
     void PriorityPendingOpsThread(std::stop_token stoken);
 
@@ -939,6 +950,15 @@ private:
     // compares thread ids, which on Windows (libc++ over winpthreads) costs two system calls.
     bool recording_threaded{false};
     std::jthread recorder_thread;
+    // gow3 R.9.4: submissions handed to submit_thread, in order.
+    std::mutex async_mutex;
+    std::condition_variable_any async_cv;
+    std::condition_variable_any async_idle_cv;
+    std::deque<std::pair<vk::CommandBuffer, SubmitInfo>> async_queue;
+    bool async_busy = false;
+    std::atomic<u32> async_pending{0}; ///< queued or being submitted, read without the lock
+    bool async_submit = false;
+    std::jthread submit_thread;
     tracy::VkCtxScope* profiler_scope{};
 };
 

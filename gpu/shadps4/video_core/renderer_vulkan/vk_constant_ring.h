@@ -8,7 +8,9 @@
 #pragma once
 
 #include <array>
+#include <algorithm>
 #include <atomic>
+#include <deque>
 
 #include "common/assert.h"
 #include "common/types.h"
@@ -43,7 +45,9 @@ public:
         if (at % Capacity + size > Capacity) {
             at += Capacity - at % Capacity; // wrap to the ring start
         }
-        const auto in_use = [&] { return at + size > Capacity && at + size - Capacity > retired; };
+        const auto in_use = [&] {
+            return at + size > Capacity && at + size - Capacity > RetiredFloor();
+        };
         if (in_use()) {
             Retire();
             if (in_use()) {
@@ -52,6 +56,15 @@ public:
         }
         position = at + size;
         return at % Capacity;
+    }
+
+    /// R.9.10, stage A: the packet being built reads bytes copied earlier at ring position
+    /// `abs`: they stay until that packet is done (a packet ending past Position() retired).
+    void Pin(u64 abs) {
+        while (!pins.empty() && pins.back().abs >= abs) {
+            pins.pop_back();
+        }
+        pins.push_back({abs, position});
     }
 
     [[nodiscard]] u8* Data(u64 offset) noexcept {
@@ -89,6 +102,18 @@ public:
     }
 
 private:
+    u64 RetiredFloor() {
+        while (!pins.empty() && pins.front().until < retired) {
+            pins.pop_front();
+        }
+        return pins.empty() ? retired : std::min(retired, pins.front().abs);
+    }
+    struct PinEntry {
+        u64 abs;
+        u64 until;
+    };
+    std::deque<PinEntry> pins; ///< stage A, a min-queue by abs
+
     void Publish(u64 end, u64 tick) {
         const u64 at = stamps_head.load(std::memory_order_relaxed);
         if (at - stamps_tail.load(std::memory_order_acquire) >= stamps.size()) {

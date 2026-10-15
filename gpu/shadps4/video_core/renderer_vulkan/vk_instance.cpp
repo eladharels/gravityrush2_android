@@ -459,6 +459,34 @@ bool Instance::CreateDevice() {
         .queueCount = static_cast<u32>(queue_priorities.size()),
         .pQueuePriorities = queue_priorities.data(),
     };
+    // gow3 R.9.6: GOW3_READBACK_SIDEQ=1 adds a transfer-only queue (else a compute one) so a
+    // readback of finished GPU writes does not wait behind the graphics queue's work.
+    if (const char* env = std::getenv("GOW3_READBACK_SIDEQ"); env && env[0] == '1') {
+        for (u32 pass = 0; pass < 2 && side_queue_family == ~0u; ++pass) {
+            for (std::size_t i = 0; i < family_properties.size(); i++) {
+                const auto flags = family_properties[i].queueFlags;
+                if (flags & vk::QueueFlagBits::eGraphics) {
+                    continue;
+                }
+                const bool fits = pass == 0 ? (flags & vk::QueueFlagBits::eTransfer) &&
+                                                  !(flags & vk::QueueFlagBits::eCompute)
+                                            : bool(flags & vk::QueueFlagBits::eCompute);
+                if (fits) {
+                    side_queue_family = static_cast<u32>(i);
+                    break;
+                }
+            }
+        }
+        std::printf("Readback side queue: family %d\n", int(side_queue_family));
+    }
+    const std::array<vk::DeviceQueueCreateInfo, 2> queue_infos = {
+        queue_info,
+        vk::DeviceQueueCreateInfo{
+            .queueFamilyIndex = side_queue_family,
+            .queueCount = static_cast<u32>(queue_priorities.size()),
+            .pQueuePriorities = queue_priorities.data(),
+        },
+    };
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
@@ -477,8 +505,8 @@ bool Instance::CreateDevice() {
     }
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = 1u,
-            .pQueueCreateInfos = &queue_info,
+            .queueCreateInfoCount = side_queue_family != ~0u ? 2u : 1u,
+            .pQueueCreateInfos = queue_infos.data(),
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
         },
@@ -714,6 +742,9 @@ bool Instance::CreateDevice() {
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
+    if (side_queue_family != ~0u) {
+        side_queue = device->getQueue(side_queue_family, 0);
+    }
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =

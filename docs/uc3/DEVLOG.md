@@ -4,6 +4,27 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 (noite) — R.9.3–R.9.10: o caminho crítico é a etapa A; perfis e quatro tentativas atrás de interruptores (todos desligados), sem ganho de FPS
+
+Teste nas ruas (save 036, início), com R.8.4 + HLE + R.9.1 (N=64, 0,5 ms): ~50–51 FPS. Com as opções padrão + HLE (`medir_so_hle.bat`): ~46 FPS, sem regressão.
+
+- **R.9.3 (`GOW3_STAGEB_PROFILE=1`):** perfil por passo das etapas A e B (`RunDrawPacket`, `DrawRecord`, `DispatchRecord`, `BindResources`, `BindBuffers`, `Draw`, `DispatchDirect`, `PostDraw` e as partes do anel de constantes) e do envio (`SubmitExecution`).
+- **R.9.4 (`GOW3_ASYNC_SUBMIT=1`):** o `vkQueueSubmit` passa para uma thread própria. A etapa B caiu de 72% para 67% ocupada; FPS igual.
+- **R.9.5/R.9.7 (`GOW3_STALL_MS=N`):** registra quadros longos e o tempo de cada flip (jogo, etapa A, etapa B). Resultado: o jogo entrega o quadro de −8 a +4 ms do flip anterior, mas a etapa A só chega ao pacote de flip 16–23 ms depois. **A etapa A (thread do CP) é o caminho crítico.**
+- **R.9.6 (`GOW3_READBACK_SIDEQ=1`):** a cópia dos readbacks assíncronos vai para uma fila de transferência separada, esperando o tick da GPU por semáforo. 1438 de 1732 readbacks foram por ela, e a espera das threads do jogo caiu à metade; FPS igual.
+- **Perfil da etapa A:** ~280 mil pacotes/s. `PostDraw` ocupa 53% da etapa A, e a cópia de constantes para o anel (`CollectRingBindings`) 43%. São ~2,5 GB/s: ~650 mil cópias/s de ~3,7 KB, ~50 MB por quadro. O memcpy já roda a ~11 GB/s; o custo é o volume.
+- **R.9.10 (`GOW3_RING_DEDUP=1`):** reaproveita a cópia de constantes do mesmo (endereço, tamanho) dentro do mesmo envio. Invalida quando:
+  - começa um novo envio;
+  - há esperas que sincronizam com a CPU (WaitRegMem, MemSemaphore, Rewind, WaitOnCeCounter);
+  - há escritas sobrepostas anotadas na ordem do fluxo (`NotePendingGpuWrite`, `NoteGuestWrite` na HLE, em `CopyBuffer`, em `DumpConstRam` e no ReleaseMem da fila de compute).
+
+  O anel ganhou `Pin` (fila de mínimos), que segura a região reusada até o pacote que a usou terminar. Revisão de correção pela Pesquisa com Opus (R.12). Resultado: 29% de acerto, de 2,5 para 2,1 GB/s, FPS igual (~50) e imagem correta.
+- **R.9.11 (desfeito):** copiar só os bytes que o shader lê. Quase todas as leituras de constantes do jogo são cargas vetoriais ou têm índice variável, então nada pôde ser cortado.
+
+Próximos candidatos: o T3 da Pesquisa com Opus (liberar o label de vídeo logo após o `PrepareFrame`) e o custo por dispatch da etapa A (~4,7 µs; ~3900 dispatches por quadro nas ruas).
+
+---
+
 ## 2026-10-15 — R.9.1: envio antecipado dos comandos à GPU (`GOW3_EAGER_SUBMIT=N`, desligado): ruas ~46 → ~50 FPS; R.9.2 sem efeito
 
 **Causa (diagnóstico do Fable, R.9):** a build só enviava comandos à GPU quando o jogo terminava de submeter o quadro. A gravação (~13 ms) e o trabalho da GPU (~12 ms) corriam em série, e a GPU ficava ociosa metade do quadro.

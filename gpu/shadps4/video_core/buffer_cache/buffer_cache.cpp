@@ -135,6 +135,17 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 
 BufferCache::~BufferCache() {
     const vk::Device device = instance.GetDevice();
+    if (sideq_pool) {
+        if (instance.GetSideQueue()) {
+            (void)instance.GetSideQueue().waitIdle();
+        }
+        for (auto& slot : sideq_slots) {
+            if (slot.fence) {
+                device.destroyFence(slot.fence);
+            }
+        }
+        device.destroyCommandPool(sideq_pool);
+    }
     if (side_fence) {
         device.destroyFence(side_fence);
     }
@@ -559,24 +570,143 @@ std::shared_ptr<BufferCache::AsyncReadback> BufferCache::DownloadWindowsAsync(
             readback->copies.push_back({arena_base + copy.srcOffset, copy.dstOffset, copy.size});
             copy.dstOffset += readback->download.offset;
         }
-        runtime.CopyBuffer(entry.window->arena, readback->download.buffer, entry.copies);
     }
+    // gow3 R.9.6: windows whose last GPU write (and the tick after it, see SideDownload) has
+    // finished are copied on the side queue: no wait behind the graphics queue's work.
     readback->windows.assign(windows.begin(), windows.end());
+    bool side = false;
+    if (instance.GetSideQueue()) {
+        boost::container::small_vector<std::pair<const Buffer*, std::span<const vk::BufferCopy>>, 17>
+            side_work;
+        for (const auto& entry : work) {
+            side_work.emplace_back(entry.window->arena,
+                                   std::span<const vk::BufferCopy>(entry.copies.data(),
+                                                                   entry.copies.size()));
+        }
+        side = SideQueueCopy(*readback, side_work);
+    }
+    if (!side) {
+        for (auto& entry : work) {
+            runtime.CopyBuffer(entry.window->arena, readback->download.buffer, entry.copies);
+        }
+    }
     readback->tick = scheduler.CurrentTick();
     {
         std::scoped_lock lk{async_mutex};
         async_pending.push_back(readback);
     }
     async_count.fetch_add(1, std::memory_order_release);
+    if (side) {
+        Gow3Stats::uc3_rb_side.fetch_add(1, std::memory_order_relaxed);
+        Gow3Stats::uc3_rb_async.fetch_add(1, std::memory_order_relaxed);
+        return readback;
+    }
     scheduler.Flush();
     Gow3Stats::uc3_rb_async.fetch_add(1, std::memory_order_relaxed);
     return readback;
 }
 
+bool BufferCache::SideQueueCopy(
+    AsyncReadback& readback,
+    std::span<const std::pair<const Buffer*, std::span<const vk::BufferCopy>>> work) {
+    u64 write_tick = 0;
+    for (const auto& window : readback.windows) {
+        const u64 tick = LastWriteTick(window.start, window.size);
+        if (tick == ~0ULL) {
+            return false;
+        }
+        write_tick = std::max(write_tick, tick);
+    }
+    auto* semaphore = scheduler.GetWorkSemaphore();
+    if (semaphore->KnownGpuTick() < write_tick + 1) {
+        semaphore->Refresh();
+        if (semaphore->KnownGpuTick() < write_tick + 1) {
+            return false;
+        }
+    }
+    const vk::Device device = instance.GetDevice();
+    std::scoped_lock lk{sideq_mutex};
+    if (!sideq_pool) {
+        sideq_pool = Vulkan::Check<"create side queue command pool">(device.createCommandPool({
+            .flags = vk::CommandPoolCreateFlagBits::eTransient |
+                     vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+            .queueFamilyIndex = instance.GetSideQueueFamilyIndex(),
+        }));
+    }
+    u32 index = ~0u;
+    for (u32 i = 0; i < sideq_slots.size(); ++i) {
+        if (!sideq_slots[i].busy) {
+            index = i;
+            break;
+        }
+    }
+    if (index == ~0u) {
+        return false;
+    }
+    auto& slot = sideq_slots[index];
+    if (!slot.cmdbuf) {
+        const vk::CommandBufferAllocateInfo alloc_info = {
+            .commandPool = sideq_pool,
+            .level = vk::CommandBufferLevel::ePrimary,
+            .commandBufferCount = 1U,
+        };
+        Vulkan::Check<"allocate side queue command buffer">(
+            device.allocateCommandBuffers(&alloc_info, &slot.cmdbuf));
+        slot.fence = Vulkan::Check<"create side queue fence">(device.createFence({}));
+    }
+    Vulkan::Check(slot.cmdbuf.reset());
+    Vulkan::Check(slot.cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
+    for (const auto& [arena, copies] : work) {
+        slot.cmdbuf.copyBuffer(arena->Handle(), readback.download.buffer->Handle(),
+                               static_cast<u32>(copies.size()), copies.data());
+    }
+    const vk::MemoryBarrier2 after = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+    };
+    slot.cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .memoryBarrierCount = 1U,
+        .pMemoryBarriers = &after,
+    });
+    Vulkan::Check(slot.cmdbuf.end());
+    // The finished tick carries the writes' memory dependency (already signalled: no wait).
+    const u64 wait_value = write_tick + 1;
+    const vk::Semaphore wait_semaphore = semaphore->Handle();
+    const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eAllCommands;
+    const vk::TimelineSemaphoreSubmitInfo timeline_si = {
+        .waitSemaphoreValueCount = 1U,
+        .pWaitSemaphoreValues = &wait_value,
+    };
+    const vk::SubmitInfo submit_info = {
+        .pNext = &timeline_si,
+        .waitSemaphoreCount = 1U,
+        .pWaitSemaphores = &wait_semaphore,
+        .pWaitDstStageMask = &wait_stage,
+        .commandBufferCount = 1U,
+        .pCommandBuffers = &slot.cmdbuf,
+    };
+    const auto result = instance.GetSideQueue().submit(submit_info, slot.fence);
+    ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during side submit");
+    slot.busy = true;
+    readback.side_slot = index;
+    return true;
+}
+
 void BufferCache::CompleteAsyncReadback(AsyncReadback& readback, VAddr device_addr, u64 size,
                                         bool is_write) {
     const auto start = std::chrono::steady_clock::now();
-    scheduler.GetWorkSemaphore()->Wait(readback.tick);
+    if (readback.side_slot != ~0u) {
+        auto& slot = sideq_slots[readback.side_slot];
+        const vk::Device device = instance.GetDevice();
+        Vulkan::Check(device.waitForFences(slot.fence, true, std::numeric_limits<u64>::max()));
+        Vulkan::Check(device.resetFences(slot.fence));
+        std::scoped_lock lk{sideq_mutex};
+        slot.busy = false;
+    } else {
+        scheduler.GetWorkSemaphore()->Wait(readback.tick);
+    }
     const auto& download = readback.download;
     download.buffer->Invalidate(download.offset, download.size);
     for (const auto& copy : readback.copies) {

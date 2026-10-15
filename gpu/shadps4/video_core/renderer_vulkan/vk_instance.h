@@ -98,6 +98,16 @@ public:
         return present_queue;
     }
 
+    /// gow3 R.9.6: a queue outside the graphics family for readback copies
+    /// (GOW3_READBACK_SIDEQ=1); null when off or absent.
+    vk::Queue GetSideQueue() const {
+        return side_queue;
+    }
+
+    u32 GetSideQueueFamilyIndex() const {
+        return side_queue_family;
+    }
+
     TracyVkCtx GetProfilerContext() const {
         return profiler_context;
     }
@@ -554,6 +564,8 @@ private:
     VmaAllocator allocator{};
     vk::Queue present_queue;
     vk::Queue graphics_queue;
+    vk::Queue side_queue;
+    u32 side_queue_family{~0u};
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;
     std::unordered_map<vk::Format, vk::FormatProperties3> format_properties;

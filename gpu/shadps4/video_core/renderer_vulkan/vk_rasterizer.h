@@ -38,6 +38,9 @@ public:
                         AmdGpu::Liverpool* liverpool);
     ~Rasterizer();
 
+    /// gow3 R.9.5: draw pipe counters for the per-frame stall log (rdtsc cycles, racy reads).
+    void PipeCounters(u64& drain_cycles, u64& busy_cycles, u64& eager) const;
+
     [[nodiscard]] Scheduler& GetScheduler() noexcept {
         return scheduler;
     }
@@ -126,6 +129,16 @@ public:
     /// Stage A: guest memory the recording thread will write for work handed to it (storage
     /// buffers, DMA, WriteData, fences); constants overlapping it are bound there, not copied here.
     void NotePendingGpuWrite(VAddr address, u64 size);
+    /// R.9.10 (GOW3_RING_DEDUP=1), stage A: forgets the constant copies made so far (a new
+    /// submission, or the guest may have written memory: WaitRegMem).
+    /// R.9.10, stage A: guest memory written right now, or by work handed to stage B, other
+    /// than NotePendingGpuWrite's (HLE copies, CP host copies, DumpConstRam, compute labels).
+    void NoteGuestWrite(VAddr address, u64 size);
+    static bool RingDedupOn();
+    void RingDedupClear() noexcept {
+        ++dedup_epoch;
+        dedup_writes.clear();
+    }
     /// Before a guest-visible write: fences deferred earlier are written first.
     void WaitDeferredSignals() {
         scheduler.WaitDeferredSignals();
@@ -526,6 +539,26 @@ private:
         u64 position;
     };
     std::vector<PendingWrite> pending_writes;
+    /// R.9.10: constant copies of this submission, by guest range (direct-mapped).
+    struct DedupEntry {
+        VAddr address;
+        u64 abs;      ///< ring position of the copy
+        u64 wver;     ///< dedup_wver when copied
+        u64 unused;
+        u32 size;
+        u32 epoch;
+    };
+    struct DedupWrite {
+        VAddr begin;
+        VAddr end;
+        u64 ver;
+    };
+    void DedupNoteWrite(VAddr address, u64 size);
+    std::vector<DedupEntry> dedup_table;
+    std::vector<DedupWrite> dedup_writes; ///< merged NotePendingGpuWrite ranges since the clear
+    u32 dedup_epoch = 1;
+    u64 dedup_wver = 0;
+    u64 dedup_hits = 0, dedup_misses = 0, dedup_stale = 0;
     VAddr pending_min = ~VAddr{0}, pending_max = 0; ///< bounds of pending_writes
     u32 pending_checks = 0;
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
