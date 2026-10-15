@@ -117,8 +117,8 @@ static bool PreciseReadbacks() {
     static const bool precise = EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise;
     return precise;
 }
-static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
-    const bool precise = PreciseReadbacks();
+static void CopySparseSerial(VAddr source, u8* dest, u64 size, bool force_backing = false) {
+    const bool precise = force_backing || PreciseReadbacks();
     while (size) {
         uintptr_t start = 0, end = 0;
         int mapped = 0;
@@ -152,6 +152,9 @@ void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
         const u64 offset = i * Chunk;
         CopySparseSerial(source + offset, dest + offset, std::min(Chunk, size - offset));
     });
+}
+void MemoryManager::CopySparseMemoryBacking(VAddr source, u8* dest, u64 size) {
+    CopySparseSerial(source, dest, size, true);
 }
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
     Gow3WriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size, Gow3WriteLog::Backing);

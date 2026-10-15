@@ -4,6 +4,16 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 (noite, 4) — Correções de segurança no R.9.12/R.9.13 (revisão Opus); ruas 59,8–60 FPS, O Castelo ~55 FPS
+
+- **Thread de cópia do anel:** passa a ler a memória do jogo sempre pela visão de backing (`CopySparseMemoryBacking`), sem tocar páginas protegidas. Antes, uma falta de página dentro dela podia esperar a GPU, que esperava a própria cópia (travamento raro).
+- **`DeferSubmission`:** removido o laço que esperava as cópias de host anotadas. Era redundante (a ordem já vem do `copy_seq` e do `Gow3Copy::WaitAsync`) e podia travar.
+- **Resultado com `medir_r913_dedup.bat` (R.9.13 + R.9.10):**
+  - ruas (save 036): 59,8–60 FPS, pior quadro 18 ms, imagem correta;
+  - O Castelo (save 038, em combate): média ~55 FPS (49–58), pior quadro ~35 ms, imagem correta. A etapa B fica 68% ocupada, com 1100–1900 draws por quadro, e espera ticks da GPU 11–18% do tempo.
+
+---
+
 ## 2026-10-15 (noite, 3) — R.9.13: o envio antecipado não espera mais a thread de gravação (`GOW3_DEFERRED_SUBMIT=1`, desligado): ruas ~56 → ~58,5 FPS
 
 Teste nas ruas (save 036, início), com `medir_r913.bat`: R.8.4 + HLE + R.9.1 (128 pacotes / 1 ms) + R.9.4 + R.9.6 + R.9.12, sem perfil.

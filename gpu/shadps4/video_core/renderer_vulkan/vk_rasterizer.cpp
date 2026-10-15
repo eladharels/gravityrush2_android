@@ -126,7 +126,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
             ring_copier = std::make_unique<RingCopier>(
                 [](void* context, VAddr address, u8* dst, u64 size, u64 offset) {
                     auto* self = static_cast<Rasterizer*>(context);
-                    self->memory->CopySparseMemory(address, dst, size);
+                    self->memory->CopySparseMemoryBacking(address, dst, size);
                     self->constant_ring->Flush(offset, size);
                 },
                 this);

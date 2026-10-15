@@ -18,6 +18,10 @@ public:
     }
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
     void CopySparseMemory(VAddr source, u8* dest, u64 size);
+    /// R.9.12: always through the backing view (no guest page protection), for threads that
+    /// must not fault (the constant ring copy thread: a fault there could wait on the GPU
+    /// command thread, which may be waiting for the copy).
+    void CopySparseMemoryBacking(VAddr source, u8* dest, u64 size);
     /// uc3: before guest memory the GPU may have written is copied for an upload (precise
     /// readbacks): the GPU's data comes back to guest memory first, on the GPU-side thread.
     /// Never from under the memory tracker's region lock (see gow3gpu.cpp).

@@ -635,12 +635,9 @@ void Scheduler::DeferSubmission(SubmitInfo info, u64 signal_value) {
     // This thread's batch of guest memory copies goes to the copy threads, which the
     // recording thread waits for below.
     Gow3Copy::FlushBatch();
-    // Host copies recorded after this point run on the recording thread after it: counted now.
-    const u64 copies = host_copies_issued.load(std::memory_order_relaxed);
-    Record([this, info, copies](vk::CommandBuffer cmdbuf) mutable {
-        while (host_copies_done.load(std::memory_order_acquire) < copies) {
-            std::this_thread::yield();
-        }
+    // Host copies recorded before this point (RecordHostCopy) already ran on the recording
+    // thread, in order, before it reaches this command.
+    Record([this, info](vk::CommandBuffer cmdbuf) mutable {
         Gow3Copy::WaitAsync();
         Check(cmdbuf.end());
         {
