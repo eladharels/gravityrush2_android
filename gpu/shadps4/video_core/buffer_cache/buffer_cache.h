@@ -138,6 +138,11 @@ public:
     /// memory. False when no image starts there.
     bool SyncImageToBuffer(VAddr addr, u32 size);
 
+    /// uc3 (R.8.5): GOW3_HLE_PRECISE_WAIT=1 tracks pending deferred host reads per guest page.
+    static bool PreciseHostReadWait();
+    /// True when a deferred host copy that reads [addr, addr+size) may still be pending.
+    static bool HasPendingHostReads(VAddr addr, u64 size);
+
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
 
@@ -181,6 +186,7 @@ private:
 
     /// gow3: batched small copies on the copy threads (Gow3Copy::QueueCopy).
     static void RunGuestCopy(const Gow3Copy::Item& item);
+    static void NotePendingHostRead(VAddr addr, u64 size, int delta);
     void SmallGuestCopy(const Gow3Copy::Item& item);
 
     const Buffer* UploadCopies(const Buffer* arena, std::span<vk::BufferCopy> copies,

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <limits>
 #include <array>
+#include <atomic>
 #include <map>
 #include <unordered_map>
 #include <algorithm>
@@ -170,11 +171,58 @@ void BufferCache::RunGuestCopy(const Gow3Copy::Item& item) {
     cache->memory->CopySparseMemory(item.source, dst, item.size);
     auto* buffer = reinterpret_cast<Buffer*>(item.extra);
     buffer->Flush(dst - buffer->mapped_data.data(), item.size);
+    NotePendingHostRead(item.source, item.size, -1);
+}
+
+// uc3 (Fable R.8.5): deferred host copies read guest memory later, on the recording and copy
+// threads. A counter per 64 KiB guest page (hashed; a collision only costs an extra wait) says
+// whether a read of that page is still pending, so the scalar copy HLE waits only when it is
+// about to overwrite bytes an earlier upload has not read yet.
+static constexpr u32 PendingReadBuckets = 1u << 16;
+static std::array<std::atomic<u32>, PendingReadBuckets> pending_host_reads{};
+
+static u32 PendingReadBucket(VAddr page) {
+    return static_cast<u32>((page * 0x9E3779B97F4A7C15ULL) >> 48) & (PendingReadBuckets - 1);
+}
+
+bool BufferCache::PreciseHostReadWait() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_HLE_PRECISE_WAIT");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
+void BufferCache::NotePendingHostRead(VAddr addr, u64 size, int delta) {
+    if (!PreciseHostReadWait() || size == 0) {
+        return;
+    }
+    for (VAddr page = addr >> 16; page <= (addr + size - 1) >> 16; ++page) {
+        auto& bucket = pending_host_reads[PendingReadBucket(page)];
+        if (delta > 0) {
+            bucket.fetch_add(1, std::memory_order_release);
+        } else {
+            bucket.fetch_sub(1, std::memory_order_release);
+        }
+    }
+}
+
+bool BufferCache::HasPendingHostReads(VAddr addr, u64 size) {
+    if (size == 0) {
+        return false;
+    }
+    for (VAddr page = addr >> 16; page <= (addr + size - 1) >> 16; ++page) {
+        if (pending_host_reads[PendingReadBucket(page)].load(std::memory_order_acquire) != 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Small guest copies run on the recording thread (it spins for work: no wakeup, and it is
 // idle most of the time); PoolSmallCopies (toggle 524288) batches them for the copy threads.
 void BufferCache::SmallGuestCopy(const Gow3Copy::Item& item) {
+    NotePendingHostRead(item.source, item.size, +1);
     if (scheduler.IsRecordingDeferred() && !Gow3Toggle::Disabled(Gow3Toggle::PoolSmallCopies)) {
         scheduler.RecordHostCopy([item] { item.run(item); });
         return;
@@ -1058,6 +1106,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
             if (staging.size < Chunk) {
                 SmallGuestCopy(item);
             } else {
+                NotePendingHostRead(item.source, item.size, +1);
                 Gow3Copy::Async([item] { item.run(item); });
             }
         }
@@ -1263,9 +1312,13 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
                     memory->CopySparseMemory(copy.source, copy.destination, copy.size);
                 }
                 staging.Flush();
+                for (const auto& copy : *group) {
+                    NotePendingHostRead(copy.source, copy.size, -1);
+                }
             });
         };
         for (auto& copy : copies) {
+            NotePendingHostRead(copy.dstOffset, copy.size, +1);
             group->push_back({copy.dstOffset, staging.mapped + copy.srcOffset, copy.size});
             group_bytes += copy.size;
             copy.srcOffset += staging.offset;

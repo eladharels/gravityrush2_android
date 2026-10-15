@@ -4,6 +4,21 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — R.8.5: a HLE espera só uploads pendentes do mesmo destino (`GOW3_HLE_PRECISE_WAIT=1`, desligado); correto, mas sem ganho
+
+**Desenho do Fable (R.8.5):** as cópias de host adiadas leem a memória do jogo depois, nas threads de gravação e de cópia. Agora cada uma soma 1 num contador por página de 64 KiB da origem (tabela com hash de 65536 posições; colisão só causa uma espera a mais) ao ser emitida, e subtrai ao terminar (`NotePendingHostRead`, em `SmallGuestCopy`, nos grupos assíncronos e em `RunGuestCopy`). A HLE da cópia escalar só chama `WaitHostCopies()` se alguma página do **destino** tiver leitura pendente (`HasPendingHostReads`).
+
+**Resultado:** a HLE nunca precisou esperar (0 esperas, ~130 mil cópias liberadas) e a porta do beco continua certa. Mas o FPS não mudou:
+
+| Lugar | Espera completa | Espera precisa | Sem espera (`GOW3_SCALAR_COPY_NOWAIT`) |
+|---|---|---|---|
+| Ruas (036, início) | ~45 | ~45 | ~46 |
+| Porta do beco (save 4%, início) | ~54 | ~54 | — |
+
+A espera custava no máximo ~1 FPS. Os ~53 da versão sem espera eram de outro ponto do mapa. Fica desligado; `medir_hle_preciso.bat` liga.
+
+---
+
 ## 2026-10-15 — Cópia escalar em memória (HLE do SuperMedo), cabelo branco corrigido, R.8.4 e limite de quadros à frente: ruas ~42,5 → ~45 FPS, sem bugs visuais conhecidos
 
 Itens trazidos do port [Supermedo/uncharted_pc](https://github.com/Supermedo/uncharted_pc) (GPL, mesma família bbport/shadPS4), com crédito ao SuperMedo. Todos atrás de interruptores.

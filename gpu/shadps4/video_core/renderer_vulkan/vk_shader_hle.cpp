@@ -275,8 +275,28 @@ static bool CopyGuestThroughBacking(Rasterizer& rasterizer, VAddr dst, VAddr src
         const char* env = std::getenv("GOW3_SCALAR_COPY_NOWAIT");
         return env && env[0] == '1';
     }();
+    // R.8.5: with GOW3_HLE_PRECISE_WAIT=1, wait only while a deferred upload of the destination
+    // is pending (it would read the new bytes); the source is not changed, so its reads are fine.
+    static std::atomic<u32> precise_skips{0}, precise_waits{0};
     if (!no_wait) {
-        rasterizer.WaitHostCopies();
+        if (VideoCore::BufferCache::PreciseHostReadWait() &&
+            !VideoCore::BufferCache::HasPendingHostReads(dst, size)) {
+            const u32 n = precise_skips.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n == 1 || (n & 65535) == 0) {
+                std::printf("uc3: scalar copy HLE precise wait: %u skipped, %u waits\n", n,
+                            precise_waits.load());
+            }
+        } else {
+            if (VideoCore::BufferCache::PreciseHostReadWait()) {
+                const u32 n = precise_waits.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 3 || (n & 1023) == 0) {
+                    std::printf("uc3: scalar copy HLE waited for host copies of 0x%llx (%u waits, "
+                                "%u skipped)\n",
+                                static_cast<unsigned long long>(dst), n, precise_skips.load());
+                }
+            }
+            rasterizer.WaitHostCopies();
+        }
     }
     uintptr_t start = 0, end = 0;
     int mapped = 0;
