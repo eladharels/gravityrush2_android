@@ -6,6 +6,9 @@
 #include "gow3_copy.h"
 
 #include <deque>
+#include <memory>
+#include <mutex>
+#include <vector>
 #include <span>
 #include <boost/container/small_vector.hpp>
 
@@ -15,6 +18,7 @@
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
+#include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -88,13 +92,15 @@ public:
     void TickFrame();
 
     /// Invalidates any buffer in the logical page range.
-    void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
+    void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false,
+                          bool from_fault = false);
 
     /// gow3: a guest write fault at `device_addr` was handled; unprotect its neighbourhood.
     void ExtendWriteFault(VAddr device_addr);
 
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
-    void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false);
+    void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false,
+                    bool from_fault = false);
 
     /// Finds a buffer for the specified region.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
@@ -218,6 +224,37 @@ private:
     vk::CommandPool side_pool{};
     vk::CommandBuffer side_cmdbuf{};
     vk::Fence side_fence{};
+
+    /// uc3 (GOW3_READBACK_ASYNC=1): a read fault's download in flight. The GPU thread records
+    /// the copies into a held staging buffer, submits them and goes back to its work; the
+    /// faulting thread waits for `tick`, writes the data back and lifts the protection itself,
+    /// unless the GPU thread bound one of the windows for writing meanwhile (`dirty`: the
+    /// windows stay protected and the retried access faults again for the new data).
+    struct AsyncReadback {
+        u64 tick{};
+        Vulkan::StagingBufferRef download{};
+        boost::container::small_vector<DownloadWindow, 17> windows;
+        struct Copy {
+            VAddr address;
+            u64 staging_offset;
+            u64 size;
+        };
+        std::vector<Copy> copies;
+        bool dirty{};                 ///< guarded by async_mutex
+        std::atomic<bool> done{};
+    };
+    std::shared_ptr<AsyncReadback> DownloadWindowsAsync(std::span<const DownloadWindow> windows);
+    void CompleteAsyncReadback(AsyncReadback& readback, VAddr device_addr, u64 size,
+                               bool is_write);
+    /// GPU-side threads: waits for pending async readbacks overlapping [start, end) (all of
+    /// them when end == 0), and frees the staging of finished ones.
+    void WaitAsyncReadbacks(VAddr start, VAddr end);
+    void NoteAsyncWrite(VAddr device_addr, u64 size);
+    std::mutex async_mutex;
+    std::vector<std::shared_ptr<AsyncReadback>> async_pending;
+    std::vector<Vulkan::StagingBufferRef> async_free;
+    std::atomic<u32> async_count{};
+    std::atomic<u32> async_free_count{};
 
     std::array<const Buffer*, MAX_ARENA_PAGES> address_space{};
     u64 arena_page_bits{MAX_ARENA_PAGE_BITS};

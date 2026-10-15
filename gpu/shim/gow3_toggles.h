@@ -103,6 +103,16 @@ inline std::atomic<std::uint64_t> uc3_rb_open{0}, uc3_rb_inflight{0}, uc3_rb_don
 // uc3: GOW3_READBACK_FAST downloads: done on the side (no queue drain) / the full wait, and the
 // time spent waiting for the side copies.
 inline std::atomic<std::uint64_t> uc3_rb_side{0}, uc3_rb_side_ns{0}, uc3_rb_full{0};
+// uc3: GOW3_READBACK_ASYNC read faults: downloads submitted without draining the GPU thread, the
+// faulting threads' wait for them, ones left protected because the GPU wrote the window again
+// meanwhile, and GPU-side waits for a readback still in flight on the same window.
+inline std::atomic<std::uint64_t> uc3_rb_async{0}, uc3_rb_async_ns{0}, uc3_rb_async_dirty{0},
+    uc3_rb_async_overlap{0};
+// uc3: readbacks still done the synchronous way: faults on GPU-side threads, write faults with
+// async off, and the rest (read faults with async off, unmaps).
+inline std::atomic<std::uint64_t> uc3_rb_sync_gpu{0}, uc3_rb_sync_write{0}, uc3_rb_sync_other{0};
+// uc3 (GOW3_FAULT_TRACE=1): address of the last GPU-side read fault, for GOW3_WRITE_TRACE=1.
+inline std::atomic<std::uint64_t> uc3_last_gpu_fault{0};
 // uc3: GPU cost counters (Fable R.3): render passes actually ended, memory barriers recorded by
 // FlushBarriers and how many of them wait on graphics stages, layout transitions that produced
 // a barrier and how many on images of 1920x1080 or more.

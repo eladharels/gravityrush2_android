@@ -144,14 +144,17 @@ BufferCache::~BufferCache() {
 
 void BufferCache::TickFrame() {
     ++frame_index;
+    WaitAsyncReadbacks(1, 1); // an empty range: only frees finished readbacks' staging
     if (std::exchange(fault_process_pending, false)) {
         fault_manager->ProcessFaultBuffer();
     }
 }
 
-void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
-    memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
-        ReadMemory(device_addr, size, true, assume_locks);
+void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks,
+                                   bool from_fault) {
+    memory_tracker->InvalidateRegion(device_addr, size,
+                                     [this, device_addr, size, assume_locks, from_fault] {
+        ReadMemory(device_addr, size, true, assume_locks, from_fault);
     });
 }
 
@@ -377,9 +380,28 @@ void BufferCache::ClassifyFault(VAddr window_start) {
     }
 }
 
-void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
-    const auto flush_request = [this, device_addr, size, is_write] {
+// uc3: GOW3_READBACK_ASYNC=1 — a read fault no longer drains the GPU from the GPU thread
+// (scheduler.Finish() left the GPU idle while that thread waited, then while it recorded
+// again: ~34 of ~50 ms per frame in the streets). See AsyncReadback.
+static bool ReadbackAsync() {
+    static const bool async = EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise &&
+                              EmulatorSettingsImpl::Flag("GOW3_READBACK_ASYNC", false);
+    return async;
+}
+
+void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks,
+                             bool from_fault) {
+    const bool async = from_fault && !assume_locks && ReadbackAsync();
+    if (!async) {
+        (assume_locks ? Gow3Stats::uc3_rb_sync_gpu
+         : is_write   ? Gow3Stats::uc3_rb_sync_write
+                      : Gow3Stats::uc3_rb_sync_other)
+            .fetch_add(1, std::memory_order_relaxed);
+    }
+    std::shared_ptr<AsyncReadback> pending;
+    const auto flush_request = [this, device_addr, size, is_write, async, &pending] {
         if (ReadbackAll()) {
+            WaitAsyncReadbacks(0, 0);
             DownloadAllGpuModified();
             if (is_write) {
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
@@ -399,11 +421,11 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         const VAddr window_end = std::min<VAddr>(
             std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
         ClassifyFault(Common::AlignDown(device_addr, WindowSize));
+        boost::container::small_vector<DownloadWindow, 17> windows;
+        windows.push_back({arena, window_start, window_end - window_start});
         if (ReadbackHot()) {
             boost::container::small_vector<VAddr, 16> others;
             NoteHotWindow(window_start, others);
-            boost::container::small_vector<DownloadWindow, 17> windows;
-            windows.push_back({arena, window_start, window_end - window_start});
             for (const VAddr start : others) {
                 const auto* other = GetArena(start >> block_shift,
                                              (start + WindowSize - 1) >> block_shift);
@@ -418,6 +440,19 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             Gow3Stats::uc3_readback_hot.fetch_add(1, std::memory_order_relaxed);
             Gow3Stats::uc3_readback_hot_windows.fetch_add(windows.size() - 1,
                                                           std::memory_order_relaxed);
+        }
+        // A window still being read back asynchronously: its ranges are no longer in
+        // gpu_modified_ranges, so let that readback land first.
+        for (const auto& window : windows) {
+            WaitAsyncReadbacks(window.start, window.start + window.size);
+        }
+        if (async) {
+            // The faulting thread marks the written range itself, after the data lands.
+            pending = DownloadWindowsAsync(windows);
+            if (pending) {
+                return;
+            }
+        } else if (windows.size() > 1) {
             DownloadWindows(windows);
         } else {
             DownloadMemory(arena, window_start, window_end - window_start);
@@ -430,6 +465,148 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         flush_request();
     } else {
         liverpool->SendCommand<true>(std::move(flush_request));
+    }
+    if (pending) {
+        CompleteAsyncReadback(*pending, device_addr, size, is_write);
+    }
+}
+
+std::shared_ptr<BufferCache::AsyncReadback> BufferCache::DownloadWindowsAsync(
+    std::span<const DownloadWindow> windows) {
+    struct WindowCopies {
+        const DownloadWindow* window;
+        boost::container::small_vector<vk::BufferCopy, 4> copies;
+    };
+    boost::container::small_vector<WindowCopies, 17> work;
+    u64 total_size_bytes = 0;
+    for (const auto& window : windows) {
+        WindowCopies entry{&window};
+        const VAddr arena_base = window.arena->cpu_addr;
+        memory_tracker->ForEachDownloadRange<false>(
+            window.start, window.size, [&](u64 address, u64 size) {
+                gpu_modified_ranges.ForEachInRange(address, size, [&](VAddr start, VAddr end) {
+                    entry.copies.push_back(vk::BufferCopy{
+                        .srcOffset = start - arena_base,
+                        .dstOffset = total_size_bytes,
+                        .size = end - start,
+                    });
+                    constexpr u64 align = 64ULL;
+                    total_size_bytes += (end - start + align - 1) & ~(align - 1);
+                });
+                gpu_modified_ranges.Subtract(address, size);
+            });
+        if (!entry.copies.empty()) {
+            work.push_back(std::move(entry));
+        }
+    }
+    if (total_size_bytes == 0) {
+        return nullptr;
+    }
+    auto readback = std::make_shared<AsyncReadback>();
+    readback->download =
+        staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached, 0, true);
+    for (auto& entry : work) {
+        const VAddr arena_base = entry.window->arena->cpu_addr;
+        for (auto& copy : entry.copies) {
+            readback->copies.push_back({arena_base + copy.srcOffset, copy.dstOffset, copy.size});
+            copy.dstOffset += readback->download.offset;
+        }
+        runtime.CopyBuffer(entry.window->arena, readback->download.buffer, entry.copies);
+    }
+    readback->windows.assign(windows.begin(), windows.end());
+    readback->tick = scheduler.CurrentTick();
+    {
+        std::scoped_lock lk{async_mutex};
+        async_pending.push_back(readback);
+    }
+    async_count.fetch_add(1, std::memory_order_release);
+    scheduler.Flush();
+    Gow3Stats::uc3_rb_async.fetch_add(1, std::memory_order_relaxed);
+    return readback;
+}
+
+void BufferCache::CompleteAsyncReadback(AsyncReadback& readback, VAddr device_addr, u64 size,
+                                        bool is_write) {
+    const auto start = std::chrono::steady_clock::now();
+    scheduler.GetWorkSemaphore()->Wait(readback.tick);
+    const auto& download = readback.download;
+    download.buffer->Invalidate(download.offset, download.size);
+    for (const auto& copy : readback.copies) {
+        auto* dst_addr = std::bit_cast<u8*>(copy.address);
+        Gow3WriteLog::NoteDownload(copy.address, download.mapped + copy.staging_offset, copy.size);
+        memory->TryWriteBacking(dst_addr, download.mapped + copy.staging_offset, copy.size);
+    }
+    {
+        std::scoped_lock lk{async_mutex};
+        if (!readback.dirty) {
+            for (const auto& window : readback.windows) {
+                memory_tracker->UnmarkRegionAsGpuModified(window.start, window.size, false);
+            }
+            if (is_write) {
+                memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+            }
+        } else {
+            Gow3Stats::uc3_rb_async_dirty.fetch_add(1, std::memory_order_relaxed);
+        }
+        std::erase_if(async_pending, [&](const auto& entry) { return entry.get() == &readback; });
+        async_free.push_back(download);
+        async_free_count.fetch_add(1, std::memory_order_release);
+        async_count.fetch_sub(1, std::memory_order_release);
+    }
+    readback.done.store(true, std::memory_order_release);
+    readback.done.notify_all();
+    Gow3Stats::uc3_rb_async_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                             start)
+            .count(),
+        std::memory_order_relaxed);
+}
+
+void BufferCache::WaitAsyncReadbacks(VAddr start, VAddr end) {
+    if (async_count.load(std::memory_order_acquire) == 0 &&
+        async_free_count.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+    for (;;) {
+        std::vector<Vulkan::StagingBufferRef> to_free;
+        std::shared_ptr<AsyncReadback> overlap;
+        {
+            std::scoped_lock lk{async_mutex};
+            to_free.swap(async_free);
+            for (const auto& entry : async_pending) {
+                const bool hit =
+                    end == 0 || std::ranges::any_of(entry->windows, [&](const DownloadWindow& w) {
+                        return w.start < end && start < w.start + w.size;
+                    });
+                if (hit) {
+                    overlap = entry;
+                    break;
+                }
+            }
+        }
+        for (const auto& ref : to_free) {
+            staging_pool.FreeDeferred(ref);
+        }
+        async_free_count.fetch_sub(static_cast<u32>(to_free.size()), std::memory_order_release);
+        if (!overlap) {
+            return;
+        }
+        Gow3Stats::uc3_rb_async_overlap.fetch_add(1, std::memory_order_relaxed);
+        overlap->done.wait(false, std::memory_order_acquire);
+    }
+}
+
+void BufferCache::NoteAsyncWrite(VAddr device_addr, u64 size) {
+    if (async_count.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+    std::scoped_lock lk{async_mutex};
+    for (const auto& entry : async_pending) {
+        for (const auto& w : entry->windows) {
+            if (w.start < device_addr + size && device_addr < w.start + w.size) {
+                entry->dirty = true;
+            }
+        }
     }
 }
 
@@ -726,6 +903,9 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     const auto* arena = GetArena(first_block, last_block);
     EnsureResident(arena, first_block, last_block);
     const u64 uploaded_before = Gow3Stats::buffer_upload_bytes.load(std::memory_order_relaxed);
+    if (is_written) {
+        NoteAsyncWrite(device_addr, size);
+    }
     SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
     if (stats) {
         auto& region = Stats().regions[RegionKey(device_addr)];

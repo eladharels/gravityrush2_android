@@ -83,6 +83,40 @@ struct PageManager::Impl {
         } else {
             Gow3Stats::read_faults.fetch_add(1, std::memory_order_relaxed);
             Gow3Stats::Timer timer{Gow3Stats::t_read_faults};
+            // uc3: GOW3_FAULT_TRACE=1 prints the first 100 read faults of GPU-side threads
+            // (they read back synchronously, draining the GPU): who faults, where, from what code.
+            static const bool trace = [] {
+                const char* value = std::getenv("GOW3_FAULT_TRACE");
+                return value && value[0] == '1';
+            }();
+            static std::atomic<int> traced{0};
+            if (trace && is_gpu_thread) {
+                Gow3Stats::uc3_last_gpu_fault.store(addr, std::memory_order_relaxed);
+            }
+            if (trace && is_gpu_thread && traced.fetch_add(1, std::memory_order_relaxed) < 100) {
+                void* base = nullptr;
+                char module[260] = "?";
+#ifdef _WIN32
+                HMODULE owner = nullptr;
+                if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                       static_cast<LPCSTR>(Common::GetRip(context)), &owner)) {
+                    base = owner;
+                    GetModuleFileNameA(owner, module, sizeof(module));
+                }
+#endif
+                std::printf("gpu-side read fault: thread %c addr=%#llx rip=%p module=%p %s\n",
+                            rasterizer->GpuSideThreadKind(), (unsigned long long)addr,
+                            Common::GetRip(context), base, module);
+                if (traced.load(std::memory_order_relaxed) <= 3) {
+                    const auto* code = static_cast<const u8*>(Common::GetRip(context)) - 32;
+                    std::printf("  code at rip-32:");
+                    for (int i = 0; i < 64; ++i) {
+                        std::printf(" %02x", code[i]);
+                    }
+                    std::printf("\n");
+                }
+            }
             return rasterizer->ReadMemory(addr, size, is_gpu_thread);
         }
         return false;

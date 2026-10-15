@@ -514,6 +514,18 @@ void VideoOutDriver::Flip(const Request& req) {
                         (unsigned long long)Gow3Stats::uc3_barriers_gfx.exchange(0),
                         (unsigned long long)Gow3Stats::uc3_transits.exchange(0),
                         (unsigned long long)Gow3Stats::uc3_transits_big.exchange(0));
+            {
+                const u64 async = Gow3Stats::uc3_rb_async.exchange(0);
+                std::printf("uc3 readbacks: %llu async, %.1f ms waited by faulting threads, %llu "
+                            "left protected (rewritten), %llu GPU-side overlap waits; sync: %llu "
+                            "GPU-side, %llu write faults, %llu other\n",
+                            (unsigned long long)async, Gow3Stats::uc3_rb_async_ns.exchange(0) / 1e6,
+                            (unsigned long long)Gow3Stats::uc3_rb_async_dirty.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_rb_async_overlap.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_rb_sync_gpu.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_rb_sync_write.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_rb_sync_other.exchange(0));
+            }
             uc3_window_draws = Gow3Stats::draws.load();
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);
             const u64 faults = Gow3Stats::tracker_faults.exchange(0);

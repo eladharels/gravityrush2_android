@@ -430,6 +430,10 @@ bool Rasterizer::IsGpuSideThread() const {
     return OnStageA() || DrawPipe::OnStageB() || OnCaptureThread();
 }
 
+char Rasterizer::GpuSideThreadKind() const {
+    return OnStageA() ? 'A' : DrawPipe::OnStageB() ? 'B' : OnCaptureThread() ? 'C' : '-';
+}
+
 namespace {
 thread_local bool on_capture_thread = false;
 }
@@ -2304,6 +2308,27 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                 (unsigned long long)vsharp.base_address, (unsigned long long)size,
                                 int(desc.is_written), int(desc.is_formatted), int(accessed));
                 }
+                // uc3: GOW3_WRITE_TRACE=<guest address, hex>: the first 40 shader bindings
+                // that write it (who produces the data a GPU-side read fault waits for);
+                // =1: the 4 KiB page of the last GPU-side read fault (GOW3_FAULT_TRACE=1).
+                static const u64 write_trace_env = [] {
+                    const char* env = std::getenv("GOW3_WRITE_TRACE");
+                    return env ? std::strtoull(env, nullptr, 16) : 0ull;
+                }();
+                const u64 write_trace =
+                    write_trace_env == 1
+                        ? Gow3Stats::uc3_last_gpu_fault.load(std::memory_order_relaxed) & ~0xfffull
+                        : write_trace_env;
+                static std::atomic<int> write_traced{0};
+                if (write_trace && desc.is_written && vsharp.base_address < write_trace + 0x1000 &&
+                    write_trace < vsharp.base_address + size &&
+                    write_traced.fetch_add(1, std::memory_order_relaxed) < 40) {
+                    std::printf("write trace: shader %016llx binding %u addr=0x%llx size=%llu "
+                                "stride=%u tick=%llu\n",
+                                (unsigned long long)stage.pgm_hash, binding.buffer,
+                                (unsigned long long)vsharp.base_address, (unsigned long long)size,
+                                vsharp.GetStride(), (unsigned long long)scheduler.CurrentTick());
+                }
             }
         }
 
@@ -3269,21 +3294,21 @@ u32 Rasterizer::ReadDataFromGds(u32 gds_offset) {
     return value;
 }
 
-bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
+bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks, bool from_fault) {
     DrainDrawPipe();
     if (!IsMapped(addr, size)) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
     texture_cache.ResolveReadbacks(addr, size, assume_locks, VideoCore::ReadbackSource::CpuWrite);
-    buffer_cache.InvalidateMemory(addr, size, assume_locks);
+    buffer_cache.InvalidateMemory(addr, size, assume_locks, from_fault);
     texture_cache.InvalidateMemory(addr, size);
     return true;
 }
 
 bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
     DrainDrawPipe();
-    if (!InvalidateMemory(addr, 8, assume_locks)) {
+    if (!InvalidateMemory(addr, 8, assume_locks, true)) {
         return false;
     }
     buffer_cache.ExtendWriteFault(addr);
@@ -3299,7 +3324,7 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
     const bool image_readback =
         texture_cache.ResolveReadbacks(addr, size, assume_locks, VideoCore::ReadbackSource::CpuRead);
     if (!image_readback || buffer_cache.IsRegionGpuModified(addr, size)) {
-        buffer_cache.ReadMemory(addr, size, false, assume_locks);
+        buffer_cache.ReadMemory(addr, size, false, assume_locks, true);
     }
     return true;
 }

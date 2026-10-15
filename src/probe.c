@@ -749,6 +749,8 @@ int main(int argc, char **argv) {
         }
     }
     image = allocate(round_page(size));
+    printf("Image base: %p (guest code addresses in traces are image offsets from here)\n",
+           (void *)image);
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
     if (!cpu_only) {

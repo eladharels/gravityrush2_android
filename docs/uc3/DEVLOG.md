@@ -4,6 +4,33 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — Readback assíncrono (A2): museu 41 → 57,7 FPS, ruas 22,5 → 25,9 (desligado por padrão)
+
+**O que mudou:** com `GOW3_READBACK_ASYNC=1`, uma falha de página em memória escrita pela GPU (leitura ou escrita do jogo) não esvazia mais a GPU a partir da thread da GPU. Antes, a thread da GPU gravava a cópia, chamava `scheduler.Finish()` e ficava parada até a GPU terminar tudo; a GPU depois ficava ociosa enquanto essa thread voltava a gravar trabalho.
+- Agora a thread da GPU grava a cópia num staging reservado (`staging_pool.Request(..., deferred=true)`), submete com `Flush()` e volta ao trabalho.
+- A thread do jogo que falhou espera o tick no semáforo da timeline, escreve os dados de volta na memória e só então tira a proteção da página (`CompleteAsyncReadback`).
+- Se a GPU ligar uma dessas janelas para escrita nesse meio tempo (`NoteAsyncWrite`), a proteção fica e o acesso repetido falha de novo para pegar os dados novos.
+- Uma falha da thread da GPU numa janela ainda pendente espera a pendente terminar (`WaitAsyncReadbacks`). O staging é liberado na thread da GPU.
+- Continua síncrono: falhas das threads do lado da GPU (processador de comandos, gravação, captura de shader), `GOW3_READBACK_ALL`, unmaps.
+
+**Resultados (FPS médio estável):**
+
+| Cena | Antes (deca501) | Só leituras | Leituras + escritas |
+|---|---|---|---|
+| Ruas (save 036) | ~22,9 | ~23,4 | ~25,9 |
+| Museu (save 035) | ~41 | — | ~57,7 |
+
+Imagem correta nas duas cenas, sem assert. Novo contador no log: `uc3 readbacks: N async, ms esperados, deixados protegidos, esperas de sobreposição; sync: lado da GPU, escritas, outros`.
+
+**O que ainda para a GPU nas ruas:** ~120 por segundo de readbacks síncronos (`DownloadMemory` + `Finish`, ~24% do tempo da thread da GPU). Diagnóstico com `GOW3_FAULT_TRACE=1` (novo) e `GOW3_WRITE_TRACE=1` (novo):
+- Quem falha é o SRT walker (o código JIT de `flatten_extended_userdata_pass.cpp` que copia as tabelas de descritores do jogo), rodando no processador de comandos e na captura de shaders.
+- A página que ele lê (0x103f25c000) é a mesma onde o shader de compute `2d215c3b` escreve 12 bytes (argumentos de dispatch indireto). Os descritores não são escritos pela GPU; é compartilhamento falso de página de 4 KiB.
+- Próximo passo (para o Fable desenhar): ler os descritores sem passar pela proteção quando os bytes lidos não estão em `gpu_modified_ranges`.
+
+Outros: `probe.c` imprime `Image base` no início; `.bat` novos `medir_async.bat` e `medir_async_diag.bat`.
+
+---
+
 ## 2026-10-15 — Barreira falsa nos buffers formatados: ruas 16,5 → 22,5 FPS, museu 38,5 → 41
 
 **O que estava acontecendo:** o perfil de GPU apontou o shader de compute `8f067540`, despachado ~1.700 vezes por quadro nas ruas com grupos 1x1x1, gastando ~22 ms por quadro. Quase todo dispatch levava uma barreira de memória: ~1.570 barreiras por quadro.

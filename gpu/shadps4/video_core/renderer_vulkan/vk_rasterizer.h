@@ -89,7 +89,8 @@ public:
     void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds);
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
     u32 ReadDataFromGds(u32 gsd_offset);
-    bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
+    bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false,
+                          bool from_fault = false);
     /// GPU thread, before a write the guest can observe (see Scheduler::WaitHostCopies).
     void WaitHostCopies() {
         DrainDrawPipe();
@@ -135,6 +136,8 @@ public:
     }
     /// The GPU command thread or the draw recording thread (fault handling runs inline there).
     bool IsGpuSideThread() const;
+    /// uc3: 'A' command processor, 'B' draw recording, 'C' shader capture, '-' other.
+    char GpuSideThreadKind() const;
     /// uc3: marks the calling thread as a shader capture thread (PipelineCache::QueueShader
     /// runs the guest reads of a new shader on it while the GPU command thread waits): its page
     /// faults are resolved inline, as the draw recording thread's are. Through the locked path
