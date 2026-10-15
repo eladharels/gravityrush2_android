@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <unordered_set>
 #include <utility>
 #include "common/adaptive_mutex.h"
 #include "common/assert.h"
@@ -45,7 +47,6 @@ extern "C" int runtime_memory_region_backing(uintptr_t address, uintptr_t* start
 #include <cstdlib>
 #include <limits>
 #include <mutex>
-#include <unordered_set>
 #else
 #include "common/spin_lock.h"
 #endif
@@ -166,6 +167,11 @@ struct PageManager::Impl {
         return enabled;
     }
 
+    static bool SrtTraceOn() {
+        static const bool trace = std::getenv("GOW3_SRT_TRACE") != nullptr;
+        return trace;
+    }
+
     static void SrtReadDword(u64 src, u32* out) {
         Gow3Stats::uc3_srt_leaf_sharp.fetch_add(1, std::memory_order_relaxed);
         if (rasterizer->IsGpuWritten(src, sizeof(u32))) {
@@ -206,6 +212,17 @@ struct PageManager::Impl {
                 flat[i] = 0;
                 leaves->push_back({static_cast<u32>(i), 0, addr});
                 ++copied;
+                if (!rasterizer->IsGpuModifiedBytes(addr, sizeof(u32))) {
+                    Gow3Stats::uc3_leaf_by_window.fetch_add(1, std::memory_order_relaxed);
+                }
+                if (SrtTraceOn()) {
+                    static std::mutex seen_mutex;
+                    static std::unordered_set<VAddr> seen;
+                    std::scoped_lock lk{seen_mutex};
+                    if (seen.insert(addr).second) {
+                        Gow3Stats::uc3_leaf_new_addr.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
                 continue;
             }
             if (!sync) {

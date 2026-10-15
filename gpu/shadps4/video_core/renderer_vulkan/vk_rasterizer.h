@@ -155,6 +155,9 @@ public:
     bool IsGpuWritten(VAddr addr, u64 size);
     /// uc3: bytes an image still has to read back (not in any buffer yet).
     bool HasImageReadbackBytes(VAddr addr, u64 size);
+    bool IsGpuModifiedBytes(VAddr addr, u64 size) {
+        return buffer_cache.IsGpuModifiedBytes(addr, size);
+    }
     /// uc3 (trace): which of IsGpuWritten's sources holds these bytes.
     const char* DescribeGpuWritten(VAddr addr, u64 size);
     bool IsMapped(VAddr addr, u64 size);

@@ -248,6 +248,35 @@ bool PipelinedOpcode(PM4ItOpcode opcode) {
         return false;
     }
 }
+
+/// uc3 (Fable R.8.3): ACB packets that need no drain: registers, nested buffers, waits that
+/// yield, and dispatches (handed over like draws, or draining themselves).
+bool ComputePipelinedOpcode(PM4ItOpcode opcode) {
+    switch (opcode) {
+    case PM4ItOpcode::Nop:
+    case PM4ItOpcode::SetShReg:
+    case PM4ItOpcode::SetQueueReg:
+    case PM4ItOpcode::AcquireMem:
+    case PM4ItOpcode::IndirectBuffer:
+    case PM4ItOpcode::Rewind:
+    case PM4ItOpcode::WaitRegMem:
+    case PM4ItOpcode::EventWrite:
+    case PM4ItOpcode::DispatchDirect:
+    case PM4ItOpcode::DispatchIndirect:
+    case PM4ItOpcode::ReleaseMem: // runs in order on the recording thread (RunReleaseMem)
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool ComputePipeOn() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_COMPUTE_PIPE");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
 } // namespace
 
 namespace {
@@ -360,6 +389,71 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
         rasterizer.Finish();
         const u32 value = rasterizer.ReadDataFromGds(event_eos.gds_index);
         *event_eos.Address() = value;
+    }
+}
+
+/// uc3 (Fable R.8.3, GOW3_COMPUTE_PIPE=1): a compute ReleaseMem runs in order with the draws
+/// on the recording thread, like EventWriteEop, instead of draining the pipe first.
+struct ReleaseMemTask {
+    PM4CmdReleaseMem packet;
+    u32 pipe_id;
+};
+
+void SignalReleaseMem(Vulkan::Rasterizer& rasterizer, const ReleaseMemTask& task) {
+    const auto& packet = task.packet;
+    const auto write = [&](auto value) {
+        void* address = packet.Address<void*>();
+        Gow3WriteLog::Note(reinterpret_cast<u64>(address), &value, sizeof(value),
+                           Gow3WriteLog::Fence);
+        if (!Core::Memory::Instance()->TryWriteBacking(address, &value, sizeof(value))) {
+            std::memcpy(address, &value, sizeof(value));
+        }
+    };
+    switch (packet.data_sel.Value()) {
+    case DataSelect::Data32Low:
+        write(packet.DataDWord());
+        break;
+    case DataSelect::Data64:
+        write(packet.DataQWord());
+        break;
+    case DataSelect::GpuClock64:
+        write(GetGpuClock64());
+        break;
+    case DataSelect::PerfCounter:
+        write(GetGpuPerfCounter());
+        break;
+    case DataSelect::GdsMemStore:
+        rasterizer.CopyBuffer(packet.Address<VAddr>(), packet.gds_index,
+                              packet.num_dw * sizeof(u32), false, true);
+        break;
+    default:
+        UNREACHABLE();
+    }
+    switch (packet.int_sel.Value()) {
+    case InterruptSelect::None:
+        break;
+    case InterruptSelect::IrqUndocumented:
+    case InterruptSelect::IrqWhenWriteConfirm:
+        Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(task.pipe_id));
+        break;
+    default:
+        UNREACHABLE();
+    }
+}
+
+void RunReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
+    const auto task = *reinterpret_cast<const ReleaseMemTask*>(data);
+    rasterizer.OnFence();
+    // A GDS store copies on this thread; plain labels are written after the host copies
+    // queued before them, without waiting here (as RunEventWriteEop).
+    if (task.packet.data_sel.Value() != DataSelect::GdsMemStore &&
+        Vulkan::DrawPipe::OnStageB() && !Gow3Toggle::Disabled(Gow3Toggle::RecorderFences)) {
+        rasterizer.SignalAfterHostCopies(
+            [task, &rasterizer] { SignalReleaseMem(rasterizer, task); });
+    } else {
+        rasterizer.WaitHostCopies();
+        rasterizer.WaitDeferredSignals();
+        SignalReleaseMem(rasterizer, task);
     }
 }
 } // namespace
@@ -1408,7 +1502,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     size_t acb_size = acb.size_bytes();
     while (!acb.empty()) {
         ProcessCommands();
-        if (rasterizer) {
+        if (rasterizer && !ComputePipeOn()) {
             rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute); // gow3: compute work uses the caches
         }
 
@@ -1452,6 +1546,34 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        // uc3 (Fable R.8.3, GOW3_COMPUTE_PIPE=1): like the DCB loop, wait for the recording
+        // thread only before packets that touch the caches or guest memory synchronously.
+        // Dispatches go through the pipe (or drain themselves when it is off).
+        if (rasterizer && ComputePipeOn() && !ComputePipelinedOpcode(opcode)) {
+            // A DmaData that patches the dims of a later DispatchDirect in this buffer only
+            // records the patch (indirect_patches): no rasterizer work, no wait.
+            bool dispatch_patch = false;
+            if (opcode == PM4ItOpcode::DmaData) {
+                const auto* dma = reinterpret_cast<const PM4DmaData*>(header);
+                if (dma->dst_addr_lo == 0x3022C) {
+                    dispatch_patch = true;
+                } else if ((dma->src_sel == DmaDataSrc::Memory ||
+                            dma->src_sel == DmaDataSrc::MemoryUsingL2) &&
+                           (dma->dst_sel == DmaDataDst::Memory ||
+                            dma->dst_sel == DmaDataDst::MemoryUsingL2)) {
+                    const VAddr dst = dma->DstAddress<VAddr>();
+                    const auto* target = reinterpret_cast<const PM4Header*>(dst - sizeof(PM4Header));
+                    dispatch_patch = dst >= base_addr && dst < base_addr + acb_size &&
+                                     dma->NumBytes() ==
+                                         sizeof(PM4CmdDispatchIndirect::GroupDimensions) &&
+                                     target->type == 3 &&
+                                     target->type3.opcode == PM4ItOpcode::DispatchDirect;
+                }
+            }
+            if (!dispatch_patch) {
+                rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
+            }
+        }
 
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
         switch (opcode) {
@@ -1644,6 +1766,12 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
         case PM4ItOpcode::ReleaseMem: {
+            if (rasterizer && ComputePipeOn()) {
+                const ReleaseMemTask task{*reinterpret_cast<const PM4CmdReleaseMem*>(header),
+                                          static_cast<u32>(queue.pipe_id)};
+                rasterizer->RunInOrder(&RunReleaseMem, &task, sizeof(task));
+                break;
+            }
             // gow3: copies deferred to the recording thread precede writes the guest sees, and
             // so do graphics fences deferred to it (the pipe was drained before this packet).
             if (rasterizer) {

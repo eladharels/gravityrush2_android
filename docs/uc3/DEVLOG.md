@@ -4,6 +4,23 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — R.8.3: compute sem espera antes de cada pacote (`GOW3_COMPUTE_PIPE=1`, desligado): ruas 28 → 41 FPS, museu 47 → 50,5
+
+**Achado:** a espera "compute" do draw pipe (~58 mil por segundo nas ruas, 15-17% do tempo da thread de comandos) acontecia antes de todo pacote da fila de compute. Com o diagnóstico por opcode, quase todas vinham do `ReleaseMem`, um por dispatch: a fila de compute esperava a thread de gravação esvaziar a cada dispatch, e o pipe perdia a sobreposição.
+
+**O que mudou (desenho do Fable, R.8.3), com `GOW3_COMPUTE_PIPE=1`:**
+- `ProcessCompute` não espera mais no topo do laço. Como no laço de gráficos, só espera antes de pacotes que mexem no cache ou na memória na hora. Não esperam: Nop, SetShReg, SetQueueReg, AcquireMem, IndirectBuffer, Rewind, WaitRegMem (cede a vez), EventWrite, os dispatches (vão pelo pipe, ou esperam sozinhos) e o DmaData que só corrige as dimensões de um DispatchDirect seguinte (indirect_patches).
+- `ReleaseMem` vai para a thread de gravação em ordem com os draws (`RunReleaseMem`, como o `EventWriteEop`): grava o rótulo pela visão de backing depois das cópias anteriores, sem esperar. Cópia de GDS continua síncrona nessa thread.
+- O motivo de cada espera de compute agora é o opcode, nas estatísticas.
+
+**Resultado (imagem correta nas duas cenas):** ruas (036) ~28,1 → **~41,3 FPS**: o pipe passa de ~93 mil para ~230 mil draws/s e as esperas de 58 mil para ~400 por segundo. Museu (035) ~47 → **~50,5 FPS**.
+
+**Atenção:** depois do teste do museu, o processo do jogo não terminou ao fechar (a janela ficou "Não respondendo" e `taskkill /f` não conseguiu finalizar). Pode ser deste modo; fica desligado até uma sessão de jogo confirmar.
+
+**Cópia das folhas (R.8.2):** o teste do fixup já era por byte (`gpu_modified_ranges`). Nas ruas, todas as folhas zeradas estão lá, nenhuma só numa janela assíncrona, e são sempre os mesmos endereços (0 novos por intervalo). Com a cópia ligada, os bytes nunca descem para a memória do jogo, então cada passada do walker copia de novo. Para resolver, os bytes precisam descer de forma assíncrona depois da cópia.
+
+---
+
 ## 2026-10-15 — R.8.2 (B.3 + B.4): cópia das folhas na GPU funciona, mas não ganha; achado o travamento do anel de constantes (ruas 25 → 28 FPS)
 
 **Anel de constantes travado (corrigido, vale para todos):** `ConstantRing::Stamp` saía cedo quando o fim do pacote era igual ao anterior. Com o anel cheio, todo pacote tem o mesmo fim, então nada era publicado, nada era liberado e o anel ficava cheio para sempre: nas ruas ~2,4 milhões de cópias por intervalo caíam no caminho antigo. Agora o `Stamp` publica o pendente também nesse caso. Ruas (036), sem a cópia das folhas: **~25,0 → ~28,1 FPS**, imagem correta; o anel quase não enche mais (33 mil vezes por intervalo, antes sempre). Museu (035): ~47 FPS no início do save; lá o anel nunca enchia, então a correção não muda nada (o 49,8 do R.8.1 foi outro momento).

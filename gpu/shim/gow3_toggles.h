@@ -120,7 +120,8 @@ inline std::atomic<std::uint64_t> uc3_srt_emulated{0}, uc3_srt_sync{0}, uc3_srt_
 inline std::atomic<std::uint64_t> uc3_srt_ptr_sync{0}, uc3_srt_leaf_sync{0}, uc3_srt_sync_walks{0};
 // uc3 (R.8.2): GPU-written dwords left 0 for a GPU copy, sharps read back, copies recorded.
 inline std::atomic<std::uint64_t> uc3_srt_leaf_zeroed{0}, uc3_srt_leaf_sharp{0}, uc3_leaf_copies{0},
-    uc3_leaf_noring{0}, uc3_leaf_dead{0}, uc3_ring_full{0}, uc3_ring_copies{0};
+    uc3_leaf_noring{0}, uc3_leaf_dead{0}, uc3_ring_full{0}, uc3_ring_copies{0},
+    uc3_leaf_by_window{0}, uc3_leaf_new_addr{0};
 // uc3: GPU cost counters (Fable R.3): render passes actually ended, memory barriers recorded by
 // FlushBarriers and how many of them wait on graphics stages, layout transitions that produced
 // a barrier and how many on images of 1920x1080 or more.

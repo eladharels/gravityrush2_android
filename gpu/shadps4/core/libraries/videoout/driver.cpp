@@ -521,7 +521,7 @@ void VideoOutDriver::Flip(const Request& req) {
                             "GPU-side, %llu write faults, %llu other; SRT walker loads: %llu "
                             "from backing, %llu read back, %llu stale (GOW3_SRT_STALE); after the walk: %llu "
                             "pointers, %llu dwords read back in %llu walks; leaf copy: %llu "
-                            "zeroed, %llu read back (sharps, no ring), of them %llu no ring, %llu GPU "
+                            "zeroed (%llu only in async windows, %llu new addresses), %llu read back (sharps, no ring), of them %llu no ring, %llu GPU "
                             "copies, %llu dead (GOW3_LEAF_DEAD); constant ring: %llu copies, %llu full\n",
                             (unsigned long long)async, Gow3Stats::uc3_rb_async_ns.exchange(0) / 1e6,
                             (unsigned long long)Gow3Stats::uc3_rb_async_dirty.exchange(0),
@@ -536,6 +536,8 @@ void VideoOutDriver::Flip(const Request& req) {
                             (unsigned long long)Gow3Stats::uc3_srt_leaf_sync.exchange(0),
                             (unsigned long long)Gow3Stats::uc3_srt_sync_walks.exchange(0),
                             (unsigned long long)Gow3Stats::uc3_srt_leaf_zeroed.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_leaf_by_window.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_leaf_new_addr.exchange(0),
                             (unsigned long long)Gow3Stats::uc3_srt_leaf_sharp.exchange(0),
                             (unsigned long long)Gow3Stats::uc3_leaf_noring.exchange(0),
                             (unsigned long long)Gow3Stats::uc3_leaf_copies.exchange(0),

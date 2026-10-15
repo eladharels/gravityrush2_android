@@ -121,6 +121,10 @@ public:
     [[nodiscard]] bool IsGpuWritten(VAddr addr, u64 size);
     /// uc3 (trace): "gpu_modified_ranges [start, end)", "async readback" or "image readback".
     const char* DescribeGpuWritten(VAddr addr, u64 size);
+    /// uc3: only the gpu_modified_ranges part of IsGpuWritten (statistics).
+    [[nodiscard]] bool IsGpuModifiedBytes(VAddr addr, u64 size) {
+        return gpu_modified_ranges.Intersects(addr, size);
+    }
 
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
