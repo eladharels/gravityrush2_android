@@ -986,6 +986,11 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         static const char* scene_debug = std::getenv("GOW3_SCENE_DEBUG");
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
         scene_targets->debug = scene_debug_frame;
+    } else if (GpuProfiler::Get() && regs.color_buffers[0] &&
+               FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
+        // uc3: without the upscaler the camera motion is off, but the GPU profile still needs
+        // the frame boundary (the display pass) to collect.
+        NoteFrameStart();
     }
     bind_prepared = used_prepared;
     motion_draw = pipeline->GetGraphicsKey().motion_vectors;
@@ -1375,12 +1380,14 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         return;
     }
 
+    // uc3: marked before the barrier, so its wait is charged to this dispatch, not the previous
+    // label (Fable R.3).
+    mark();
     if (needs_barrier) {
         runtime.FlushBarriers();
     }
 
     scheduler.EndRendering();
-    mark();
     pipeline->BindResources(set_writes, push_data);
 
     const vk::Pipeline handle = pipeline->Handle();

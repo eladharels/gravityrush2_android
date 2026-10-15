@@ -131,6 +131,7 @@ void Scheduler::EndRendering() {
         return;
     }
     is_rendering = false;
+    Gow3Stats::uc3_pass_ends.fetch_add(1, std::memory_order_relaxed);
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
 }
 

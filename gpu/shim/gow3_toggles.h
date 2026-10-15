@@ -103,6 +103,11 @@ inline std::atomic<std::uint64_t> uc3_rb_open{0}, uc3_rb_inflight{0}, uc3_rb_don
 // uc3: GOW3_READBACK_FAST downloads: done on the side (no queue drain) / the full wait, and the
 // time spent waiting for the side copies.
 inline std::atomic<std::uint64_t> uc3_rb_side{0}, uc3_rb_side_ns{0}, uc3_rb_full{0};
+// uc3: GPU cost counters (Fable R.3): render passes actually ended, memory barriers recorded by
+// FlushBarriers and how many of them wait on graphics stages, layout transitions that produced
+// a barrier and how many on images of 1920x1080 or more.
+inline std::atomic<std::uint64_t> uc3_pass_ends{0}, uc3_barriers{0}, uc3_barriers_gfx{0},
+    uc3_transits{0}, uc3_transits_big{0};
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).

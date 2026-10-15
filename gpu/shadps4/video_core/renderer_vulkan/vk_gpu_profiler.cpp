@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <utility>
 
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -74,11 +75,14 @@ void GpuProfiler::BeginFrame() {
 void GpuProfiler::Collect(u32 which) {
     const u32 count = used[which];
     std::vector<u64> stamps(count);
-    // Four frames on this is complete unless the GPU lags that far: then wait for it.
+    // Four frames on this is complete unless the GPU lags that far. uc3: then the frame is
+    // dropped instead of waited for: waiting here holds the GPU thread back, the guest's EOP
+    // fences fall behind and Uncharted 3 asserts (m_gfxEopTick) on the title screen.
     const auto result = device.getQueryPoolResults(
         *pool, which * SliceQueries, count, count * sizeof(u64), stamps.data(), sizeof(u64),
-        vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
+        vk::QueryResultFlagBits::e64);
     if (result != vk::Result::eSuccess) {
+        ++dropped;
         return;
     }
     for (u32 i = 0; i + 1 < count; ++i) {
@@ -102,8 +106,10 @@ void GpuProfiler::Print() {
     for (const auto& [key, total] : sorted) {
         sum += total.ms;
     }
-    std::printf("GPU profile: %.2f ms/frame over %llu frames, %zu labels\n", sum / frames,
-                static_cast<unsigned long long>(frames), sorted.size());
+    std::printf("GPU profile: %.2f ms/frame over %llu frames (%llu dropped, GPU too far behind), "
+                "%zu labels\n",
+                sum / frames, static_cast<unsigned long long>(frames),
+                static_cast<unsigned long long>(std::exchange(dropped, 0)), sorted.size());
     for (size_t i = 0; i < std::min<size_t>(sorted.size(), 30); ++i) {
         const auto& [key, total] = sorted[i];
         std::printf("  %6.3f ms/frame %5.1f/frame  %s\n", total.ms / frames,

@@ -4,6 +4,28 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — Perfil de GPU nas ruas: metade do quadro é GPU ociosa e um shader de compute leva 22 ms
+
+**Correções no `GOW3_GPU_PROFILE`:**
+- Sem o upscaler ele nunca fechava quadros, porque `NoteFrameStart` só rodava com o camera motion. Agora ele também fecha no passe de display quando o perfil está ligado.
+- A leitura das queries usava `eWait`, que segurava a thread da GPU e fazia a tela de título cair na assertiva `m_gfxEopTick` (duas vezes seguidas). Agora o quadro sem resultado é descartado.
+- O `mark()` do dispatch passou para antes de `FlushBarriers`, como o Fable pediu, para a barreira contar no próprio dispatch.
+
+**Contadores novos** em "uc3 draw stats": fins de render pass, barreiras de memória (e quantas com estágios gráficos no srcStage), transições de layout (e quantas em imagens 1080p+).
+
+**Ruas (save 036), por quadro do jogo, ~66 ms.** O perfil fecha 2 "quadros" por quadro do jogo: o passe de display aparece duas vezes.
+
+| O quê | ms | quantidade |
+|---|---|---|
+| GPU ociosa entre submissões | ~35 | ~15 vkQueueSubmit |
+| `dispatch cs 8f067540` (1x1x1) | ~22,5 | ~1.700 dispatches |
+| todos os render passes | ~3 | |
+| resto | ~5 | |
+
+Barreiras: ~1.570 por quadro, só ~41 com estágios gráficos (é serialização compute→compute). Fins de pass: ~51. Transições: ~100, das quais ~45 em imagens 1080p+.
+
+**Leitura:** o limite não é o trabalho de render. É a GPU parada esperando a CPU (a bolha da falha de readback, proposta A2 do Fable) e um único shader minúsculo despachado ~1.700 vezes com barreira. Resultados enviados ao Fable (`/mnt/project-files/uc3/resultados-readback-opus.md`). Log: `out/gpu-ruas.log`. Atalho: `medir_gpu.bat`.
+
 ## 2026-10-14 — Cópia lateral do readback (`GOW3_READBACK_FAST=1`, desligada): funciona, mas não ganha FPS
 
 Seguindo a investigação do Fable (`/mnt/project-files/uc3/investigacao-fable.md`, seção 1.4).

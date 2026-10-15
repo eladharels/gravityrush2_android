@@ -199,7 +199,14 @@ bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
     if (scene_targets) scene_targets->NativeAccess(*image, dst_access);
     const size_t prev_num_barriers = static_cast<size_t>(image_barriers.size());
     image->GetBarriers(image_barriers, dst_layout, dst_access, dst_stage, subres_range);
-    return image_barriers.size() != prev_num_barriers;
+    const bool added = image_barriers.size() != prev_num_barriers;
+    if (added) {
+        Gow3Stats::uc3_transits.fetch_add(1, std::memory_order_relaxed);
+        if (image->info.size.width >= 1920 && image->info.size.height >= 1080) {
+            Gow3Stats::uc3_transits_big.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    return added;
 }
 
 Runtime::TransferMark::TransferMark(Runtime& runtime, const char* what,
@@ -869,6 +876,19 @@ void Runtime::FlushBarriers() {
         return;
     }
 
+    if (dep_info.memoryBarrierCount) {
+        Gow3Stats::uc3_barriers.fetch_add(1, std::memory_order_relaxed);
+        constexpr auto graphics = vk::PipelineStageFlagBits2::eAllCommands |
+                                  vk::PipelineStageFlagBits2::eAllGraphics |
+                                  vk::PipelineStageFlagBits2::eColorAttachmentOutput |
+                                  vk::PipelineStageFlagBits2::eFragmentShader |
+                                  vk::PipelineStageFlagBits2::eVertexShader |
+                                  vk::PipelineStageFlagBits2::eEarlyFragmentTests |
+                                  vk::PipelineStageFlagBits2::eLateFragmentTests;
+        if (memory_barrier.srcStageMask & graphics) {
+            Gow3Stats::uc3_barriers_gfx.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     scheduler.EndRendering();
     scheduler.Record([memory = memory_barrier, has_memory = dep_info.memoryBarrierCount != 0,
                       images = scheduler.RecordData(std::span<const vk::ImageMemoryBarrier2>(

@@ -489,7 +489,8 @@ void VideoOutDriver::Flip(const Request& req) {
                         "%llu all-at-once, %.1f MB; %llu with hot windows (+%llu windows); "
                         "fault write ticks: %llu open, %llu in flight (%.1f ticks behind), "
                         "%llu done, %llu unknown; fast path: %llu side copies (%.2f ms), "
-                        "%llu full waits\n",
+                        "%llu full waits; GPU: %llu pass ends, %llu barriers (%llu on graphics stages), "
+                        "%llu layout transitions (%llu on 1080p+ images)\n",
                         (unsigned long long)(Gow3Stats::draws.load() - uc3_window_draws),
                         (unsigned long long)Gow3Stats::uc3_no_pipeline_draws.exchange(0), pending_draws,
                         (unsigned long long)Gow3Stats::uc3_indirect_draws.exchange(0),
@@ -507,7 +508,12 @@ void VideoOutDriver::Flip(const Request& req) {
                         (unsigned long long)Gow3Stats::uc3_rb_unknown.exchange(0),
                         (unsigned long long)Gow3Stats::uc3_rb_side.exchange(0),
                         Gow3Stats::uc3_rb_side_ns.exchange(0) / 1e6,
-                        (unsigned long long)Gow3Stats::uc3_rb_full.exchange(0));
+                        (unsigned long long)Gow3Stats::uc3_rb_full.exchange(0),
+                        (unsigned long long)Gow3Stats::uc3_pass_ends.exchange(0),
+                        (unsigned long long)Gow3Stats::uc3_barriers.exchange(0),
+                        (unsigned long long)Gow3Stats::uc3_barriers_gfx.exchange(0),
+                        (unsigned long long)Gow3Stats::uc3_transits.exchange(0),
+                        (unsigned long long)Gow3Stats::uc3_transits_big.exchange(0));
             uc3_window_draws = Gow3Stats::draws.load();
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);
             const u64 faults = Gow3Stats::tracker_faults.exchange(0);
