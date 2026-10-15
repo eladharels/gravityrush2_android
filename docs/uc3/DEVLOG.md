@@ -4,6 +4,30 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — Barreira falsa nos buffers formatados: ruas 16,5 → 22,5 FPS, museu 38,5 → 41
+
+**O que estava acontecendo:** o perfil de GPU apontou o shader de compute `8f067540`, despachado ~1.700 vezes por quadro nas ruas com grupos 1x1x1, gastando ~22 ms por quadro. Quase todo dispatch levava uma barreira de memória: ~1.570 barreiras por quadro.
+
+**Por quê:** com `GOW3_BARRIER_TRACE=8f067540` (novo, imprime as 300 primeiras ligações de buffer do shader) apareceu o padrão:
+- Cada dispatch liga o **mesmo array de structs três vezes**, nos campos de deslocamento 0, 0xC e 0x14 (stride 28), como buffers formatados graváveis.
+- O rastreador de barreiras registrava cada ligação com o tamanho cheio do V# (`stride * registros`). Para o campo em 0x14, a faixa passava 0x14 bytes do fim do array e caía no array do dispatch seguinte, que começa logo depois.
+- Resultado: uma dependência escrita→escrita que não existe, e uma barreira por dispatch.
+
+O toggle 2048 (leituras arredondadas a 4 KiB), suspeito do Fable, não mudava nada; o toggle 512 também não.
+
+**Correção** (`vk_rasterizer.cpp`, ligações de buffer): um buffer formatado com stride acessa um elemento por registro. Por isso o último byte tocado é `(registros - 1) * stride + tamanho do elemento`, e só essa faixa vai para o rastreador de barreiras (`IsBufferAccessed`/`bound_buffers`). O descritor Vulkan e o `ObtainBuffer` continuam com o tamanho cheio. `GOW3_TIGHT_FORMATTED=0` volta ao comportamento antigo.
+
+| | Antes | Depois |
+|---|---|---|
+| Barreiras por 5 s nas ruas | ~117.000 | ~12.000 |
+| `8f067540` por quadro | ~22 ms | ~1,8 ms |
+| Ruas, FPS (sem perfil) | ~16,5 | **~22,5** |
+| Museu, FPS | ~38,5 | **~41** |
+
+A imagem ficou igual nos dois lugares. Nas ruas, o que sobra do quadro de ~45 ms é sobretudo a GPU parada esperando a CPU (bolha das falhas de readback). O próximo passo é a proposta A2 do Fable.
+
+Logs: `out/barrier-trace-ruas.log`, `out/tight-ruas.log`, `out/tight-fps-ruas.log`, `out/tight-fps-museu.log`.
+
 ## 2026-10-15 — Perfil de GPU nas ruas: metade do quadro é GPU ociosa e um shader de compute leva 22 ms
 
 **Correções no `GOW3_GPU_PROFILE`:**

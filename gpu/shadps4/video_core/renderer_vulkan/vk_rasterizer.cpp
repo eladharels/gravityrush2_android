@@ -2264,12 +2264,46 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 push_data.AddOffset(binding.buffer, adjust);
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
-                bound_buffers.emplace_back(buffer, offset, size, src_access);
+                // uc3: a formatted buffer with a stride touches one element per record, so its
+                // last byte is (records - 1) * stride + element size, not records * stride. The
+                // game binds one array of structs several times at field offsets (0, 0xC, 0x14:
+                // shader 8f067540 in the streets, ~1700 dispatches a frame); tracked at the full
+                // size, the last field's range ran into the next dispatch's array and every
+                // dispatch got a barrier. GOW3_TIGHT_FORMATTED=0 tracks the full size again.
+                static const bool tight_formatted = [] {
+                    const char* env = std::getenv("GOW3_TIGHT_FORMATTED");
+                    return !env || env[0] != '0';
+                }();
+                u64 track_size = size;
+                if (tight_formatted && desc.is_formatted && vsharp.GetStride() != 0) {
+                    const u32 element = AmdGpu::NumBitsPerBlock(vsharp.GetDataFmt()) / 8;
+                    if (element != 0 && element < vsharp.GetStride() && size == vsharp.GetSize()) {
+                        track_size = size - (vsharp.GetStride() - element);
+                    }
+                }
+                bound_buffers.emplace_back(buffer, offset, track_size, src_access);
                 if (desc.is_written) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
                 }
-                needs_barrier |= runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
+                const bool accessed =
+                    runtime.IsBufferAccessed(buffer, offset, track_size, desc.is_written);
+                needs_barrier |= accessed;
+                // uc3: GOW3_BARRIER_TRACE=<shader hash, hex>: the first 300 buffer bindings of
+                // that shader, and whether each one needed a barrier.
+                static const u64 trace_hash = [] {
+                    const char* env = std::getenv("GOW3_BARRIER_TRACE");
+                    return env ? std::strtoull(env, nullptr, 16) : 0ull;
+                }();
+                static std::atomic<int> traced{0};
+                if (trace_hash && stage.pgm_hash == trace_hash &&
+                    traced.fetch_add(1, std::memory_order_relaxed) < 300) {
+                    std::printf("barrier trace %016llx: binding %u addr=0x%llx size=%llu written=%d "
+                                "formatted=%d accessed=%d\n",
+                                (unsigned long long)stage.pgm_hash, binding.buffer,
+                                (unsigned long long)vsharp.base_address, (unsigned long long)size,
+                                int(desc.is_written), int(desc.is_formatted), int(accessed));
+                }
             }
         }
 
