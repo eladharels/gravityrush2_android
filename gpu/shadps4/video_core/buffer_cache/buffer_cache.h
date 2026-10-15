@@ -121,10 +121,22 @@ public:
     [[nodiscard]] bool IsGpuWritten(VAddr addr, u64 size);
     /// uc3 (trace): "gpu_modified_ranges [start, end)", "async readback" or "image readback".
     const char* DescribeGpuWritten(VAddr addr, u64 size);
+    /// uc3 (Fable R.8.4): stage B, next to a leaf's GPU copy into the constant ring: also
+    /// copies the GPU bytes to host memory (unless already pending). Nobody waits;
+    /// CompleteLeafDownloads lands them in guest memory once the GPU is past them.
+    void QueueLeafDownload(const Buffer* buffer, u64 offset, VAddr address, u32 size);
+    /// Stage A with the draw pipe drained (OnSubmit): lands finished leaf downloads whose bytes
+    /// the GPU did not write again since, and clears them from gpu_modified_ranges.
+    void CompleteLeafDownloads();
     /// uc3: only the gpu_modified_ranges part of IsGpuWritten (statistics).
     [[nodiscard]] bool IsGpuModifiedBytes(VAddr addr, u64 size) {
         return gpu_modified_ranges.Intersects(addr, size);
     }
+
+    /// uc3 (from SuperMedo's uncharted_pc): writes the image that starts at `addr` (its current
+    /// GPU contents) into the buffer of that range, before a shader copies the range as plain
+    /// memory. False when no image starts there.
+    bool SyncImageToBuffer(VAddr addr, u32 size);
 
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
@@ -265,6 +277,22 @@ private:
     std::vector<Vulkan::StagingBufferRef> async_free;
     std::atomic<u32> async_count{};
     std::atomic<u32> async_free_count{};
+    /// uc3 (Fable R.8.4): leaf downloads (QueueLeafDownload): slots of 4..16 bytes in one
+    /// host-cached allocation.
+    struct LeafDownload {
+        VAddr address;
+        u32 size;
+        u32 slot;
+        u64 tick;
+        bool dirty;
+    };
+    static constexpr u32 LeafSlotSize = 16;
+    static constexpr u32 LeafSlots = 4096;
+    std::mutex leaf_mutex;
+    std::vector<LeafDownload> leaf_pending; ///< guarded by leaf_mutex
+    std::vector<u32> leaf_free_slots;       ///< guarded by leaf_mutex
+    std::atomic<u32> leaf_pending_count{};
+    Vulkan::StagingBufferRef leaf_staging{};
 
     std::array<const Buffer*, MAX_ARENA_PAGES> address_space{};
     u64 arena_page_bits{MAX_ARENA_PAGE_BITS};

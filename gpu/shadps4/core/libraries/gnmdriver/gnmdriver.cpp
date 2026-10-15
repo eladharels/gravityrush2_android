@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdlib>
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -12,6 +14,7 @@
 #include "core/address_space.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/videoout/driver.h"
 #include "core/libraries/gnmdriver/gnm_error.h"
 #include "core/libraries/gnmdriver/gnmdriver_init.h"
 #include "core/libraries/kernel/orbis_error.h"
@@ -2411,17 +2414,39 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     auto* cmdbuf = dcb_gpu_addrs[count - 1];
     const auto size_dw = dcb_sizes_in_bytes[count - 1] / 4;
 
-    std::scoped_lock lk{m_submit_lock};
-    WaitGpuIdle();
+    // uc3 (from SuperMedo's uncharted_pc, GPL): the guest may run at most N frames ahead of the
+    // GPU side, as on PS4, where its GPU keeps up. A GPU side that falls behind (shaders compiling
+    // on a first run) let the engine run several frames ahead; Uncharted then recycles a frame
+    // without its end-of-pipe tick and stops (assertion m_gfxEopTick in FrameBegin).
+    // GOW3_MAX_FRAMES_AHEAD=N (default 0: no limit, the old behaviour; SuperMedo uses 1).
+    static const u64 max_ahead = [] {
+        const char* env = std::getenv("GOW3_MAX_FRAMES_AHEAD");
+        return env ? std::strtoull(env, nullptr, 10) : 0ull;
+    }();
+    static std::atomic<u64> flips_submitted{0};
+    u64 frame = 0;
+    s32 result;
+    {
+        std::scoped_lock lk{m_submit_lock};
+        WaitGpuIdle();
 
-    const s32 patch_result =
-        PatchFlipRequest(cmdbuf, size_dw, vo_handle, buf_idx, flip_mode, flip_arg, nullptr /*unk*/);
-    if (patch_result != ORBIS_OK) {
-        return patch_result;
+        const s32 patch_result = PatchFlipRequest(cmdbuf, size_dw, vo_handle, buf_idx, flip_mode,
+                                                  flip_arg, nullptr /*unk*/);
+        if (patch_result != ORBIS_OK) {
+            return patch_result;
+        }
+
+        result = PerformSubmit(count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
+                               const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes);
+        if (result == ORBIS_OK) {
+            frame = flips_submitted.fetch_add(1, std::memory_order_relaxed) + 1;
+        }
     }
-
-    return PerformSubmit(count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
-                         const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes);
+    if (max_ahead && frame > max_ahead) {
+        // Bounded: a flip the GPU side never reaches must not hang the game.
+        VideoOut::WaitEopFlipsReached(frame - max_ahead, 2000);
+    }
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,

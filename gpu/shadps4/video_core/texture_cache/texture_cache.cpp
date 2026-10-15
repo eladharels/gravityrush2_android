@@ -1213,7 +1213,10 @@ void TextureCache::RefreshImage(Image& image) {
     RENDERER_TRACE;
     TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));
 
-    if (True(image.flags & ImageFlagBits::MaybeCpuDirty) &&
+    // uc3: GOW3_SMALL_STRICT=1 - diagnostic: re-upload MaybeCpuDirty images instead of trusting
+    // the hash (white hair after Continue).
+    static const bool small_strict = std::getenv("GOW3_SMALL_STRICT") != nullptr;
+    if (!small_strict && True(image.flags & ImageFlagBits::MaybeCpuDirty) &&
         False(image.flags & ImageFlagBits::CpuDirty)) {
         // The image size should be less than page size to be considered MaybeCpuDirty, so the
         // whole image is hashed (uc3: the first 64 pixels alone missed a small texture whose
@@ -1630,6 +1633,33 @@ void TextureCache::RunGarbageCollector() {
     SCOPE_EXIT {
         ++gc_tick;
     };
+
+    // uc3: GOW3_RELOAD_AT=<s> - diagnostic: once, s seconds after start, re-upload every image
+    // the GPU never wrote from guest memory. If a wrong texture turns right, the cache held stale
+    // content; if not, guest memory itself (or a buffer) is wrong.
+    static const double reload_at = [] {
+        const char* env = std::getenv("GOW3_RELOAD_AT");
+        return env ? std::atof(env) : -1.0;
+    }();
+    static bool reloaded = false;
+    if (reload_at >= 0 && !reloaded &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - uc3_flash_clock).count() >=
+            reload_at) {
+        reloaded = true;
+        std::scoped_lock lk{mutex};
+        u32 count = 0;
+        lru_cache.ForEachItemBelow(gc_tick, [&](ImageId id) {
+            Image& image = slot_images[id];
+            if (True(image.flags & ImageFlagBits::Registered) &&
+                False(image.flags & ImageFlagBits::GpuModified)) {
+                image.flags |= ImageFlagBits::CpuDirty;
+                UntrackImage(id);
+                ++count;
+            }
+        });
+        std::printf("uc3: GOW3_RELOAD_AT: %u images marked for re-upload\n", count);
+        std::fflush(stdout);
+    }
 
     GarbageCollectImages();
     GarbageCollectSamplers();

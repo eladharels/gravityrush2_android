@@ -28,7 +28,7 @@ namespace Vulkan {
 std::mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
-    : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
+    : instance{instance}, work_semaphore{instance, "work"}, command_pool{instance, &work_semaphore} {
     // gow3: GOW3_VK_RECORD_THREAD=0 records on the calling thread.
     const char* env = std::getenv("GOW3_VK_RECORD_THREAD");
     if (threaded_recording && !(env && env[0] == '0')) {
@@ -207,10 +207,23 @@ void Scheduler::WaitDeferredSignals() {
     }
     Gow3Stats::WaitTimer timer{Gow3Stats::host_copies_wait_ns};
     KickRecording(true);
+    const auto started = std::chrono::steady_clock::now();
+    bool reported = false;
     while (deferred_signals_done->load(std::memory_order_acquire) < issued) {
         // Helps the copy threads the signals wait for.
         Gow3Copy::WaitAsync();
         std::this_thread::yield();
+        // uc3 (Fable R.8.4): a wait this long is a hang in the making; say what it waits for.
+        if (!reported && std::chrono::steady_clock::now() - started > std::chrono::seconds{2}) {
+            reported = true;
+            std::printf("gow3: deferred signals stuck: %llu issued, %llu done, %u chunks queued, "
+                        "recorder %s\n",
+                        static_cast<unsigned long long>(issued),
+                        static_cast<unsigned long long>(deferred_signals_done->load()),
+                        static_cast<unsigned>(queued_chunks.load()),
+                        recorder_sleeping ? "sleeping" : "busy");
+            std::fflush(stdout);
+        }
     }
 }
 

@@ -262,6 +262,9 @@ extern "C" int gow3gpu_init(const Gow3GpuConfig* config) {
         // process without any fault report, which otherwise looks like a silent crash.
         std::printf("Window closed (SDL quit event): exiting\n");
         std::fflush(stdout);
+        // uc3 (Fable R.8.4): let submitted GPU work finish (bounded) and report what does
+        // not; a process exiting with a queue blocked on a never-signalled tick cannot end.
+        Vulkan::Semaphore::SettleAll(2000);
         std::_Exit(0);
     });
     g_window_thread.detach();

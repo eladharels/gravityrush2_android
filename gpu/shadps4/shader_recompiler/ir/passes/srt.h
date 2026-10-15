@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstdlib>
+
 #include <vector>
 #include <boost/container/set.hpp>
 #include <boost/container/small_vector.hpp>
@@ -13,6 +15,28 @@ struct Archive;
 }
 
 namespace Shader {
+
+// uc3 (from SuperMedo's uncharted_pc, GPL): a ReadConst whose offset varies per lane (a constant
+// block's pointer plus a per-pixel offset, as addr64 buffer loads compute it) reads a window of the
+// block's first dwords that the walker copies to the flat buffer; its flags are the window's start
+// with this bit.
+constexpr u32 ReadConstWindowFlag = 1u << 16;
+// uc3: GOW3_WINDOW_DWORDS=<n> (16-4096, default 256): dwords copied per window.
+inline u32 ReadConstWindowDwords() {
+    static const u32 dwords = [] {
+        const char* env = std::getenv("GOW3_WINDOW_DWORDS");
+        const u32 v = env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 256u;
+        return v < 16u ? 16u : (v > 4096u ? 4096u : v);
+    }();
+    return dwords;
+}
+// uc3: marks the ReadConsts made from an addr64 buffer load (GOW3_WINDOW_ADDR64_ONLY=1 gives only
+// those a window). Cleared by the offset assignment; masked off by the SPIR-V emitter.
+constexpr u32 ReadConstAddr64Mark = 1u << 17;
+inline bool WindowAddr64Only() {
+    static const bool only = std::getenv("GOW3_WINDOW_ADDR64_ONLY") != nullptr;
+    return only;
+}
 
 struct SrtWalkCtx;
 // uc3 (Fable R.8.1): the walker takes a context: the pointer loader it calls for each table

@@ -84,7 +84,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       memory_tracker{std::make_unique<MemoryTracker>(tracker)},
       stream_buffer{instance, scheduler, MemoryType::Stream, STREAM_BUFFER_SIZE},
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
-      memory_semaphore{instance} {
+      memory_semaphore{instance, "memory"} {
     while (arena_page_bits > MIN_ARENA_PAGE_BITS &&
            (u64{2} << arena_page_bits) > instance.GetMaxBufferSize()) {
         --arena_page_bits;
@@ -596,6 +596,77 @@ void BufferCache::WaitAsyncReadbacks(VAddr start, VAddr end) {
     }
 }
 
+void BufferCache::QueueLeafDownload(const Buffer* buffer, u64 offset, VAddr address, u32 size) {
+    if (size > LeafSlotSize) {
+        return;
+    }
+    u32 slot;
+    {
+        std::scoped_lock lk{leaf_mutex};
+        for (const auto& leaf : leaf_pending) {
+            if (leaf.address == address && !leaf.dirty) {
+                return; // already on its way
+            }
+        }
+        if (!leaf_staging.buffer) {
+            leaf_staging = staging_pool.Request(u64{LeafSlotSize} * LeafSlots,
+                                                VideoCore::MemoryType::HostCached, 0, true);
+            leaf_free_slots.reserve(LeafSlots);
+            for (u32 i = LeafSlots; i-- > 0;) {
+                leaf_free_slots.push_back(i);
+            }
+        }
+        if (leaf_free_slots.empty()) {
+            Gow3Stats::uc3_leaf_dl_full.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        slot = leaf_free_slots.back();
+        leaf_free_slots.pop_back();
+        leaf_pending.push_back({address, size, slot, scheduler.CurrentTick(), false});
+        leaf_pending_count.fetch_add(1, std::memory_order_release);
+    }
+    const vk::BufferCopy copy{offset, leaf_staging.offset + u64{slot} * LeafSlotSize, size};
+    runtime.CopyBuffer(buffer, leaf_staging.buffer, {&copy, 1});
+    Gow3Stats::uc3_leaf_dl_queued.fetch_add(1, std::memory_order_relaxed);
+}
+
+void BufferCache::CompleteLeafDownloads() {
+    if (leaf_pending_count.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+    auto* semaphore = scheduler.GetWorkSemaphore();
+    semaphore->Refresh();
+    std::scoped_lock lk{leaf_mutex};
+    bool invalidated = false;
+    std::erase_if(leaf_pending, [&](const LeafDownload& leaf) {
+        if (!semaphore->IsFree(leaf.tick)) {
+            return false;
+        }
+        leaf_free_slots.push_back(leaf.slot);
+        leaf_pending_count.fetch_sub(1, std::memory_order_release);
+        if (leaf.dirty) {
+            Gow3Stats::uc3_leaf_dl_dirty.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        if (!invalidated) {
+            invalidated = true;
+            leaf_staging.Invalidate();
+        }
+        const u8* data = leaf_staging.mapped + u64{leaf.slot} * LeafSlotSize;
+        auto* dst = std::bit_cast<u8*>(leaf.address);
+        Gow3WriteLog::NoteDownload(leaf.address, data, leaf.size);
+        memory->TryWriteBacking(dst, data, leaf.size);
+        gpu_modified_ranges.Subtract(leaf.address, leaf.size);
+        // The page keeps its GPU state while other GPU bytes on it are still not downloaded.
+        const VAddr page = leaf.address & ~VAddr{0xfff};
+        if (!gpu_modified_ranges.Intersects(page, 0x1000)) {
+            memory_tracker->UnmarkRegionAsGpuModified(page, 0x1000, false);
+        }
+        Gow3Stats::uc3_leaf_dl_landed.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    });
+}
+
 bool BufferCache::IsGpuWritten(VAddr addr, u64 size) {
     if (gpu_modified_ranges.Intersects(addr, size)) {
         return true;
@@ -940,6 +1011,14 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     const u64 uploaded_before = Gow3Stats::buffer_upload_bytes.load(std::memory_order_relaxed);
     if (is_written) {
         NoteAsyncWrite(device_addr, size);
+        if (leaf_pending_count.load(std::memory_order_acquire)) {
+            std::scoped_lock lk{leaf_mutex};
+            for (auto& leaf : leaf_pending) {
+                if (leaf.address < device_addr + size && device_addr < leaf.address + leaf.size) {
+                    leaf.dirty = true;
+                }
+            }
+        }
     }
     SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
     if (stats) {
@@ -1219,6 +1298,14 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
     }
     staging.Flush();
     return staging.buffer;
+}
+
+bool BufferCache::SyncImageToBuffer(VAddr addr, u32 size) {
+    if (!texture_cache.FindImageFromRange(addr, size)) {
+        return false;
+    }
+    const auto [arena, offset] = ObtainBuffer(addr, size, true);
+    return SynchronizeMemoryFromImage(arena, addr, size);
 }
 
 bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size) {

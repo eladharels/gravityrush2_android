@@ -17,7 +17,7 @@ class Scheduler;
 
 class Semaphore {
 public:
-    explicit Semaphore(const Instance& instance_);
+    explicit Semaphore(const Instance& instance_, const char* name_ = "semaphore");
     ~Semaphore();
 
     [[nodiscard]] u64 CurrentTick() const noexcept {
@@ -46,11 +46,17 @@ public:
     /// Waits for a tick to be hit on the GPU
     void Wait(u64 tick);
 
+    /// uc3 (Fable R.8.4): at exit, waits up to `timeout_ms` for every semaphore to reach the
+    /// last submitted tick and prints the ones that did not (a GPU queue waiting on a signal
+    /// that will never be submitted keeps the process from terminating).
+    static void SettleAll(u32 timeout_ms);
+
 protected:
     const Instance& instance;
     vk::UniqueSemaphore semaphore;    ///< Timeline semaphore.
     std::atomic<u64> gpu_tick{0};     ///< Current known GPU tick.
     std::atomic<u64> current_tick{1}; ///< Current logical tick.
+    const char* name;
 };
 
 } // namespace Vulkan

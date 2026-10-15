@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "shader_recompiler/frontend/translate/translate.h"
+#include "shader_recompiler/ir/passes/srt.h"
 
 namespace Shader::Gcn {
 
@@ -210,6 +212,32 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
     const auto& mubuf = inst.control.mubuf;
     const IR::VectorReg vaddr{inst.src[0].code};
     const IR::ScalarReg sharp{inst.src[2].code * 4};
+
+    // uc3 (from SuperMedo's uncharted_pc, GPL): addr64 (GCN 2): the address is the 64-bit pair in
+    // vaddr (with a V# of base 0), read like a scalar load from that pointer. Uncharted 3's hair
+    // finds each pixel's shadow cascade this way (the cascade block's pointer plus 64 bytes per
+    // cascade); without it the hair was lit by the sun in the shade and glowed white.
+    // GOW3_NO_ADDR64=1: old behaviour (reads through the base-0 V#).
+    static const bool addr64_off = [] {
+        const char* env = std::getenv("GOW3_NO_ADDR64");
+        return env && env[0] == '1';
+    }();
+    if (mubuf.addr64 && !addr64_off && !is_inst_typed && !is_buffer_typed && scalar_width == 32) {
+        const IR::Value base =
+            ir.CompositeConstruct(ir.GetVectorReg(vaddr), ir.GetVectorReg(vaddr + 1));
+        const IR::U32 soffset{GetSrc(inst.src[3])};
+        IR::U32 dword_offset = ir.Imm32(u32(mubuf.offset) >> 2);
+        if (!soffset.IsImmediate() || soffset.U32() != 0) {
+            dword_offset = ir.IAdd(dword_offset, ir.ShiftRightLogical(soffset, ir.Imm32(2)));
+        }
+        const IR::VectorReg dst_reg{inst.src[1].code};
+        for (u32 i = 0; i < num_dwords; i++) {
+            const IR::U32 value = ir.ReadConst(base, ir.IAdd(dword_offset, ir.Imm32(i)));
+            value.Inst()->SetFlags<u32>(ReadConstAddr64Mark); // uc3: GOW3_WINDOW_ADDR64_ONLY
+            ir.SetVectorReg(dst_reg + i, value);
+        }
+        return;
+    }
 
     const IR::U32 index = mubuf.idxen ? ir.GetVectorReg(vaddr) : ir.Imm32(0);
     const IR::VectorReg voffset_vgpr = mubuf.idxen ? vaddr + 1 : vaddr;

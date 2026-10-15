@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include "core/memory.h"
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -234,11 +240,165 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
     return true;
 }
 
+// uc3 (from SuperMedo's uncharted_pc, GPL: ExecuteScalarCopyHLE in vk_shader_hle.cpp):
+// Uncharted fills small constant blocks (effect material parameters, character constants) with a
+// compute shader that copies one dword per workgroup: dst[i] = src[i] while i < count (user data
+// SGPR6). Run on the GPU, the copy never reaches guest memory, and the SRT walker reads those
+// blocks there: the streets' remaining synchronous readbacks (resultados-readback-opus.md, R.7).
+// GOW3_SCALAR_COPY_HLE=1 (off by default): when the GPU wrote neither side, the copy is made in
+// guest memory and the dispatch is skipped; next to GPU data (pages the GPU wrote) the GPU copy
+// still runs and small copies whose source bytes the GPU did not write are also made in guest
+// memory. GOW3_DEPTH_COPY_SYNC=0: no image write-back before copies of 1 MiB or more (depth
+// surfaces the depth of field reads).
+static constexpr u64 SCALAR_COPY_SHADER_HASH = 0x2d215c3b;   // one dword per workgroup
+static constexpr u64 SCALAR_COPY64_SHADER_HASH = 0x6a6422a9; // 64 dwords per workgroup (U2)
+
+extern "C" int runtime_memory_region_backing(uintptr_t address, uintptr_t* start, uintptr_t* end,
+                                             int* mapped, const unsigned char** backing);
+
+static bool ScalarCopyHLEEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_SCALAR_COPY_HLE");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
+// The source through the backing view: its page may be read-protected for GPU data next to it,
+// and a fault here would wait for the GPU. Uploads of guest memory for the commands before this
+// one run later, on the recording and copy threads: they finish first, or a draw recorded before
+// the copy would upload the destination with the copy's result (wrong material constants:
+// alpha-tested doors and hair drawn with another object's parameters).
+// GOW3_SCALAR_COPY_NOWAIT=1: no wait (A/B).
+static bool CopyGuestThroughBacking(Rasterizer& rasterizer, VAddr dst, VAddr src, u64 size) {
+    static const bool no_wait = [] {
+        const char* env = std::getenv("GOW3_SCALAR_COPY_NOWAIT");
+        return env && env[0] == '1';
+    }();
+    if (!no_wait) {
+        rasterizer.WaitHostCopies();
+    }
+    uintptr_t start = 0, end = 0;
+    int mapped = 0;
+    const unsigned char* backing = nullptr;
+    if (!runtime_memory_region_backing(src, &start, &end, &mapped, &backing) || !mapped ||
+        !backing || end - src < size) {
+        return false;
+    }
+    return Core::Memory::Instance()->TryWriteBacking(reinterpret_cast<void*>(dst), backing, size);
+}
+
+static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
+                                 Rasterizer& rasterizer, u64 group_size) {
+    static std::atomic<u32> rejects{0};
+    const auto reject = [&](const char* why) {
+        if (rejects.fetch_add(1, std::memory_order_relaxed) < 8) {
+            std::printf("uc3: scalar copy HLE %llx refused: %s (buffers %zu, user data %zu)\n",
+                        static_cast<unsigned long long>(info.pgm_hash), why, info.buffers.size(),
+                        info.UserData().size());
+        }
+        return false;
+    };
+    // Our recompiler also lists its own buffers (the flattened user data): the guest's two only.
+    const Shader::BufferResource* guest[2]{};
+    u32 guest_count = 0;
+    for (const auto& buffer : info.buffers) {
+        if (!buffer.IsSpecial()) {
+            if (guest_count < 2) {
+                guest[guest_count] = &buffer;
+            }
+            ++guest_count;
+        }
+    }
+    if (guest_count != 2) {
+        return reject("buffer count");
+    }
+    const auto ud = info.UserData();
+    if (ud.size() <= 6) {
+        return reject("user data size");
+    }
+    const auto src = guest[0]->GetSharp(info);
+    const auto dst = guest[1]->GetSharp(info);
+    if (src.GetStride() != 4 || dst.GetStride() != 4 || !src.base_address || !dst.base_address) {
+        std::printf("uc3: scalar copy HLE strides %u/%u, bases 0x%llx/0x%llx\n", src.GetStride(),
+                    dst.GetStride(), static_cast<unsigned long long>(src.base_address),
+                    static_cast<unsigned long long>(dst.base_address));
+        return reject("stride or base");
+    }
+    const u64 count = std::min<u64>(
+        {u64(cs_program.dim_x) * group_size, ud[6], src.num_records, dst.num_records});
+    if (count == 0) {
+        return true;
+    }
+    const u64 size = count * 4;
+    auto* memory = Core::Memory::Instance();
+    if (!memory->IsValidGpuMapping(src.base_address, size) ||
+        !memory->IsValidGpuMapping(dst.base_address, size)) {
+        return reject("mapping");
+    }
+    auto& buffer_cache = rasterizer.GetBufferCache();
+    static const bool depth_sync = [] {
+        const char* env = std::getenv("GOW3_DEPTH_COPY_SYNC");
+        return !(env && env[0] == '0');
+    }();
+    if (depth_sync && size >= 1_MB) {
+        // The scene depth is copied this way; its image lives on the GPU only, so its contents go
+        // into the source buffer first (SuperMedo: without it the depth of field blurred all).
+        buffer_cache.SyncImageToBuffer(src.base_address, static_cast<u32>(size));
+    }
+    static std::atomic<u32> guest_only{0}, both{0}, gpu_only{0};
+    const auto report = [&](std::atomic<u32>& counter, const char* what) {
+        const u32 n = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 3 || (n & 4095) == 0) {
+            std::printf("uc3: scalar copy HLE %llx: 0x%llx -> 0x%llx (%llu bytes): %s (%u; guest "
+                        "%u, both %u, GPU %u)\n",
+                        static_cast<unsigned long long>(info.pgm_hash),
+                        static_cast<unsigned long long>(src.base_address),
+                        static_cast<unsigned long long>(dst.base_address),
+                        static_cast<unsigned long long>(size), what, n, guest_only.load(),
+                        both.load(), gpu_only.load());
+        }
+    };
+    const bool src_gpu = buffer_cache.IsRegionGpuModified(src.base_address, size);
+    const bool dst_gpu = buffer_cache.IsRegionGpuModified(dst.base_address, size);
+    if (src_gpu || dst_gpu) {
+        // The GPU copy keeps the GPU's view right; the page tracker flags whole pages, so most
+        // of these sources hold no GPU bytes and their guest memory is current.
+        if (size < 1_MB && !buffer_cache.IsGpuWritten(src.base_address, size) &&
+            CopyGuestThroughBacking(rasterizer, dst.base_address, src.base_address, size)) {
+            report(both, "GPU copy and guest copy");
+        } else {
+            report(gpu_only, "GPU copy only");
+        }
+        return false;
+    }
+    if (!CopyGuestThroughBacking(rasterizer, dst.base_address, src.base_address, size)) {
+        return reject("backing copy");
+    }
+    // The GPU's copy of the destination is refreshed from guest memory when next used.
+    buffer_cache.InvalidateMemory(dst.base_address, size, true);
+    report(guest_only, "guest copy, dispatch skipped");
+    return true;
+}
+
+bool IsGuestMemoryShaderHLE(unsigned long long pgm_hash) {
+    static std::atomic<bool> announced{false};
+    if (ScalarCopyHLEEnabled() && !announced.exchange(true)) {
+        std::printf("uc3: scalar copy HLE on (GOW3_SCALAR_COPY_HLE)\n");
+    }
+    return ScalarCopyHLEEnabled() &&
+           (pgm_hash == SCALAR_COPY_SHADER_HASH || pgm_hash == SCALAR_COPY64_SHADER_HASH);
+}
+
 bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,
                       const AmdGpu::ComputeProgram& cs_program, Rasterizer& rasterizer) {
     switch (info.pgm_hash) {
     case COPY_SHADER_HASH:
         return ExecuteCopyShaderHLE(info, cs_program, rasterizer);
+    case SCALAR_COPY_SHADER_HASH:
+        return ScalarCopyHLEEnabled() && ExecuteScalarCopyHLE(info, cs_program, rasterizer, 1);
+    case SCALAR_COPY64_SHADER_HASH:
+        return ScalarCopyHLEEnabled() && ExecuteScalarCopyHLE(info, cs_program, rasterizer, 64);
     default:
         return false;
     }

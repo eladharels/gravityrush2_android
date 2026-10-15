@@ -4,6 +4,32 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — Cópia escalar em memória (HLE do SuperMedo), cabelo branco corrigido, R.8.4 e limite de quadros à frente: ruas ~42,5 → ~45 FPS, sem bugs visuais conhecidos
+
+Itens trazidos do port [Supermedo/uncharted_pc](https://github.com/Supermedo/uncharted_pc) (GPL, mesma família bbport/shadPS4), com crédito ao SuperMedo. Todos atrás de interruptores.
+
+**Cabelo branco do Drake jovem (corrigido, ligado por padrão):** o recompilador ignorava o `addr64` do `BUFFER_LOAD` (GCN2), e o shader do cabelo lia lixo ao procurar a cascata de sombra. Agora vira um `ReadConst` com deslocamento por lane, servido por uma janela de dwords que o walker SRT copia na hora do bind (`ReadConstWindowFlag`). Arquivos: `vector_memory.cpp`, `flatten_extended_userdata_pass.cpp`, `srt.h`, `emit_spirv_context_get_set.cpp`, `shader_info_collection_pass.cpp`. Depois de mudar o recompilador, mova o cache de shaders (`user/cache/CUSA02344`) para o lado.
+- `GOW3_NO_ADDR64=1` traz o cabelo branco de volta (prova).
+- `GOW3_WINDOW_DWORDS` (16..4096, padrão 256), `GOW3_WINDOW_ADDR64_ONLY=1` (janela só para leituras vindas do addr64) e `GOW3_WINDOW_TRACE=1` (lista os shaders com janela) servem para investigar. Nas ruas são 20 shaders × 13 leituras por lane, todas vindas do addr64.
+- A alça da bolsa do Nathan piscou em vermelho duas vezes logo depois da correção. O Matheus não viu de novo em nenhuma build. Fica em observação.
+
+**Cópia escalar em memória (`GOW3_SCALAR_COPY_HLE=1`, desligada por padrão):** os shaders de compute `2d215c3b` (1 dword por grupo) e `6a6422a9` (64 dwords por grupo) só copiam um bloco de constantes. Quando nenhum dos dois lados tem dados da GPU, a cópia é feita na memória do jogo pela visão de backing e o dispatch não roda. Isso tira o walker SRT da espera pelos argumentos de dispatch que o `2d215c3b` escrevia na GPU (R.7). Ao lado de dados da GPU, roda o dispatch na GPU (e também a cópia na memória, se a origem não veio da GPU e tem menos de 1 MiB). Cópias de 1 MiB ou mais sincronizam a imagem de depth antes (`GOW3_DEPTH_COPY_SYNC`, padrão ligado). Esses dispatches esvaziam o draw pipe e rodam na thread de comandos (`IsGuestMemoryShaderHLE`).
+- Dois bugs na adaptação. (1) Nunca disparava: nosso `info.buffers` inclui o flatbuf, então contamos só os `!IsSpecial()`. (2) A textura da porta do beco (save 034) e as bordas do cabelo vinham erradas: a cópia passava na frente das cópias de host pendentes (uploads adiados para as threads de gravação e de cópia), e desenhos anteriores subiam as constantes novas. Agora espera `WaitHostCopies()` antes (`GOW3_SCALAR_COPY_NOWAIT=1` = comportamento antigo). Porta certa depois da correção.
+- Ruas (036), mesma build e mesmo ponto: **~42,5 → ~45 FPS**. O walker leu 0 dwords de volta. Por intervalo: 200 mil cópias na memória, 3,9 mil nos dois, 71 mil só na GPU. O Matheus jogou com `medir_so_hle.bat` e não achou bugs visuais; os NPCs que piscavam ou perdiam a textura não apareceram mais.
+
+**Proteção do depth associado (`GOW3_STENCIL_DEPTH_ONLY=1`, desligada):** `GetAssociatedDepth` agora recebe o formato da view e só associa depth a views de stencil de 8 bits (`eS8Uint`, `eR8Uint`, `eR8Unorm`). Ainda não testada a fundo.
+
+**R.8.4 (desenho do Fable), com `GOW3_COMPUTE_PIPE=1` + `GOW3_LEAF_COPY=1`:**
+- Descarga assíncrona das folhas: cada cópia de folha para o anel também copia os 4 bytes para um staging (`QueueLeafDownload`). No `OnSubmit`, as que terminaram e não foram reescritas descem para a memória do jogo (`CompleteLeafDownloads`). As descargas chegam (~31 mil por intervalo), mas as cópias na GPU não caíram (~530 mil).
+- Saída do jogo: esperas de semáforo em fatias de 2 s com log "stuck", `Semaphore::SettleAll(2000)` antes de sair, e log dos sinais adiados presos. Todas as saídas foram limpas (6+ vezes e a sessão do Matheus).
+- Ruas ~41,3 → **42,5 FPS**, museu ~50,5 → **57,6 FPS**. Sessão do Matheus (`jogar_r84.bat`): castelo 9 min, 39 FPS de média; Novo Jogo 40 min, 52,6 de média.
+
+**Limite de quadros à frente (`GOW3_MAX_FRAMES_AHEAD=N`, desligado):** depois do submit+flip, o jogo espera (no máximo 2 s) a GPU chegar ao flip N quadros atrás. Mira o assert `m_gfxEopTick`. Custo nas ruas dentro do ruído (~39,5 com 1 ou 2, ~40 sem).
+
+**Diagnóstico em `texture_cache.cpp`:** `GOW3_SMALL_STRICT` e `GOW3_RELOAD_AT=<s>` (testes negativos do cabelo branco).
+
+---
+
 ## 2026-10-15 — R.8.3: compute sem espera antes de cada pacote (`GOW3_COMPUTE_PIPE=1`, desligado): ruas 28 → 41 FPS, museu 47 → 50,5
 
 **Achado:** a espera "compute" do draw pipe (~58 mil por segundo nas ruas, 15-17% do tempo da thread de comandos) acontecia antes de todo pacote da fila de compute. Com o diagnóstico por opcode, quase todas vinham do `ReleaseMem`, um por dispatch: a fila de compute esperava a thread de gravação esvaziar a cada dispatch, e o pipe perdia a sobreposição.

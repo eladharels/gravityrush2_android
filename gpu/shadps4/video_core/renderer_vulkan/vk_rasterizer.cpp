@@ -1416,9 +1416,14 @@ void Rasterizer::DispatchDirect() {
     if (!pipeline) {
         return;
     }
-    if (pipelined) {
+    if (pipelined &&
+        !IsGuestMemoryShaderHLE(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
         PostDraw(pipeline, nullptr, false, 0, &CsRegs());
         return;
+    }
+    if (pipelined) {
+        // uc3: an HLE that writes guest memory runs here, after the draws before it.
+        DrainDrawPipe();
     }
     DispatchRecord(pipeline);
 }
@@ -1555,6 +1560,7 @@ void Rasterizer::Finish() {
 void Rasterizer::OnSubmit() {
     DrainDrawPipe();
     buffer_cache.TickFrame();
+    buffer_cache.CompleteLeafDownloads();
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
     runtime.TickFrame();
@@ -1639,7 +1645,8 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
         }
         VideoCore::ImageId image_id = entry.found_id;
         auto* image = &texture_cache.GetImage(image_id);
-        if (const auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
+        if (const auto depth_image_id =
+                texture_cache.GetAssociatedDepth(*image, entry.found_desc.view_info.format)) {
             image_id = depth_image_id;
             image = &texture_cache.GetImage(image_id);
         }
@@ -2568,7 +2575,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                 binding_proxy_ok.push_back(proxy_candidate);
                 texture_cache.MarkFound(image_id);
                 auto* image = &texture_cache.GetImage(image_id);
-                if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
+                if (auto depth_image_id = texture_cache.GetAssociatedDepth(
+                        *image, desc_entry.found_desc.view_info.format)) {
                     image_id = depth_image_id;
                     image = &texture_cache.GetImage(image_id);
                 }
@@ -2604,7 +2612,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                 desc_entry.view_memo = {};
             }
             auto* image = &texture_cache.GetImage(image_id);
-            if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
+            if (auto depth_image_id =
+                    texture_cache.GetAssociatedDepth(*image, desc.view_info.format)) {
                 // If this image has an associated depth image, it's a stencil attachment.
                 // Redirect the access to the actual depth-stencil buffer.
                 image_id = depth_image_id;
@@ -3411,6 +3420,7 @@ void Rasterizer::RecordLeafCopies() {
             const vk::BufferCopy copy{offset, leaf.ring_offset, sizeof(u32)};
             runtime.CopyBuffer(buffer, ring_buffer, {&copy, 1});
             Gow3Stats::uc3_leaf_copies.fetch_add(1, std::memory_order_relaxed);
+            buffer_cache.QueueLeafDownload(buffer, offset, leaf.src, sizeof(u32));
         }
     }
 }

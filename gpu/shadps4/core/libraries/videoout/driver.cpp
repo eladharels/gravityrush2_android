@@ -4,7 +4,10 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <time.h>
@@ -522,7 +525,8 @@ void VideoOutDriver::Flip(const Request& req) {
                             "from backing, %llu read back, %llu stale (GOW3_SRT_STALE); after the walk: %llu "
                             "pointers, %llu dwords read back in %llu walks; leaf copy: %llu "
                             "zeroed (%llu only in async windows, %llu new addresses), %llu read back (sharps, no ring), of them %llu no ring, %llu GPU "
-                            "copies, %llu dead (GOW3_LEAF_DEAD); constant ring: %llu copies, %llu full\n",
+                            "copies, %llu dead (GOW3_LEAF_DEAD); constant ring: %llu copies, %llu full; leaf "
+                            "downloads: %llu queued, %llu landed, %llu rewritten, %llu no slot\n",
                             (unsigned long long)async, Gow3Stats::uc3_rb_async_ns.exchange(0) / 1e6,
                             (unsigned long long)Gow3Stats::uc3_rb_async_dirty.exchange(0),
                             (unsigned long long)Gow3Stats::uc3_rb_async_overlap.exchange(0),
@@ -543,7 +547,11 @@ void VideoOutDriver::Flip(const Request& req) {
                             (unsigned long long)Gow3Stats::uc3_leaf_copies.exchange(0),
                             (unsigned long long)Gow3Stats::uc3_leaf_dead.exchange(0),
                             (unsigned long long)Gow3Stats::uc3_ring_copies.exchange(0),
-                            (unsigned long long)Gow3Stats::uc3_ring_full.exchange(0));
+                            (unsigned long long)Gow3Stats::uc3_ring_full.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_leaf_dl_queued.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_leaf_dl_landed.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_leaf_dl_dirty.exchange(0),
+                            (unsigned long long)Gow3Stats::uc3_leaf_dl_full.exchange(0));
             }
             uc3_window_draws = Gow3Stats::draws.load();
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);
@@ -663,6 +671,14 @@ void VideoOutDriver::DrawLastFrame() {
     }, true);
 }
 
+namespace {
+// uc3 (from SuperMedo's uncharted_pc, GPL): end-of-pipe flips the GPU side has reached, for the
+// frames-ahead limit in sceGnmSubmitAndFlipCommandBuffersForWorkload.
+std::atomic<u64> eop_flips_reached{0};
+std::mutex eop_flip_mutex;
+std::condition_variable eop_flip_cv;
+} // namespace
+
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
     {
@@ -684,9 +700,25 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
         liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); });
     } else {
         SubmitFlipInternal(port, index, flip_arg, is_eop);
+        {
+            std::scoped_lock lock{eop_flip_mutex};
+            eop_flips_reached.fetch_add(1, std::memory_order_relaxed);
+        }
+        eop_flip_cv.notify_all();
     }
 
     return true;
+}
+
+u64 EopFlipsReached() {
+    return eop_flips_reached.load(std::memory_order_relaxed);
+}
+
+void WaitEopFlipsReached(u64 count, u32 timeout_ms) {
+    std::unique_lock lock{eop_flip_mutex};
+    eop_flip_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [count] {
+        return eop_flips_reached.load(std::memory_order_relaxed) >= count;
+    });
 }
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {

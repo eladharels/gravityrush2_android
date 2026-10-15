@@ -6,6 +6,7 @@
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/ir/attribute.h"
+#include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/ir/microinstruction.h"
 #include "shader_recompiler/ir/patch.h"
 #include "shader_recompiler/runtime_info.h"
@@ -53,7 +54,14 @@ Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg) {
 }
 
 Id EmitReadConst(EmitContext& ctx, IR::Inst* inst, Id addr, Id offset) {
-    const u32 flatbuf_off_dw = inst->Flags<u32>();
+    const u32 flatbuf_off_dw = inst->Flags<u32>() & ~ReadConstAddr64Mark;
+    if (flatbuf_off_dw & ReadConstWindowFlag) {
+        // uc3 (SuperMedo): the lane's dword of the block's window (ReadConstWindowFlag)
+        const Id index =
+            ctx.OpUMin(ctx.U32[1], offset, ctx.ConstU32(ReadConstWindowDwords() - 1));
+        return ctx.EmitFlatbufferLoad(
+            ctx.OpIAdd(ctx.U32[1], ctx.ConstU32(flatbuf_off_dw & 0xFFFFu), index));
+    }
     if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
         return ctx.EmitFlatbufferLoad(ctx.ConstU32(flatbuf_off_dw));
     }

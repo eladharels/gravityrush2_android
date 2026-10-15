@@ -247,8 +247,20 @@ public:
     }
 
     /// Get the associated depth stencil image if it is still valid.
-    ImageId GetAssociatedDepth(Image& image) {
+    /// uc3 (from SuperMedo's uncharted_pc): GOW3_STENCIL_DEPTH_ONLY=1 follows the link only for a
+    /// stencil read (8-bit view format). The link is made for whatever image starts at the
+    /// stencil address; once the game reuses that memory for another texture (level loads),
+    /// redirecting e.g. an RGBA16F read to the D32S8 image made an invalid view (device lost).
+    ImageId GetAssociatedDepth(Image& image, vk::Format view_format) {
         if (!image.depth_id) {
+            return {};
+        }
+        static const bool stencil_only = [] {
+            const char* env = std::getenv("GOW3_STENCIL_DEPTH_ONLY");
+            return env && env[0] == '1';
+        }();
+        if (stencil_only && view_format != vk::Format::eS8Uint &&
+            view_format != vk::Format::eR8Uint && view_format != vk::Format::eR8Unorm) {
             return {};
         }
         if (slot_images.IsAllocated(image.depth_id)) {

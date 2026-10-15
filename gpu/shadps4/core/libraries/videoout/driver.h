@@ -20,6 +20,13 @@ struct Frame;
 
 namespace Libraries::VideoOut {
 
+/// uc3 (SuperMedo): end-of-pipe flips the GPU side has reached so far (counted by SubmitFlip).
+u64 EopFlipsReached();
+
+/// uc3 (SuperMedo): waits until the GPU side has reached `count` end-of-pipe flips (at most
+/// `timeout_ms`).
+void WaitEopFlipsReached(u64 count, u32 timeout_ms);
+
 struct VideoOutPort {
     SceVideoOutResolutionStatus resolution;
     std::array<VideoOutBuffer, MaxDisplayBuffers> buffer_slots;
