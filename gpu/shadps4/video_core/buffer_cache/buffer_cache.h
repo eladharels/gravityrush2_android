@@ -115,6 +115,12 @@ public:
 
     /// Return true when a region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
+    /// uc3: byte-precise: the GPU wrote some of [addr, addr + size) and it is not back in
+    /// guest memory yet (gpu_modified_ranges, or an async readback still landing). GPU-side
+    /// threads only.
+    [[nodiscard]] bool IsGpuWritten(VAddr addr, u64 size);
+    /// uc3 (trace): "gpu_modified_ranges [start, end)", "async readback" or "image readback".
+    const char* DescribeGpuWritten(VAddr addr, u64 size);
 
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();

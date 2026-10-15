@@ -596,6 +596,41 @@ void BufferCache::WaitAsyncReadbacks(VAddr start, VAddr end) {
     }
 }
 
+bool BufferCache::IsGpuWritten(VAddr addr, u64 size) {
+    if (gpu_modified_ranges.Intersects(addr, size)) {
+        return true;
+    }
+    if (async_count.load(std::memory_order_acquire) == 0) {
+        return false;
+    }
+    std::scoped_lock lk{async_mutex};
+    for (const auto& entry : async_pending) {
+        for (const auto& w : entry->windows) {
+            if (w.start < addr + size && addr < w.start + w.size) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+const char* BufferCache::DescribeGpuWritten(VAddr addr, u64 size) {
+    static thread_local char text[256];
+    if (gpu_modified_ranges.Intersects(addr, size)) {
+        // The GPU-written pieces of the whole page, to see what the load shares it with.
+        int length = std::snprintf(text, sizeof(text), "gpu_modified_ranges in page:");
+        gpu_modified_ranges.ForEachInRange(addr & ~0xfffULL, 0x1000, [&](VAddr start, VAddr end) {
+            if (length < 200) {
+                length += std::snprintf(text + length, sizeof(text) - length, " [%#llx,%#llx)",
+                                        (unsigned long long)start, (unsigned long long)end);
+            }
+        });
+        return text;
+    }
+    return async_count.load(std::memory_order_acquire) ? "async readback (or image)"
+                                                       : "image readback";
+}
+
 void BufferCache::NoteAsyncWrite(VAddr device_addr, u64 size) {
     if (async_count.load(std::memory_order_acquire) == 0) {
         return;

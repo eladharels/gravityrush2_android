@@ -16,6 +16,15 @@ namespace Shader {
 using PFN_SrtWalker = void PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*flat_dst*/);
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
 
+/// uc3: a load the SRT walker faulted on: `mov rdi, [mem]` (8 bytes) or `mov r10d, [mem]`
+/// (4 bytes). False when `rip` is not walker code or the instruction is not one of those.
+struct SrtWalkerLoad {
+    bool to_rdi;
+    u32 size;
+    u32 length;
+};
+bool DecodeSrtWalkerLoad(const void* rip, SrtWalkerLoad& load);
+
 struct PersistentSrtInfo {
     // Special case when fetch shader uses step rates.
     struct SrtSharpReservation {

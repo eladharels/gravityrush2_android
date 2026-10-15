@@ -150,6 +150,11 @@ public:
     /// A guest write hit a protected page.
     bool OnWriteFault(VAddr addr, bool assume_locks);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// uc3: the GPU wrote some of these bytes and guest memory does not have them yet
+    /// (buffers or images). GPU-side threads only.
+    bool IsGpuWritten(VAddr addr, u64 size);
+    /// uc3 (trace): which of IsGpuWritten's sources holds these bytes.
+    const char* DescribeGpuWritten(VAddr addr, u64 size);
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
     void RegisterMemory(VAddr addr, u64 size);

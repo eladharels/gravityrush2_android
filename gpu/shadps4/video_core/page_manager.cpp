@@ -18,6 +18,10 @@
 #include "video_core/page_manager.h"
 #include "video_core/page_state.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "shader_recompiler/ir/passes/srt.h"
+
+extern "C" int runtime_memory_region_backing(uintptr_t address, uintptr_t* start, uintptr_t* end,
+                                             int* mapped, const unsigned char** backing);
 
 #ifndef _WIN64
 #include <sys/mman.h>
@@ -68,6 +72,66 @@ struct PageManager::Impl {
 
     virtual void Protect(VAddr address, size_t size, Core::MemoryPermission perms) = 0;
 
+    // uc3: the SRT walker (descriptor table copy, on the command processor and the shader
+    // capture threads) reads pages it shares with GPU-written data: in the streets of
+    // Cartagena, descriptors sit in the 4 KiB page where compute shader 2d215c3b writes 12
+    // bytes of dispatch arguments, and each walk drained the GPU (~120 per second). When the
+    // bytes the walker loads are not GPU-written (gpu_modified_ranges is byte-precise), guest
+    // memory has them: do the load from the backing view, set the register and step over the
+    // instruction. The page stays protected for the guest. GOW3_SRT_BACKING=0 turns it off.
+    static bool EmulateSrtWalkerLoad(void* context, VAddr addr) {
+        static const bool enabled = [] {
+            const char* value = std::getenv("GOW3_SRT_BACKING");
+            return !value || value[0] != '0';
+        }();
+        Shader::SrtWalkerLoad load;
+        if (!enabled || !Shader::DecodeSrtWalkerLoad(Common::GetRip(context), load)) {
+            return false;
+        }
+        const bool crosses = PageManager::GetNextPageAddr(addr) - addr < load.size;
+        if (crosses || rasterizer->IsGpuWritten(addr, load.size)) {
+            Gow3Stats::uc3_srt_sync.fetch_add(1, std::memory_order_relaxed);
+            static const bool trace = [] {
+                const char* value = std::getenv("GOW3_FAULT_TRACE");
+                return value && value[0] == '1';
+            }();
+            static std::atomic<int> traced{0};
+            if (trace && traced.fetch_add(1, std::memory_order_relaxed) < 40) {
+                std::printf("srt walker load read back: addr=%#llx size=%u %s\n",
+                            (unsigned long long)addr, load.size,
+                            crosses ? "crosses a page" : rasterizer->DescribeGpuWritten(addr, load.size));
+            }
+            return false;
+        }
+        uintptr_t start = 0, end = 0;
+        int mapped = 0;
+        const unsigned char* backing = nullptr;
+        if (!runtime_memory_region_backing(addr, &start, &end, &mapped, &backing) || !mapped ||
+            !backing || end - addr < load.size) {
+            Gow3Stats::uc3_srt_sync.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        u64 value = 0;
+        std::memcpy(&value, backing, load.size);
+#ifdef _WIN32
+        auto* regs = static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord;
+        if (load.to_rdi) {
+            regs->Rdi = value;
+        } else {
+            regs->R10 = value; // mov r10d zero-extends
+        }
+        regs->Rip += load.length;
+#elif defined(__linux__) && defined(ARCH_X86_64)
+        auto& gregs = static_cast<ucontext_t*>(context)->uc_mcontext.gregs;
+        gregs[load.to_rdi ? REG_RDI : REG_R10] = static_cast<greg_t>(value);
+        gregs[REG_RIP] += load.length;
+#else
+        return false;
+#endif
+        Gow3Stats::uc3_srt_emulated.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
         const auto size = std::min<u64>(8, PageManager::GetNextPageAddr(addr) - addr);
@@ -83,6 +147,9 @@ struct PageManager::Impl {
         } else {
             Gow3Stats::read_faults.fetch_add(1, std::memory_order_relaxed);
             Gow3Stats::Timer timer{Gow3Stats::t_read_faults};
+            if (is_gpu_thread && EmulateSrtWalkerLoad(context, addr)) {
+                return true;
+            }
             // uc3: GOW3_FAULT_TRACE=1 prints the first 100 read faults of GPU-side threads
             // (they read back synchronously, draining the GPU): who faults, where, from what code.
             static const bool trace = [] {

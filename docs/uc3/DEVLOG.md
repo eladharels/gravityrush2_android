@@ -4,6 +4,18 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — SRT walker lê pela cópia sem proteção quando os bytes não vieram da GPU (desenho do Fable, R.7)
+
+**O que mudou:** quando o SRT walker (o código JIT que copia as tabelas de descritores do jogo) falha numa página protegida, o tratador de falhas (`page_manager.cpp`, `EmulateSrtWalkerLoad`) decodifica a instrução. Se os bytes lidos não estão em `gpu_modified_ranges`, nem num readback assíncrono pendente, nem num readback de imagem pendente, ele lê o valor pela visão de backing, põe no registrador (`rdi` ou `r10d`) e pula a instrução. A página continua protegida para o jogo. `GOW3_SRT_BACKING=0` desliga.
+
+**Resultado:** ligado por padrão, imagem correta.
+- Ruas: ~25,9 → ~26,2 FPS. Cerca de 40% das leituras do walker (≈52/s) agora saem pela cópia.
+- Museu: ~57 FPS (antes ~57,7, dentro do ruído). Lá ~650/s das leituras saem pela cópia.
+
+**Por que o ganho foi pequeno:** com `GOW3_FAULT_TRACE=1`, as leituras que ainda esperam (~80/s nas ruas, ~105/s no museu) pegam bytes que **a GPU escreveu de verdade**. Por exemplo, 0x103f25c4c0 (12 bytes) são os argumentos de dispatch que o shader `2d215c3b` acabou de escrever. O walker achata esses valores nos dados do shader seguinte, então precisa deles na hora da gravação. Não é compartilhamento falso de página. Isso continua com o Fable.
+
+---
+
 ## 2026-10-15 — Readback assíncrono (A2): museu 41 → 57,7 FPS, ruas 22,5 → 25,9 (desligado por padrão)
 
 **O que mudou:** com `GOW3_READBACK_ASYNC=1`, uma falha de página em memória escrita pela GPU (leitura ou escrita do jogo) não esvazia mais a GPU a partir da thread da GPU. Antes, a thread da GPU gravava a cópia, chamava `scheduler.Finish()` e ficava parada até a GPU terminar tudo; a GPU depois ficava ociosa enquanto essa thread voltava a gravar trabalho.

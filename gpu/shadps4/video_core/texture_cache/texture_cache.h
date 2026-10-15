@@ -121,6 +121,14 @@ public:
 
     /// Schedules a copy of pending images for download back to CPU memory.
     void ProcessDownloadImages();
+    /// uc3: an image readback still pending over these bytes (see Rasterizer::IsGpuWritten).
+    bool HasPendingReadbackBytes(VAddr address, u64 size) {
+        if (!has_pending_readbacks.load(std::memory_order_acquire)) {
+            return false;
+        }
+        std::scoped_lock lk{readback_mutex};
+        return pending_readbacks.OverlapsBytes(address, size);
+    }
     bool ResolveReadbacks(VAddr address, u64 size, bool assume_locks = true,
                           ReadbackSource source = ReadbackSource::Unknown);
     void CancelReadbacks(VAddr address, u64 size);

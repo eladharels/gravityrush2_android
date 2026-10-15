@@ -44,6 +44,35 @@ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     return func_addr;
 }
 
+bool DecodeSrtWalkerLoad(const void* rip, SrtWalkerLoad& load) {
+    // The whole code buffer: walkers loaded from the pipeline cache never set
+    // g_srt_codegen_start.
+    const u8* code_start = g_srt_codegen.getCode();
+    const u8* code_end = code_start + g_srt_codegen.getSize();
+    if (rip < code_start || rip >= code_end) {
+        return false;
+    }
+    ZydisDecodedInstruction instruction;
+    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+    const ZyanStatus status = Common::Decoder::Instance()->decodeInstruction(
+        instruction, operands, const_cast<void*>(rip), 15);
+    if (!ZYAN_SUCCESS(status) || instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
+        operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+        operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY) {
+        return false;
+    }
+    switch (operands[0].reg.value) {
+    case ZYDIS_REGISTER_RDI:
+        load = {true, 8, instruction.length};
+        return true;
+    case ZYDIS_REGISTER_R10D:
+        load = {false, 4, instruction.length};
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // namespace Shader
 
 namespace {

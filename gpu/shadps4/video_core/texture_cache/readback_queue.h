@@ -32,6 +32,16 @@ public:
         }
         return tick;
     }
+    /// uc3: whether a watched entry covers any byte of [address, address + size).
+    bool OverlapsBytes(std::uint64_t address, std::uint64_t size) const {
+        for (const auto& entry : entries) {
+            if (entry.valid && entry.watched && entry.address < address + size &&
+                address < entry.address + entry.size) {
+                return true;
+            }
+        }
+        return false;
+    }
     template <typename Callback>
     void Cancel(std::uint64_t address, std::uint64_t size, Callback&& cancel) {
         for (auto& entry : entries) {

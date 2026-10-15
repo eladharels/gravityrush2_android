@@ -3315,6 +3315,15 @@ bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
     return true;
 }
 
+bool Rasterizer::IsGpuWritten(VAddr addr, u64 size) {
+    return buffer_cache.IsGpuWritten(addr, size) ||
+           texture_cache.HasPendingReadbackBytes(addr, size);
+}
+
+const char* Rasterizer::DescribeGpuWritten(VAddr addr, u64 size) {
+    return buffer_cache.DescribeGpuWritten(addr, size);
+}
+
 bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
     DrainDrawPipe();
     if (!IsMapped(addr, size)) {
