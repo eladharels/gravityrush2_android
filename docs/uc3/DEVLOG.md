@@ -4,6 +4,19 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — R.8.2 (B.3 + B.4): cópia das folhas na GPU funciona, mas não ganha; achado o travamento do anel de constantes (ruas 25 → 28 FPS)
+
+**Anel de constantes travado (corrigido, vale para todos):** `ConstantRing::Stamp` saía cedo quando o fim do pacote era igual ao anterior. Com o anel cheio, todo pacote tem o mesmo fim, então nada era publicado, nada era liberado e o anel ficava cheio para sempre: nas ruas ~2,4 milhões de cópias por intervalo caíam no caminho antigo. Agora o `Stamp` publica o pendente também nesse caso. Ruas (036), sem a cópia das folhas: **~25,0 → ~28,1 FPS**, imagem correta; o anel quase não enche mais (33 mil vezes por intervalo, antes sempre). Museu (035): ~47 FPS no início do save; lá o anel nunca enchia, então a correção não muda nada (o 49,8 do R.8.1 foi outro momento).
+
+**Cópia das folhas (`GOW3_LEAF_COPY=1`, desligada por padrão):**
+- B.3: nas threads do lado da GPU, `SrtFixup` grava 0 no dword achatado de cada folha escrita pela GPU e guarda {dword, origem}. Folhas que caem num sharp (buffer, imagem, sampler, fmask) continuam com `ReadMemory` síncrono (`SrtReadDword`).
+- B.4: o PostDraw anota, para cada folha, o deslocamento no anel; o estágio B copia os 4 bytes da origem para o anel na GPU (`RecordLeafCopies`, `CopyBuffer`) antes do draw, com barreira no `BindBuffers`.
+- Resultado nas ruas: **leituras síncronas depois do walker 375 → 0** (meta do Fable), leituras síncronas do lado da GPU 670 → 230. Mas o FPS fica em ~25: são ~90 mil cópias de 4 bytes por segundo (quase uma por draw, porque a página inteira conta como escrita pela GPU) e o estágio B passa de 25% para 42% ocupado. Fica desligada até as cópias serem agrupadas.
+- Shaders com folhas mas sem binding do flatbuf (ex. 713b51cd, flat de 20 dw sem recursos): `GOW3_LEAF_DEAD=1` descarta as folhas; sem ele, leem de volta.
+- Diagnóstico: contadores "leaf copy" e "constant ring" na linha de estatísticas; `GOW3_SRT_TRACE=1` mostra shaders com folhas e sem anel.
+
+---
+
 ## 2026-10-15 — R.8.1 (B.0 + B.1' + B.2'): o walker SRT não falha mais nas páginas da GPU
 
 O walker JIT agora recebe um contexto (terceiro argumento). Cada ponteiro de tabela passa por uma função em C (`SrtLoadPtr`, page_manager.cpp) que lê o ponteiro, baixa os 8 bytes se vieram da GPU e devolve a visão sem proteção (backing) da tabela; as folhas leem dali e gravam o endereço de origem de cada dword numa tabela. Depois da passada, `SrtFixup` relê só os dwords cuja página tem proteção de leitura e cujos bytes a GPU escreveu (`ReadMemory` de 4 bytes). Versão do cache de shaders 9→10 (o código do walker mudou).

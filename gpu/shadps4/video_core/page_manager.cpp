@@ -69,7 +69,7 @@ struct PageManager::Impl {
             return !value || value[0] != '0';
         }();
         if (enabled) {
-            Shader::SetSrtWalkerHooks(SrtLoadPtr, SrtFixup);
+            Shader::SetSrtWalkerHooks(SrtLoadPtr, SrtFixup, SrtReadDword);
         }
     }
     virtual ~Impl() {
@@ -156,13 +156,39 @@ struct PageManager::Impl {
         return {table ? reinterpret_cast<u64>(table) : value, value};
     }
 
-    static void SrtFixup(const u64* src, u32* flat, size_t count) {
+    // uc3 (Fable R.8.2): GOW3_LEAF_COPY=1 leaves GPU-written dwords 0 in the flat and lists
+    // them; the draw recording thread copies the 4 bytes into the constant ring on the GPU.
+    static bool LeafCopy() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("GOW3_LEAF_COPY");
+            return value && value[0] == '1';
+        }();
+        return enabled;
+    }
+
+    static void SrtReadDword(u64 src, u32* out) {
+        Gow3Stats::uc3_srt_leaf_sharp.fetch_add(1, std::memory_order_relaxed);
+        if (rasterizer->IsGpuWritten(src, sizeof(u32))) {
+            rasterizer->ReadMemory(src, sizeof(u32), rasterizer->IsGpuSideThread());
+        }
+        if (const u8* backing = SrtBacking(src, sizeof(u32))) {
+            std::memcpy(out, backing, sizeof(u32));
+        }
+    }
+
+    static void SrtFixup(const u64* src, u32* flat, size_t count,
+                         std::vector<Shader::SrtGpuLeaf>* leaves) {
         if (!(SrtMode() & 4)) {
+            return;
+        }
+        const bool copy = leaves && LeafCopy() && rasterizer->IsGpuSideThread();
+        const bool sync = Shader::SrtWalkerSyncAllowed();
+        if (!copy && !sync) {
             return;
         }
         u64 last_page = ~0ULL;
         bool tracked = false;
-        u64 synced = 0;
+        u64 synced = 0, copied = 0;
         for (size_t i = 0; i < count; ++i) {
             const VAddr addr = src[i];
             if (addr == 0) {
@@ -172,14 +198,17 @@ struct PageManager::Impl {
                 last_page = addr >> PM_PAGE_BITS;
                 tracked = SrtPagesReadTracked(addr, sizeof(u32));
             }
-            static const bool trace = std::getenv("GOW3_SRT_TRACE") != nullptr;
-            static std::atomic<int> traced{0};
-            if (trace && tracked && traced.fetch_add(1, std::memory_order_relaxed) < 60) {
-                std::printf("srt leaf %zu: src=%#llx tracked=%d gpu=%d flat=%#x\n", i,
-                            (unsigned long long)addr, tracked,
-                            rasterizer->IsGpuWritten(addr, sizeof(u32)), flat[i]);
-            }
             if (!tracked || !rasterizer->IsGpuWritten(addr, sizeof(u32))) {
+                continue;
+            }
+            // Bytes an image still has to read back are not in a buffer: those read back.
+            if (copy && !rasterizer->HasImageReadbackBytes(addr, sizeof(u32))) {
+                flat[i] = 0;
+                leaves->push_back({static_cast<u32>(i), 0, addr});
+                ++copied;
+                continue;
+            }
+            if (!sync) {
                 continue;
             }
             rasterizer->ReadMemory(addr, sizeof(u32), rasterizer->IsGpuSideThread());
@@ -192,6 +221,9 @@ struct PageManager::Impl {
         if (synced) {
             Gow3Stats::uc3_srt_leaf_sync.fetch_add(synced, std::memory_order_relaxed);
             Gow3Stats::uc3_srt_sync_walks.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (copied) {
+            Gow3Stats::uc3_srt_leaf_zeroed.fetch_add(copied, std::memory_order_relaxed);
         }
     }
 

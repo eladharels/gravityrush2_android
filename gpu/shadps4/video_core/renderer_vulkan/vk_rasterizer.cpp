@@ -366,7 +366,7 @@ struct PacketStage {
     u32 ud_size;
     u32 flat_size;
     u32 num_ring;
-    u32 pad;
+    u32 num_leaves; ///< uc3: LeafCopy entries after the ring bindings
 };
 constexpr u32 AlignPacket(u32 size) {
     return (size + 7) & ~7u;
@@ -502,7 +502,8 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
 }
 
 void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
-                           boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out) {
+                           boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out,
+                           std::vector<LeafCopy>& leaves) {
     const PreparedStage* prepared_stage = nullptr;
     if (prepared && !Gow3Toggle::Disabled(Gow3Toggle::PreparedResources)) {
         for (u32 i = 0; i < prepared->num_stages; ++i) {
@@ -519,8 +520,10 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
     const auto copy = [&](u32 index, const void* source, VAddr address, u64 size) {
         const auto offset = constant_ring->Allocate(size, alignment);
         if (!offset) {
+            Gow3Stats::uc3_ring_full.fetch_add(1, std::memory_order_relaxed);
             return;
         }
+        Gow3Stats::uc3_ring_copies.fetch_add(1, std::memory_order_relaxed);
         u8* dst = constant_ring->Data(*offset);
         if (source) {
             std::memcpy(dst, source, size);
@@ -538,8 +541,14 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         if (desc.IsSpecial()) {
             if (desc.buffer_type == Shader::BufferType::Flatbuf &&
                 !stage.flattened_ud_buf.empty()) {
+                const size_t before = out.size();
                 copy(index, stage.flattened_ud_buf.data(), 0,
                      stage.flattened_ud_buf.size() * sizeof(u32));
+                if (out.size() != before) {
+                    for (const auto& leaf : stage.gpu_leaves) {
+                        leaves.push_back({out.back().offset + leaf.dst_dw * sizeof(u32), leaf.src});
+                    }
+                }
             }
             continue;
         }
@@ -596,21 +605,68 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     thread_local std::array<boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>,
                             Shader::MaxStageTypes>
         rings;
+    thread_local std::array<std::vector<LeafCopy>, Shader::MaxStageTypes> stage_leaves;
     u32 num_stages = 0;
     u32 size = sizeof(DrawPacket) + AlignPacket(num_blocks * sizeof(u16)) +
                num_blocks * AmdGpu::RegDirty::BlockWords * sizeof(u32);
     for (const auto* stage : stages) {
         if (stage) {
             auto& ring = rings[num_stages];
+            auto& leaves = stage_leaves[num_stages];
             ring.clear();
+            leaves.clear();
             if (constant_ring && !Gow3Toggle::Disabled(Gow3Toggle::ConstantRing)) {
-                CollectRingBindings(*stage, used_prepared, ring);
+                CollectRingBindings(*stage, used_prepared, ring, leaves);
+            }
+            if (leaves.size() != stage->gpu_leaves.size()) {
+                // The flat is not in the ring: its GPU-written dwords are read back here.
+                Gow3Stats::uc3_leaf_noring.fetch_add(stage->gpu_leaves.size(),
+                                                     std::memory_order_relaxed);
+                bool reads_flat = false;
+                for (const auto& desc : stage->buffers) {
+                    reads_flat |= desc.buffer_type == Shader::BufferType::Flatbuf;
+                }
+                static std::atomic<int> traced{0};
+                if (std::getenv("GOW3_SRT_TRACE") && reads_flat && traced.fetch_add(1) < 10) {
+                    const bool has_flatbuf = reads_flat;
+                    std::printf("leaf copy: no ring for shader %016llx (stage %u): %zu leaves "
+                            "(first dw %u), "
+                                "%zu ring bindings, %zu copies, flatbuf binding %d, flat %zu dw\n",
+                                (unsigned long long)stage->pgm_hash, u32(stage->sw_stage),
+                                stage->gpu_leaves.size(),
+                                stage->gpu_leaves[0].dst_dw, ring.size(), leaves.size(),
+                                has_flatbuf, stage->flattened_ud_buf.size());
+                    for (const auto& desc : stage->buffers) {
+                        const auto& f = desc.sharp_fetch;
+                        std::printf("  buffer type %u summary %u mask %#x offsets %u %u %u %u\n",
+                                    u32(desc.buffer_type), u32(f.summary), u32(f.load_mask),
+                                    u32(f.offsets[0]), u32(f.offsets[1]), u32(f.offsets[2]),
+                                    u32(f.offsets[3]));
+                    }
+                    std::printf("  %zu images, %zu samplers, %zu fmasks\n", stage->images.size(),
+                                stage->samplers.size(), stage->fmasks.size());
+                }
+                leaves.clear();
+                // Experiment (Fable R.8.2 follow-up): GOW3_LEAF_DEAD=1 skips the readback when
+                // the stage has no flat buffer binding (the shader cannot read those dwords).
+                static const bool dead = [] {
+                    const char* value = std::getenv("GOW3_LEAF_DEAD");
+                    return value && value[0] == '1';
+                }();
+                if (dead && !reads_flat) {
+                    Gow3Stats::uc3_leaf_dead.fetch_add(stage->gpu_leaves.size(),
+                                                       std::memory_order_relaxed);
+                    const_cast<Shader::Info*>(stage)->gpu_leaves.clear();
+                } else {
+                    const_cast<Shader::Info*>(stage)->ReadBackGpuLeaves();
+                }
             }
             ++num_stages;
             size += sizeof(PacketStage) +
                     AlignPacket(u32(stage->user_data.size() + stage->flattened_ud_buf.size()) *
                                 sizeof(u32)) +
-                    u32(ring.size() * sizeof(RingBinding));
+                    u32(ring.size() * sizeof(RingBinding)) +
+                    u32(leaves.size() * sizeof(LeafCopy));
         }
     }
     if (cs) {
@@ -657,6 +713,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
         if (!stage) {
             continue;
         }
+        const auto& leaves = stage_leaves[stage_index];
         const auto& ring = rings[stage_index++];
         auto& header = *reinterpret_cast<PacketStage*>(out);
         header = {stage,
@@ -664,10 +721,12 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
                   static_cast<u32>(stage->user_data.size()),
                   static_cast<u32>(stage->flattened_ud_buf.size()),
                   static_cast<u32>(ring.size()),
-                  0};
+                  static_cast<u32>(leaves.size())};
         out += sizeof(PacketStage);
         std::memcpy(out, ring.data(), ring.size() * sizeof(RingBinding));
         out += ring.size() * sizeof(RingBinding);
+        std::memcpy(out, leaves.data(), leaves.size() * sizeof(LeafCopy));
+        out += leaves.size() * sizeof(LeafCopy);
         std::memcpy(out, stage->user_data.data(), stage->user_data.size_bytes());
         std::memcpy(out + stage->user_data.size_bytes(), stage->flattened_ud_buf.data(),
                     stage->flattened_ud_buf.size() * sizeof(u32));
@@ -741,9 +800,11 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     for (u32 i = 0; i < packet.num_stages; ++i) {
         const auto& stage = *reinterpret_cast<const PacketStage*>(in);
         in += sizeof(PacketStage);
-        self.ring_stages[i] = {stage.info, reinterpret_cast<const RingBinding*>(in),
-                               stage.num_ring};
+        const auto* bindings = reinterpret_cast<const RingBinding*>(in);
         in += stage.num_ring * sizeof(RingBinding);
+        self.ring_stages[i] = {stage.info, bindings, stage.num_ring,
+                               reinterpret_cast<const LeafCopy*>(in), stage.num_leaves};
+        in += stage.num_leaves * sizeof(LeafCopy);
         const auto* words = reinterpret_cast<const u32*>(in);
         Shader::Info::ud_snapshots[i] = {stage.info, words, stage.ud_size, words + stage.ud_size,
                                          stage.flat_size, stage.pgm_base};
@@ -782,8 +843,11 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
                 continue;
             }
             runtime_fault_recover = &recover;
+            // The GPU-written dwords come out 0, as in the packet's flat (leaf copy).
+            thread_local std::vector<Shader::SrtGpuLeaf> leaves;
+            leaves.clear();
             Shader::RunSrtWalker(srt.walker_func, snapshot.user_data, flat.data(), flat.size(),
-                                 false);
+                                 false, &leaves);
             runtime_fault_recover = nullptr;
             if (std::memcmp(flat.data(), snapshot.flat, snapshot.flat_size * sizeof(u32)) != 0) {
                 u32 first = 0, count = 0;
@@ -821,6 +885,9 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     }
     ASSERT(static_cast<u32>(in - data) == size);
     stage_regs = &regs;
+    if (packet.kind != PacketKind::Special) {
+        self.RecordLeafCopies();
+    }
     self.pipe_cb_extent = packet.cb_extent;
     self.pipe_db_extent = packet.db_extent;
     if (packet.kind == PacketKind::Special) {
@@ -2169,6 +2236,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 push_data.AddOffset(binding.buffer, 0);
             }
             buffer_infos.emplace_back(constant_ring->Handle(), ring->offset, ring->size);
+            if (desc.buffer_type == Shader::BufferType::Flatbuf && RingLeaves(stage)) {
+                // GPU copies wrote into this range: transfer write -> shader read.
+                const auto* ring_buffer = constant_ring->Object();
+                needs_barrier |=
+                    runtime.IsBufferAccessed(ring_buffer, ring->offset, ring->size);
+                bound_buffers.emplace_back(ring_buffer, ring->offset, ring->size, src_access);
+            }
         } else if (desc.IsSpecial()) {
             if (desc.buffer_type == Shader::BufferType::GdsBuffer) {
                 const auto* gds_buf = buffer_cache.GetGdsBuffer();
@@ -2177,6 +2251,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     runtime.IsBufferAccessed(gds_buf, 0, gds_buf->SizeBytes(), desc.is_written);
                 bound_buffers.emplace_back(gds_buf, 0, gds_buf->SizeBytes(), src_access);
             } else if (desc.buffer_type == Shader::BufferType::Flatbuf) {
+                if (num_ring_stages == 0 && !stage.gpu_leaves.empty()) {
+                    // Recorded without the draw pipeline: no GPU copy, read them back.
+                    const_cast<Shader::Info&>(stage).ReadBackGpuLeaves();
+                }
                 auto& vk_buffer = buffer_cache.GetStreamBuffer();
                 const u32 ubo_size = stage.FlatUserData().size() * sizeof(u32);
                 if (FrameCapture::Active()) {
@@ -3314,6 +3392,27 @@ bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
     }
     buffer_cache.ExtendWriteFault(addr);
     return true;
+}
+
+bool Rasterizer::HasImageReadbackBytes(VAddr addr, u64 size) {
+    return texture_cache.HasPendingReadbackBytes(addr, size);
+}
+
+void Rasterizer::RecordLeafCopies() {
+    if (!constant_ring) {
+        return;
+    }
+    const auto* ring_buffer = constant_ring->Object();
+    for (u32 i = 0; i < num_ring_stages; ++i) {
+        const auto& stage = ring_stages[i];
+        for (u32 j = 0; j < stage.num_leaves; ++j) {
+            const auto& leaf = stage.leaves[j];
+            const auto [buffer, offset] = buffer_cache.ObtainBuffer(leaf.src, sizeof(u32), false);
+            const vk::BufferCopy copy{offset, leaf.ring_offset, sizeof(u32)};
+            runtime.CopyBuffer(buffer, ring_buffer, {&copy, 1});
+            Gow3Stats::uc3_leaf_copies.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 }
 
 bool Rasterizer::IsGpuWritten(VAddr addr, u64 size) {

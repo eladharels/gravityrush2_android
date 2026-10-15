@@ -153,6 +153,8 @@ public:
     /// uc3: the GPU wrote some of these bytes and guest memory does not have them yet
     /// (buffers or images). GPU-side threads only.
     bool IsGpuWritten(VAddr addr, u64 size);
+    /// uc3: bytes an image still has to read back (not in any buffer yet).
+    bool HasImageReadbackBytes(VAddr addr, u64 size);
     /// uc3 (trace): which of IsGpuWritten's sources holds these bytes.
     const char* DescribeGpuWritten(VAddr addr, u64 size);
     bool IsMapped(VAddr addr, u64 size);
@@ -260,8 +262,12 @@ private:
     const AmdGpu::ComputeProgram& CsRegs() const;
     static void RunDrawPacket(void* rasterizer, const u8* packet, u32 size);
     struct RingBinding;
+    struct LeafCopy;
     void CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
-                             boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out);
+                             boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out,
+                             std::vector<LeafCopy>& leaves);
+    /// Stage B: the GPU copies of the packet's GPU-written flat dwords into the ring.
+    void RecordLeafCopies();
     void PrintPipeStats();
     /// The registers of the draw being recorded: stage B's copy there, else Liverpool's.
     const AmdGpu::Regs& Regs() const;
@@ -506,6 +512,11 @@ private:
         u64 offset; ///< in the ring
         VAddr address;
     };
+    /// uc3 (Fable R.8.2): a GPU-written flat dword, 0 in the ring until stage B copies it.
+    struct LeafCopy {
+        u64 ring_offset; ///< of the dword, in the ring
+        VAddr src;
+    };
     struct PendingWrite {
         VAddr begin;
         VAddr end;
@@ -523,9 +534,19 @@ private:
         const Shader::Info* info;
         const RingBinding* bindings;
         u32 count;
+        const LeafCopy* leaves;
+        u32 num_leaves;
     };
     std::array<RingStage, Shader::MaxStageTypes> ring_stages{};
     u32 num_ring_stages = 0;
+    bool RingLeaves(const Shader::Info& stage) const {
+        for (u32 i = 0; i < num_ring_stages; ++i) {
+            if (ring_stages[i].info == &stage) {
+                return ring_stages[i].num_leaves != 0;
+            }
+        }
+        return false;
+    }
     const RingBinding* FindRingBinding(const Shader::Info& stage, u32 index) const {
         for (u32 i = 0; i < num_ring_stages; ++i) {
             if (ring_stages[i].info == &stage) {

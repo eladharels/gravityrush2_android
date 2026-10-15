@@ -31,6 +31,11 @@ public:
         return buffer.Handle();
     }
 
+    /// uc3: the ring as a buffer, for GPU copies into it (barrier tracking).
+    [[nodiscard]] const VideoCore::Buffer* Object() const noexcept {
+        return &buffer;
+    }
+
     /// Stage A: `size` bytes at `alignment`; returns the ring offset, or nullopt when the ring is
     /// still in use by the GPU (the caller leaves the binding to stage B).
     std::optional<u64> Allocate(u64 size, u64 alignment) {
@@ -66,10 +71,16 @@ public:
     /// Stage B, after recording a packet whose allocations end at `end`. Stamps of one
     /// submission tick are merged: only the last end per tick is published.
     void Stamp(u64 end) {
+        const u64 tick = scheduler.CurrentTick();
         if (end == pending_end) {
+            // uc3: once the ring is full, stage A allocates nothing and every packet carries the
+            // same end: the pending one must still publish when its submission is out, or
+            // nothing ever retires and the ring stays full for good (streets of Cartagena).
+            if (tick != pending_tick && pending_end != last_published) {
+                Publish(pending_end, pending_tick);
+            }
             return;
         }
-        const u64 tick = scheduler.CurrentTick();
         if (tick != pending_tick && pending_end != last_published) {
             Publish(pending_end, pending_tick);
         }

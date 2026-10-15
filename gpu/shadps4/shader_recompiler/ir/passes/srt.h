@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <vector>
 #include <boost/container/set.hpp>
 #include <boost/container/small_vector.hpp>
 #include "common/types.h"
@@ -30,18 +31,32 @@ struct SrtPtr {
 /// Loads the 8-byte pointer at host_base + off (guest_base + off in the guest; guest_base is 0
 /// for user data) and returns where to read the table it points to.
 using PFN_SrtLoadPtr = SrtPtr PS4_SYSV_ABI (*)(const u8* host_base, u64 guest_base, u64 off);
-/// Rereads the flattened dwords whose guest source is GPU-written (src[i] is 0 for none).
-using PFN_SrtFixup = void (*)(const u64* src, u32* flat, size_t count);
+/// uc3 (Fable R.8.2): a flattened dword whose guest source the GPU wrote; with GOW3_LEAF_COPY the
+/// flat holds 0 there and the draw recording thread copies the 4 bytes on the GPU.
+struct SrtGpuLeaf {
+    u32 dst_dw;
+    u32 pad;
+    u64 src;
+};
+/// Rereads the flattened dwords whose guest source is GPU-written (src[i] is 0 for none), or,
+/// given `leaves`, zeroes them and lists them for a GPU copy.
+using PFN_SrtFixup = void (*)(const u64* src, u32* flat, size_t count,
+                              std::vector<SrtGpuLeaf>* leaves);
+/// Reads a GPU-written dword back (synchronous) into `out`.
+using PFN_SrtReadDword = void (*)(u64 src, u32* out);
 
 struct SrtWalkCtx {
     PFN_SrtLoadPtr load_ptr; // [r8 + 0]
     u64* src_table;          // [r8 + 8]
 };
 
-void SetSrtWalkerHooks(PFN_SrtLoadPtr load_ptr, PFN_SrtFixup fixup);
-/// Runs a walker. `sync` false: GPU-written bytes keep the guest copy (no readback).
+void SetSrtWalkerHooks(PFN_SrtLoadPtr load_ptr, PFN_SrtFixup fixup,
+                       PFN_SrtReadDword read_dword = nullptr);
+/// Runs a walker. `sync` false: GPU-written bytes are not read back. `leaves`: see PFN_SrtFixup.
 void RunSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat, size_t flat_dw,
-                  bool sync = true);
+                  bool sync = true, std::vector<SrtGpuLeaf>* leaves = nullptr);
+/// Reads one GPU-written dword back through the hook (or plainly when there is none).
+void SrtReadDword(u64 src, u32* out);
 /// True while the walker of this thread may read GPU-written bytes back.
 bool SrtWalkerSyncAllowed();
 

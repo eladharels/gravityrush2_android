@@ -4,6 +4,7 @@
 #pragma once
 
 #include <span>
+#include <type_traits>
 #include <vector>
 #include <boost/container/static_vector.hpp>
 #include "common/assert.h"
@@ -102,6 +103,8 @@ struct Info : InfoPersistent {
 
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
+    /// uc3 (R.8.2): dwords of flattened_ud_buf left 0 for a GPU copy (see SrtGpuLeaf).
+    std::vector<SrtGpuLeaf> gpu_leaves;
     PersistentSrtInfo srt_info;
 
     AttributeFlags loads{};
@@ -212,10 +215,67 @@ struct Info : InfoPersistent {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
+        gpu_leaves.clear();
         if (srt_info.walker_func) {
             RunSrtWalker(srt_info.walker_func, user_data.data(), flattened_ud_buf.data(),
-                         flattened_ud_buf.size());
+                         flattened_ud_buf.size(), true, &gpu_leaves);
+            // Sharps are read on the host (descriptors): they keep the true value.
+            std::erase_if(gpu_leaves, [&](const SrtGpuLeaf& leaf) {
+                if (!IsSharpDword(leaf.dst_dw)) {
+                    return false;
+                }
+                SrtReadDword(leaf.src, &flattened_ud_buf[leaf.dst_dw]);
+                return true;
+            });
         }
+    }
+
+    /// Reads the GPU-written dwords back into the flat (when no GPU copy will patch them).
+    void ReadBackGpuLeaves() {
+        for (const auto& leaf : gpu_leaves) {
+            SrtReadDword(leaf.src, &flattened_ud_buf[leaf.dst_dw]);
+        }
+        gpu_leaves.clear();
+    }
+
+    /// True when flattened dword `dw` belongs to a resource descriptor the host reads.
+    bool IsSharpDword(u32 dw) const {
+        const auto in_fetch = [dw](const auto& fetch) {
+            using Fetch = std::remove_cvref_t<decltype(fetch)>;
+            if (fetch.summary == Fetch::Summary::SingleLoad) {
+                return dw >= fetch.offsets[0] && dw < fetch.offsets[0] + Fetch::N;
+            }
+            if (fetch.summary == Fetch::Summary::Invalid) {
+                return false;
+            }
+            for (u32 i = 0; i < Fetch::N; ++i) {
+                if (((fetch.load_mask >> i) & 1) && fetch.offsets[i] == dw) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (const auto& buffer : buffers) {
+            if (in_fetch(buffer.sharp_fetch)) {
+                return true;
+            }
+        }
+        for (const auto& image : images) {
+            if (in_fetch(image.sharp_fetch)) {
+                return true;
+            }
+        }
+        for (const auto& sampler : samplers) {
+            if (in_fetch(sampler.sharp_fetch) || sampler.post_op_tsharp_dw3_off == dw) {
+                return true;
+            }
+        }
+        for (const auto& fmask : fmasks) {
+            if (dw >= fmask.sharp_idx && dw < fmask.sharp_idx + 8) {
+                return true;
+            }
+        }
+        return false;
     }
 
     void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {

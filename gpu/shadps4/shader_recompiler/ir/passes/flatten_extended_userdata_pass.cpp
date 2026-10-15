@@ -57,13 +57,23 @@ SrtPtr PS4_SYSV_ABI DefaultSrtLoadPtr(const u8* host_base, u64 guest_base, u64 o
 
 std::atomic<PFN_SrtLoadPtr> g_srt_load_ptr{DefaultSrtLoadPtr};
 std::atomic<PFN_SrtFixup> g_srt_fixup{nullptr};
+std::atomic<PFN_SrtReadDword> g_srt_read_dword{nullptr};
 thread_local bool t_srt_sync = true;
 
 } // namespace
 
-void SetSrtWalkerHooks(PFN_SrtLoadPtr load_ptr, PFN_SrtFixup fixup) {
+void SetSrtWalkerHooks(PFN_SrtLoadPtr load_ptr, PFN_SrtFixup fixup, PFN_SrtReadDword read_dword) {
     g_srt_load_ptr.store(load_ptr ? load_ptr : DefaultSrtLoadPtr);
     g_srt_fixup.store(fixup);
+    g_srt_read_dword.store(read_dword);
+}
+
+void SrtReadDword(u64 src, u32* out) {
+    if (const auto read = g_srt_read_dword.load(std::memory_order_relaxed)) {
+        read(src, out);
+    } else {
+        std::memcpy(out, reinterpret_cast<const void*>(src), sizeof(u32));
+    }
 }
 
 bool SrtWalkerSyncAllowed() {
@@ -71,18 +81,17 @@ bool SrtWalkerSyncAllowed() {
 }
 
 void RunSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat, size_t flat_dw,
-                  bool sync) {
+                  bool sync, std::vector<SrtGpuLeaf>* leaves) {
     thread_local std::vector<u64> src;
     src.assign(flat_dw, 0);
     SrtWalkCtx ctx{g_srt_load_ptr.load(std::memory_order_relaxed), src.data()};
     const bool was_sync = t_srt_sync;
     t_srt_sync = sync;
     walker(user_data, flat, &ctx);
-    t_srt_sync = was_sync;
-    const auto fixup = g_srt_fixup.load(std::memory_order_relaxed);
-    if (sync && fixup) {
-        fixup(src.data(), flat, flat_dw);
+    if (const auto fixup = g_srt_fixup.load(std::memory_order_relaxed)) {
+        fixup(src.data(), flat, flat_dw, leaves);
     }
+    t_srt_sync = was_sync;
 }
 
 bool DecodeSrtWalkerLoad(const void* rip, SrtWalkerLoad& load) {
@@ -970,13 +979,18 @@ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     UNREACHABLE_MSG("RegisterWalkerCode unimplemented for target architecture.");
 }
 
-void SetSrtWalkerHooks(PFN_SrtLoadPtr, PFN_SrtFixup) {}
+void SetSrtWalkerHooks(PFN_SrtLoadPtr, PFN_SrtFixup, PFN_SrtReadDword) {}
+
+void SrtReadDword(u64 src, u32* out) {
+    std::memcpy(out, reinterpret_cast<const void*>(src), sizeof(u32));
+}
 
 bool SrtWalkerSyncAllowed() {
     return true;
 }
 
-void RunSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat, size_t, bool) {
+void RunSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat, size_t, bool,
+                  std::vector<SrtGpuLeaf>*) {
     UNREACHABLE_MSG("RunSrtWalker unimplemented for target architecture.");
 }
 
