@@ -134,6 +134,12 @@ public:
     /// R.9.10, stage A: guest memory written right now, or by work handed to stage B, other
     /// than NotePendingGpuWrite's (HLE copies, CP host copies, DumpConstRam, compute labels).
     void NoteGuestWrite(VAddr address, u64 size);
+    /// R.9.12: waits for the constant ring copies queued so far (before a guest memory write).
+    void WaitRingCopies() {
+        if (ring_copier) {
+            ring_copier->WaitAll();
+        }
+    }
     static bool RingDedupOn();
     void RingDedupClear() noexcept {
         ++dedup_epoch;
@@ -597,6 +603,8 @@ private:
         return nullptr;
     }
     std::unique_ptr<ConstantRing> constant_ring;
+    /// R.9.12: destroyed after draw_pipe (stage B waits on it).
+    std::unique_ptr<RingCopier> ring_copier;
     /// Submissions (prepared draws) kept alive until stage B reaches the position.
     std::deque<std::pair<u64, std::shared_ptr<const void>>> pipe_keepalive;
     std::unique_ptr<DrawPipe> draw_pipe;

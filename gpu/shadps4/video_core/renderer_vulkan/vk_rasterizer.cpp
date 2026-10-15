@@ -122,6 +122,17 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     if (DrawPipeWanted()) {
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
+        if (RingCopier::Wanted()) {
+            ring_copier = std::make_unique<RingCopier>(
+                [](void* context, VAddr address, u8* dst, u64 size, u64 offset) {
+                    auto* self = static_cast<Rasterizer*>(context);
+                    self->memory->CopySparseMemory(address, dst, size);
+                    self->constant_ring->Flush(offset, size);
+                },
+                this);
+            draw_pipe->copier = ring_copier.get();
+            std::printf("gow3: constant ring copies on their own thread (R.9.12)\n");
+        }
     }
     // gow3: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
@@ -619,9 +630,15 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
                 StageBTimer t{SbAPResolve};
                 memory->ResolveHostCopy(address, size);
             }
+            ring_bytes += size;
+            if (ring_copier) {
+                // R.9.12: the copy thread copies and flushes; stage B waits for it.
+                ring_copier->Push(address, dst, size, *offset);
+                out.push_back({index, static_cast<u32>(size), *offset, address});
+                return;
+            }
             StageBTimer t{SbAPSparse};
             memory->CopySparseMemory(address, dst, size);
-            ring_bytes += size;
         }
         StageBTimer flush_timer{SbAPFlush};
         constant_ring->Flush(*offset, size);
@@ -1133,6 +1150,24 @@ void Rasterizer::PrintPipeStats() {
     if (const u64 cuts = eager_cuts.load(std::memory_order_relaxed); cuts != last_cuts) {
         std::printf("  eager submissions: %.0f/s\n", (cuts - last_cuts) / seconds);
         last_cuts = cuts;
+    }
+    if (ring_copier) {
+        static u64 last_wait = 0, last_waits = 0, last_copy_busy = 0, last_bwait = 0, last_bwaits = 0;
+        const u64 wait = ring_copier->wait_cycles.load(std::memory_order_relaxed);
+        const u64 waits = ring_copier->waits.load(std::memory_order_relaxed);
+        const u64 bwait = ring_copier->b_wait_cycles.load(std::memory_order_relaxed);
+        const u64 bwaits = ring_copier->b_waits.load(std::memory_order_relaxed);
+        const u64 copy_busy = ring_copier->busy_cycles.load(std::memory_order_relaxed);
+        std::printf("  ring copy thread: busy %.1f%%; stage B waited for it %.1f%% (%.0f/s), "
+                    "others %.1f%% (%.0f/s)\n",
+                    100.0 * (copy_busy - last_copy_busy) / cycles,
+                    100.0 * (bwait - last_bwait) / cycles, (bwaits - last_bwaits) / seconds,
+                    100.0 * (wait - last_wait) / cycles, (waits - last_waits) / seconds);
+        last_wait = wait;
+        last_waits = waits;
+        last_bwait = bwait;
+        last_bwaits = bwaits;
+        last_copy_busy = copy_busy;
     }
     if (StageBProfile()) {
         std::printf("  constant ring: %.1f MB/s, %.0f copies/s, %.0f bytes/copy\n",

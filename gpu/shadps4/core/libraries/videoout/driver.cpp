@@ -245,6 +245,7 @@ int VideoOutDriver::RegisterBuffers(VideoOutPort* port, s32 startIndex, void* co
         presenter->RegisterVideoOutSurface(group, address);
         LOG_INFO(Lib_VideoOut, "buffers[{}] = {:#x}", i + startIndex, address);
     }
+    std::printf("VideoOut: %d display buffers registered from index %d\n", bufferNum, startIndex);
 
     return group_index;
 }
@@ -717,8 +718,14 @@ void VideoOutDriver::Flip(const Request& req) {
 
     // Reset prev flip label
     if (port->prev_index != -1) {
-        port->buffer_labels[port->prev_index] = 0;
-        port->SignalVoLabel();
+        std::unique_lock lock{port->port_mutex};
+        if (port->early_released[port->prev_index]) {
+            // uc3 T3: released at submission; the game may own it again already.
+            port->early_released[port->prev_index] = false;
+        } else {
+            port->buffer_labels[port->prev_index] = 0;
+            port->SignalVoLabel();
+        }
     }
     // save to prev buf index
     port->prev_index = req.index;
@@ -807,6 +814,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         frame = presenter->PrepareFrame(group, buffer.address_left);
     }
 
+    size_t queued = 0;
     {
         std::scoped_lock lock{mutex};
         requests.push({
@@ -816,8 +824,29 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
             .index = index,
             .eop = is_eop,
         });
+        queued = requests.size();
     }
     request_cv.notify_one();
+
+    // uc3 T3 (Opus R.9, GOW3_EARLY_VO_LABEL=1): the buffer submitted before this one was copied
+    // by its own PrepareFrame already, and later GPU writes to it are ordered after that copy:
+    // the game may render into it now instead of at the next vblank tick (like triple
+    // buffering). Only with at most one flip waiting, so the game stays at most a frame ahead.
+    static const bool early_label = [] {
+        const char* env = std::getenv("GOW3_EARLY_VO_LABEL");
+        return env && env[0] == '1';
+    }();
+    if (early_label && index >= 0) {
+        std::unique_lock lock{port->port_mutex};
+        const int previous = port->last_submitted;
+        port->last_submitted = index;
+        if (previous >= 0 && previous != index && queued <= 1 &&
+            port->buffer_labels[previous] != 0) {
+            port->buffer_labels[previous] = 0;
+            port->early_released[previous] = true;
+            port->SignalVoLabel();
+        }
+    }
 }
 
 void VideoOutDriver::PresentThread(std::stop_token token) {

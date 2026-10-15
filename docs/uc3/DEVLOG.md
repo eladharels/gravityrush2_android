@@ -4,6 +4,30 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 (noite, 2) — R.9.12: cópias do anel de constantes numa thread própria (`GOW3_RING_COPY_THREAD=1`, desligado): ruas ~48 → ~55–56 FPS; T3/T3b sem ganho
+
+Teste nas ruas (save 036, início), com R.8.4 + HLE + R.9.1 + R.9.4 + R.9.6.
+
+- **T3 (`GOW3_EARLY_VO_LABEL=1`, `videoout/driver.cpp`):** no `SubmitFlip`, libera o label do buffer de vídeo anterior em vez de esperar o próximo flip. Resultado: ~47,5–48 FPS, sem ganho.
+- **T3b (`GOW3_VO_SKIP_DRAIN=1`, `liverpool.cpp`):** no WaitRegMem de label de vídeo, pula o `DrainDrawPipe` quando o label já está livre. Resultado: a espera só migrou para o `Rasterizer::OnSubmit` (o dreno do `sceGnmSubmitDone`, obrigatório pelas fences). ~48 FPS.
+- **R.9.12 (`GOW3_RING_COPY_THREAD=1`, novo `vk_ring_copier.h`):** a etapa A (thread do CP) só enfileira as cópias de memória do jogo para o anel de constantes, numa fila SPSC de 64 mil entradas. A thread `gow3:RingCopy` faz as cópias e o flush.
+  - O cabeçalho de cada pacote do `DrawPipe` leva `copy_seq`. A etapa B espera as cópias anteriores ao pacote antes de rodá-lo, então a etapa B e a GPU veem os mesmos bytes de antes.
+  - A etapa A só espera todas as cópias antes das escritas na memória do jogo que ela mesma faz: `MemSemaphore` (sinal, gráfico e compute) e `DumpConstRam`. Os pacotes `RunInOrder` (WriteData, EOP, ReleaseMem do compute) rodam na etapa B e já esperam. Os opcodes não pipelinados drenam a etapa B.
+  - Uma primeira versão esperava em todo opcode fora de registradores e draws, e também no `NoteGuestWrite`. Isso deixou a etapa A 16% esperando e o FPS ficou igual. Agora são 0 esperas na etapa A.
+  - Linha nova em `GOW3_FRAME_STATS`: "ring copy thread: busy …; stage B waited …".
+- **Resultados nas ruas:**
+
+  | Configuração | FPS |
+  |---|---|
+  | Com perfil (`medir_r912.bat`) | 53–54 |
+  | Sem perfil (`medir_r912_semperfil.bat`) | ~55 |
+  | Envio antecipado a cada 128 pacotes ou 1 ms (`medir_r912_e128.bat`) | ~56 |
+
+  Com o envio a 128 pacotes / 1 ms, a etapa B fica 73% ocupada (80% com 64/0,5 ms). Imagem correta. A thread de cópia fica ~45% ocupada.
+- **Gargalo agora: a etapa B (gravação).** Cada envio custa ~38 µs na etapa B: ~21 µs esperando a thread de gravação Vulkan, ~10 µs no `end()`/fila e ~6 µs no novo command buffer. Por dispatch, `BindBuffers` custa ~0,9 µs.
+
+---
+
 ## 2026-10-15 (noite) — R.9.3–R.9.10: o caminho crítico é a etapa A; perfis e quatro tentativas atrás de interruptores (todos desligados), sem ganho de FPS
 
 Teste nas ruas (save 036, início), com R.8.4 + HLE + R.9.1 (N=64, 0,5 ms): ~50–51 FPS. Com as opções padrão + HLE (`medir_so_hle.bat`): ~46 FPS, sem regressão.

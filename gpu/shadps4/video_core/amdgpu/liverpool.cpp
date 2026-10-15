@@ -557,6 +557,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             // gow3: earlier draws on the recording thread may still read constants here.
             if (rasterizer) {
                 rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonConstRam);
+                rasterizer->WaitRingCopies();
             }
             const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
             if (rasterizer) {
@@ -1368,6 +1369,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     rasterizer->RingDedupClear();
                 }
                 if (mem_semaphore->IsSignaling()) {
+                    // R.9.12: packets that write guest memory on this thread (not drained,
+                    // not handed to the recording thread) wait for queued ring copies first.
+                    if (rasterizer) {
+                        rasterizer->WaitRingCopies();
+                    }
                     mem_semaphore->Signal();
                 } else {
                     while (!mem_semaphore->Signaled()) {
@@ -1405,6 +1411,24 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
+                    // uc3 T3b (GOW3_VO_SKIP_DRAIN=1): a label already free needs no drain.
+                    static const bool skip_drain = [] {
+                        const char* env = std::getenv("GOW3_VO_SKIP_DRAIN");
+                        return env && env[0] == '1';
+                    }();
+                    static std::atomic<u64> vo_waits{0}, vo_free{0};
+                    ++vo_waits;
+                    if (wait_reg_mem->Test(regs.reg_array)) {
+                        ++vo_free;
+                        if (skip_drain) {
+                            break;
+                        }
+                    }
+                    if (std::getenv("GOW3_FRAME_STATS") && (vo_waits & 255) == 0) {
+                        std::printf("VO label waits: %llu, %llu already free\n",
+                                    (unsigned long long)vo_waits.load(),
+                                    (unsigned long long)vo_free.load());
+                    }
                     if (rasterizer) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                     }
@@ -1798,6 +1822,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 rasterizer->RingDedupClear();
             }
             if (mem_semaphore->IsSignaling()) {
+                if (rasterizer) {
+                    rasterizer->WaitRingCopies(); // R.9.12, as on the graphics queue
+                }
                 mem_semaphore->Signal();
             } else {
                 while (!mem_semaphore->Signaled()) {

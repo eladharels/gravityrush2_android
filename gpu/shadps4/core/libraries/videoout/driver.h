@@ -43,6 +43,10 @@ struct VideoOutPort {
     std::condition_variable vblank_cv;
     int flip_rate = 0;
     int prev_index = -1;
+    /// uc3 T3 (GOW3_EARLY_VO_LABEL=1): the buffer submitted before the newest one, and the
+    /// buffers whose label was released at submission (Flip() then leaves them alone).
+    int last_submitted = -1;
+    std::array<bool, MaxDisplayBuffers> early_released{};
     bool is_open = false;
     bool is_hdr = false;
 

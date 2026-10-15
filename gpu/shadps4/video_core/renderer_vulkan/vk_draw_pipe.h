@@ -25,6 +25,7 @@
 #include "common/assert.h"
 #include "common/thread.h"
 #include "common/types.h"
+#include "video_core/renderer_vulkan/vk_ring_copier.h"
 
 namespace Vulkan {
 
@@ -78,7 +79,9 @@ public:
 
     /// Stage A: hands the packet from Begin() to stage B.
     void Commit(u32 payload_size) {
-        reinterpret_cast<Header*>(ring.get() + head % Capacity)->payload = payload_size;
+        auto* header = reinterpret_cast<Header*>(ring.get() + head % Capacity);
+        header->payload = payload_size;
+        header->copy_seq = copier ? copier->Enqueued() : 0;
         head += pending_size;
         published.store(head, std::memory_order_seq_cst);
         ++packets;
@@ -144,10 +147,15 @@ public:
     u64 packets = 0, drains = 0, drain_cycles = 0;
     std::atomic<u64> busy_cycles{0};
 
+    /// R.9.12: set before the first packet; stage B runs a packet once the ring copies queued
+    /// before it are done.
+    RingCopier* copier = nullptr;
+
 private:
     struct Header {
         u32 size;    ///< bytes to the next packet (0: wrap to the ring start)
         u32 payload; ///< bytes written by the producer
+        u64 copy_seq; ///< R.9.12: ring copies queued before this packet
     };
     static constexpr u64 Capacity = 16ull << 20;
 
@@ -202,6 +210,9 @@ private:
                 at += Capacity - at % Capacity;
                 consumed.store(at, std::memory_order_release);
                 continue;
+            }
+            if (copier) {
+                copier->WaitDone(header->copy_seq, true);
             }
             const u64 start = __rdtsc();
             processing_end = at + header->size;
