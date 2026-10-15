@@ -10,6 +10,7 @@
 #include "gow3_copy.h"
 #include "gow3_toggles.h"
 #include <cstdio>
+#include <cstdlib>
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -485,6 +486,30 @@ void Liverpool::NotePendingWrite(const PM4CmdWriteData& write_data, u32 num_byte
     std::memcpy(&data, write_data.data, num_bytes);
     pending_fences.push_back(
         {write_data.Address<VAddr>(), data, num_bytes, rasterizer->DrawPipeHead()});
+}
+
+void Liverpool::NotePendingReleaseMem(const PM4CmdReleaseMem& release_mem) {
+    u64 data = 0;
+    u32 num_bytes = 0;
+    switch (release_mem.data_sel.Value()) {
+    case DataSelect::Data32Low:
+        data = release_mem.DataDWord();
+        num_bytes = sizeof(u32);
+        break;
+    case DataSelect::Data64:
+        data = release_mem.DataQWord();
+        num_bytes = sizeof(u64);
+        break;
+    default:
+        return; // clocks and GDS stores are not labels
+    }
+    const u64 position = rasterizer->DrawPipeHead();
+    while (!pending_fences.empty() && rasterizer->DrawPipeReached(pending_fences.front().position)) {
+        pending_fences.pop_front();
+    }
+    const VAddr address = release_mem.Address<VAddr>();
+    pending_fences.push_back({address, data, num_bytes, position});
+    rasterizer->NotePendingGpuWrite(address, num_bytes);
 }
 
 bool Liverpool::PendingFenceValue(VAddr address, u32& value) {
@@ -1769,7 +1794,15 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (rasterizer && ComputePipeOn()) {
                 const ReleaseMemTask task{*reinterpret_cast<const PM4CmdReleaseMem*>(header),
                                           static_cast<u32>(queue.pipe_id)};
-                rasterizer->RunInOrder(&RunReleaseMem, &task, sizeof(task));
+                const bool queued = rasterizer->RunInOrder(&RunReleaseMem, &task, sizeof(task));
+                // R.9.2: a graphics WaitRegMem on this label is met in stream order.
+                static const bool note_acb_fences = [] {
+                    const char* env = std::getenv("GOW3_ACB_FENCE_NOTE");
+                    return env && env[0] == '1';
+                }();
+                if (queued && note_acb_fences) {
+                    NotePendingReleaseMem(task.packet);
+                }
                 break;
             }
             // gow3: copies deferred to the recording thread precede writes the guest sees, and

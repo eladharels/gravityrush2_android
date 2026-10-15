@@ -83,6 +83,8 @@ struct Liverpool {
     void NotePendingFences(const auto& event);
     bool PendingFenceValue(VAddr address, u32& value);
     void NotePendingWrite(const struct PM4CmdWriteData& write_data, u32 num_bytes);
+    /// uc3 (Fable R.9.2, GOW3_ACB_FENCE_NOTE=1): a compute ReleaseMem label handed to the pipe.
+    void NotePendingReleaseMem(const struct PM4CmdReleaseMem& release_mem);
     /// gow3: running checksum of graphics-register packets (see ApplyGraphicsRegisterPacket).
     u64 gfx_reg_checksum{};
     /// Top-level graphics submissions, numbered for the draw preparation workers.

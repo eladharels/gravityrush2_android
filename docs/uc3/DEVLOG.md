@@ -4,6 +4,26 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-15 — R.9.1: envio antecipado dos comandos à GPU (`GOW3_EAGER_SUBMIT=N`, desligado): ruas ~46 → ~50 FPS; R.9.2 sem efeito
+
+**Causa (diagnóstico do Fable, R.9):** a build só enviava comandos à GPU quando o jogo terminava de submeter o quadro. A gravação (~13 ms) e o trabalho da GPU (~12 ms) corriam em série, e a GPU ficava ociosa metade do quadro.
+
+**R.9.1:** a etapa B (`RunDrawPacket`) agora corta e envia o buffer de comandos no meio do quadro (`scheduler.Flush()`) a cada N pacotes ou a cada `GOW3_EAGER_SUBMIT_US` µs (padrão 1500). Só corta se ainda houver pacotes atrás na fila (`DrawPipe::MoreBehind`). O resumo de estatísticas mostra "eager submissions".
+
+| Ruas (036, início) | FPS | Quadros > 1,5× mediana | GPU ticks bloqueado | Etapa B ocupada |
+|---|---|---|---|---|
+| Sem corte | ~46 | ~70 | 21% | 60% |
+| N=256, 1,5 ms (`medir_r91.bat`) | ~50 | ~47–52 | 13% | 62% |
+| N=64, 0,5 ms (`medir_r91_64.bat`) | ~50,6 | 47 | 8% | 70% |
+
+A imagem estava correta e o jogo fechou limpo. A porta do beco não foi testada com esse interruptor. O gargalo agora é a etapa B (gravação, ~70% ocupada). O ritmo continua bimodal (mediana 16,8 ms, p99 34 ms): o quadro que passa de 16,7 ms espera o próximo vblank.
+
+Falta conferir: alguns usos de `CurrentTick()` fora da etapa B podem ver um tick velho depois do corte. A auditoria não achou problema, mas não provou tudo; a revisão foi pedida à Pesquisa com Opus.
+
+**R.9.2 (`GOW3_ACB_FENCE_NOTE=1`, desligado):** registrava os ReleaseMem da fila de compute como fences pendentes para evitar drenagens. Não mudou nada: as esperas da etapa A em `ProcessGraphics:1394` são o jogo esperando os labels de flip (VideoOut), não fences de compute.
+
+---
+
 ## 2026-10-15 — R.8.5: a HLE espera só uploads pendentes do mesmo destino (`GOW3_HLE_PRECISE_WAIT=1`, desligado); correto, mas sem ganho
 
 **Desenho do Fable (R.8.5):** as cópias de host adiadas leem a memória do jogo depois, nas threads de gravação e de cópia. Agora cada uma soma 1 num contador por página de 64 KiB da origem (tabela com hash de 65536 posições; colisão só causa uma espera a mais) ao ser emitida, e subtrai ao terminar (`NotePendingHostRead`, em `SmallGuestCopy`, nos grupos assíncronos e em `RunGuestCopy`). A HLE da cópia escalar só chama `WaitHostCopies()` se alguma página do **destino** tiver leitura pendente (`HasPendingHostReads`).

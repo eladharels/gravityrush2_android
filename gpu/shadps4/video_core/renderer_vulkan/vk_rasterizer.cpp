@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <chrono>
+#include <x86intrin.h>
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "gow3_toggles.h"
@@ -916,6 +919,43 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     if (self.constant_ring) {
         self.constant_ring->Stamp(packet.ring_end);
     }
+    self.MaybeEagerSubmit();
+}
+
+void Rasterizer::MaybeEagerSubmit() {
+    static const u32 every = [] {
+        const char* env = std::getenv("GOW3_EAGER_SUBMIT");
+        return env ? static_cast<u32>(std::max(0, std::atoi(env))) : 0u;
+    }();
+    if (every == 0) {
+        return;
+    }
+    // rdtsc ticks per microsecond, measured once.
+    static const u64 limit_tsc = [] {
+        const char* env = std::getenv("GOW3_EAGER_SUBMIT_US");
+        const u64 us = env ? std::max(0, std::atoi(env)) : 1500;
+        const u64 t0 = __rdtsc();
+        const auto c0 = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - c0 < std::chrono::milliseconds(2)) {
+        }
+        const u64 per_us = (__rdtsc() - t0) / 2000;
+        return us * per_us;
+    }();
+    const u64 now = __rdtsc();
+    if (eager_last_tsc == 0) {
+        eager_last_tsc = now;
+    }
+    ++eager_packets;
+    if (eager_packets < every && (limit_tsc == 0 || now - eager_last_tsc < limit_tsc)) {
+        return;
+    }
+    if (!draw_pipe->MoreBehind()) {
+        return; // the frame's end (or a pause): the submission at submit_done follows
+    }
+    eager_packets = 0;
+    eager_last_tsc = now;
+    eager_cuts.fetch_add(1, std::memory_order_relaxed);
+    scheduler.Flush();
 }
 
 void Rasterizer::PrintPipeStats() {
@@ -940,6 +980,11 @@ void Rasterizer::PrintPipeStats() {
                 (draw_pipe->drains - last_drains) / seconds,
                 100.0 * (draw_pipe->drain_cycles - last_drain_cycles) / cycles,
                 100.0 * (busy - last_busy) / cycles);
+    static u64 last_cuts = 0;
+    if (const u64 cuts = eager_cuts.load(std::memory_order_relaxed); cuts != last_cuts) {
+        std::printf("  eager submissions: %.0f/s\n", (cuts - last_cuts) / seconds);
+        last_cuts = cuts;
+    }
     std::printf("  drains by reason/s:");
     for (u32 r = 0; r < DrawPipe::NumReasons; ++r) {
         if (const u64 n = draw_pipe->drains_by_reason[r]) {

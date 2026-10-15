@@ -134,6 +134,11 @@ public:
         return consumed.load(std::memory_order_acquire) == head;
     }
 
+    /// Stage B, inside the handler: true when stage A has committed packets after this one.
+    [[nodiscard]] bool MoreBehind() const noexcept {
+        return published.load(std::memory_order_acquire) > processing_end;
+    }
+
     /// Statistics (stage A): packets, drains that had to wait, cycles waited, cycles stage B
     /// spent running packets.
     u64 packets = 0, drains = 0, drain_cycles = 0;
@@ -199,6 +204,7 @@ private:
                 continue;
             }
             const u64 start = __rdtsc();
+            processing_end = at + header->size;
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
             busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
             at += header->size;
@@ -211,6 +217,7 @@ private:
     void* context;
     std::unique_ptr<u8[]> ring;
     u64 head = 0; ///< stage A's write position
+    u64 processing_end = 0; ///< stage B: end of the packet being run
     u32 pending_size = 0;
     alignas(64) std::atomic<u64> published{0};
     alignas(64) std::atomic<u64> consumed{0};

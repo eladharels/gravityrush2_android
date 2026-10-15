@@ -567,6 +567,13 @@ private:
     /// Submissions (prepared draws) kept alive until stage B reaches the position.
     std::deque<std::pair<u64, std::shared_ptr<const void>>> pipe_keepalive;
     std::unique_ptr<DrawPipe> draw_pipe;
+    /// uc3 (Fable R.9.1, GOW3_EAGER_SUBMIT=N): stage B submits the command buffer after N
+    /// recorded packets (or GOW3_EAGER_SUBMIT_US of recording) when more packets are queued,
+    /// so the GPU starts on a frame while the rest is still being recorded.
+    void MaybeEagerSubmit();
+    u32 eager_packets = 0;
+    u64 eager_last_tsc = 0;
+    std::atomic<u64> eager_cuts{0};
 };
 
 } // namespace Vulkan
