@@ -4,6 +4,12 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-16 (manhã, 10) — UC1: tiros com som (O_CREAT em /app0 abre o arquivo existente)
+
+- **Causa (achada pela thread de pesquisa, comparando com o uncharted_pc do SuperMedo, commit 5c457e7, GPL).** O UC1 abre a configuração de som (`sound1/config/ps4/...`) com `O_CREAT`. O nosso `do_open` recusava qualquer `O_CREAT` em `/app0` (somente leitura) com `EROFS`, então o Scream nunca carregava os protótipos das armas e o tiro nem chegava a tocar, sem erro nenhum (ver entrada 9).
+- **Correção (`src/runtime_file.c`, sempre ligada).** Como no FreeBSD, `O_CREAT` em montagem somente leitura abre o arquivo se ele existir; só a criação de um arquivo novo falha. O filtro do rastreio de `open` agora procura `sound` (o caminho real é `sound1/`).
+- **Resultado.** O Matheus testou com `boot_uc1_low.bat`: os tiros têm som.
+
 ## 2026-10-16 (madrugada, 9) — UC2 fica na configuração I2; UC1: regras de fim de job do Ajm e patch do assert `m_gfxEopTick` (toggles desligados)
 
 - **UC2, vagão do trem (decisão do Matheus: por enquanto, I2).** No prólogo o vagão cai cedo se o pulo é tardio. Precisa de `GOW3_COMPUTE_PIPE` e `GOW3_READBACK_ASYNC` juntos, e piora quanto mais liso o jogo roda a 60.

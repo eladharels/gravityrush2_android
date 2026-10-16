@@ -200,10 +200,18 @@ static int game_path(const char *p) {
 }
 /* All operations return >=0 or -(host errno); wrappers adapt the convention. */
 static int64_t do_open(const char *guest,int flags,int mode) {
-    if (game_path(guest) && (flags & (3|0x8|0x200|0x400|0x800))) return -EROFS;
+    if (game_path(guest) && (flags & (3|0x8|0x400|0x800))) return -EROFS;
     char path[1024];
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
+    /* O_CREAT on a read-only mount opens an existing file for reading, as FreeBSD does (UC1
+       reads its sound configuration this way; from SuperMedo's uncharted_pc 5c457e7, GPL);
+       only creating a new file fails. */
+    if (game_path(guest) && (flags & 0x200)) {
+        HostStat existing;
+        if (host_stat(path,&existing)) return -EROFS;
+        flags&=~0x200;
+    }
 #ifdef _WIN32
     /* Windows cannot open a directory as a CRT descriptor: directories are listings only. */
     (void)mode;
@@ -250,7 +258,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     static int file_trace=-1;
     if (file_trace<0) { const char *t=getenv("GOW3_FILE_TRACE"); file_trace=t && t[0]=='1'; }
     if (file_trace) printf("File trace: open(%s, flags 0x%x) -> fd %d, %lld bytes\n",guest,flags,fd,(long long)s.st_size);
-    if (audio_trace() && strstr(guest,"sound/")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
+    if (audio_trace() && strstr(guest,"sound")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
     const char *mod_trace=getenv("GOW3_MOD_TRACE"), *mod_root=getenv("GOW3_MODS_DIR");
     if (mod_trace && mod_trace[0]=='1' && mod_root) {
         char actual[PATH_MAX],root[PATH_MAX];
