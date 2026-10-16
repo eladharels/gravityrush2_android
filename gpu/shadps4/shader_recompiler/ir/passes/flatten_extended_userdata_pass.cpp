@@ -83,14 +83,37 @@ bool SrtWalkerSyncAllowed() {
     return t_srt_sync;
 }
 
+namespace {
+thread_local PFN_SrtLoadPtr t_srt_inner_load = nullptr;
+// uc3 R.21: records the page of each table pointer the walker loads (guest_base 0 is user data).
+SrtPtr PS4_SYSV_ABI RecordingSrtLoadPtr(const u8* host_base, u64 guest_base, u64 off) {
+    if (guest_base != 0 && t_srt_read_pages) {
+        t_srt_read_pages->push_back((guest_base + off) >> 12);
+        t_srt_read_pages->push_back((guest_base + off + 7) >> 12);
+    }
+    return t_srt_inner_load(host_base, guest_base, off);
+}
+} // namespace
+
 void RunSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat, size_t flat_dw,
                   bool sync, std::vector<SrtGpuLeaf>* leaves) {
     thread_local std::vector<u64> src;
     src.assign(flat_dw, 0);
     SrtWalkCtx ctx{g_srt_load_ptr.load(std::memory_order_relaxed), src.data()};
+    if (t_srt_read_pages) {
+        t_srt_inner_load = ctx.load_ptr;
+        ctx.load_ptr = RecordingSrtLoadPtr;
+    }
     const bool was_sync = t_srt_sync;
     t_srt_sync = sync;
     walker(user_data, flat, &ctx);
+    if (t_srt_read_pages) {
+        for (const u64 address : src) {
+            if (address) {
+                t_srt_read_pages->push_back(address >> 12);
+            }
+        }
+    }
     if (const auto fixup = g_srt_fixup.load(std::memory_order_relaxed)) {
         fixup(src.data(), flat, flat_dw, leaves);
     }

@@ -449,8 +449,21 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 prep_worker.stages.clear();
                 prep_worker.failed = false;
                 sel.draw_indirect_params = {};
+                prep_worker.read_pages.clear();
+                const u64 srt_snap = g_srt_write_seq.load(std::memory_order_acquire);
                 if (pipeline_cache.PrepareGraphicsPipeline(sel)) {
                     draw.reg_checksum = checksum;
+                    draw.srt_snap = srt_snap;
+                    draw.no_gpu_leaves = true;
+                    auto& pages = prep_worker.read_pages;
+                    std::sort(pages.begin(), pages.end());
+                    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
+                    if (pages.size() > draw.read_pages.size()) {
+                        draw.num_read_pages = 0xFF;
+                    } else {
+                        draw.num_read_pages = static_cast<u32>(pages.size());
+                        std::copy(pages.begin(), pages.end(), draw.read_pages.begin());
+                    }
                     draw.key = sel.graphics_key;
                     draw.num_stages = static_cast<u32>(prep_worker.stages.size());
                     for (u32 i = 0; i < draw.num_stages; ++i) {
@@ -463,8 +476,9 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                             .flat = arena.Append(*stage.flat),
                             .flat_size = static_cast<u32>(stage.flat->size()),
                         };
-                        PrepareResources(prep_worker.infos.at(stage.program), draw.stages[i],
-                                         arena);
+                        const auto& stage_info = prep_worker.infos.at(stage.program);
+                        draw.no_gpu_leaves = draw.no_gpu_leaves && stage_info.gpu_leaves.empty();
+                        PrepareResources(stage_info, draw.stages[i], arena);
                     }
                     draw.vertex.valid = false;
                     const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];

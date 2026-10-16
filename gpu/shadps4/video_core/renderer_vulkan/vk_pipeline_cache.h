@@ -119,6 +119,7 @@ struct PrepWorker {
     // Node-based: stages keep pointers to these Infos while later stages are inserted.
     std::unordered_map<const Program*, Shader::Info> infos;
     boost::container::static_vector<Stage, MaxShaderStages> stages;
+    std::vector<u64> read_pages; ///< R.21: guest pages the SRT walks read (unsorted)
     bool failed = false;
 };
 
@@ -139,6 +140,8 @@ public:
     void StartOnDemand();
     void Sync();
     void ReportCompilerStats();
+    /// uc3 R.20: GOW3_PREP_TRUST hit rate and divergences (GPU thread).
+    void ReportPrepTrust();
 
     bool LoadComputePipeline(Serialization::Archive& ar);
     bool LoadGraphicsPipeline(Serialization::Archive& ar);
@@ -154,6 +157,10 @@ public:
     /// gow3: GPU-thread side: the pipeline for a prepared draw after checking that registers
     /// and flattened user data match; null to take the regular path.
     const GraphicsPipeline* TryPreparedPipeline(const PreparedDraw& prepared);
+    void NotePrepTrustDivergence(const char* what, u64 hash, VAddr base);
+    u64 prep_trust_hits = 0, prep_trust_misses = 0, prep_trust_divergences = 0;
+    /// R.21 miss reasons: GPU leaves, wait/unnoted packet, big write, page write, too many pages.
+    u64 prep_trust_why[5]{};
 
     /// gow3: the prepared draw the last GetGraphicsPipeline used, or null (regular path).
     [[nodiscard]] const PreparedDraw* UsedPrepared() const noexcept {

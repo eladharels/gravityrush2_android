@@ -19,6 +19,7 @@
 #include "common/path_util.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
@@ -688,6 +689,35 @@ bool PipelineCache::PrepareGraphicsPipeline(PipelineSelection& worker_sel) {
     return RefreshGraphicsKey(worker_sel) && !worker_sel.worker->failed;
 }
 
+void PipelineCache::NotePrepTrustDivergence(const char* what, u64 hash, VAddr base) {
+    if (++prep_trust_divergences <= 20) {
+        std::printf("uc3 R.21 prep trust divergence: %s, shader %#llx at %#llx\n", what,
+                    static_cast<unsigned long long>(hash), static_cast<unsigned long long>(base));
+    }
+}
+
+void PipelineCache::ReportPrepTrust() {
+    if (prep_trust_hits + prep_trust_misses == 0) {
+        return;
+    }
+    u64 bumps[4];
+    for (u32 i = 0; i < 4; ++i) {
+        bumps[i] = g_srt_bumps[i].exchange(0, std::memory_order_relaxed);
+    }
+    using ull = unsigned long long;
+    std::printf("uc3 R.21 prep trust: %llu trusted, %llu not (GPU leaves %llu, wait/unnoted %llu, "
+                "big write %llu, page write %llu, too many pages %llu), %llu divergences (total); "
+                "stamps: waits %llu, page writes %llu, big writes %llu, unnoted packets %llu\n",
+                (ull)prep_trust_hits, (ull)prep_trust_misses, (ull)prep_trust_why[0],
+                (ull)prep_trust_why[1], (ull)prep_trust_why[2], (ull)prep_trust_why[3],
+                (ull)prep_trust_why[4], (ull)prep_trust_divergences, (ull)bumps[0],
+                (ull)bumps[1], (ull)bumps[2], (ull)bumps[3]);
+    prep_trust_hits = prep_trust_misses = 0;
+    for (auto& why : prep_trust_why) {
+        why = 0;
+    }
+}
+
 const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& prepared) {
     if (prepared.state.load(std::memory_order_acquire) != PreparedDraw::Ready ||
         prepared.reg_checksum != liverpool->gfx_reg_checksum) {
@@ -697,6 +727,54 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
     // everything read from guest memory for the specialization) must match as well. This is
     // the per-stage work GetProgram does on the regular path.
     const auto& regs = liverpool->regs;
+    // uc3 R.20/R.21 (GOW3_PREP_TRUST): with the same registers, no GPU-written dwords in the
+    // worker's walk and no write to the pages it read (nor a wait, nor a big write) since its
+    // snapshot, the worker's flattened user data stands: no shader footer search and no SRT
+    // walk here. =2 is the shadow mode: the regular check runs and is compared with what trust
+    // would have used.
+    static const int trust_mode = [] {
+        const char* env = std::getenv("GOW3_PREP_TRUST");
+        return env ? std::atoi(env) : 0;
+    }();
+    bool trusted = false;
+    if (trust_mode != 0) {
+        u32 why;
+        if (!prepared.no_gpu_leaves) {
+            why = 0;
+        } else if (prepared.num_read_pages > prepared.read_pages.size()) {
+            why = 4;
+        } else {
+            why = SrtChangedSince(prepared.srt_snap, prepared.read_pages.data(),
+                                  prepared.num_read_pages);
+        }
+        trusted = prepared.no_gpu_leaves && why == 0;
+        if (trusted) {
+            ++prep_trust_hits;
+        } else {
+            ++prep_trust_misses;
+            ++prep_trust_why[why];
+        }
+    }
+    if (trusted && trust_mode == 1) {
+        for (u32 i = 0; i < prepared.num_stages; ++i) {
+            const auto& stage = prepared.stages[i];
+            const auto* pgm = regs.ProgramForStage(static_cast<u32>(stage.hw_stage));
+            if (!pgm || pgm->Address<VAddr>() != stage.pgm_base) {
+                return nullptr;
+            }
+        }
+        for (u32 i = 0; i < prepared.num_stages; ++i) {
+            const auto& stage = prepared.stages[i];
+            const auto* pgm = regs.ProgramForStage(static_cast<u32>(stage.hw_stage));
+            auto& info = const_cast<Program*>(stage.program)->info;
+            info.pgm_base = stage.pgm_base;
+            info.user_data = std::span<const u32, Shader::ShaderParams::NumShaderUserData>{pgm->user_data};
+            info.flattened_ud_buf.assign(stage.flat, stage.flat + stage.flat_size);
+            info.gpu_leaves.clear();
+        }
+        const auto it = graphics_pipelines.find(prepared.key);
+        return it != graphics_pipelines.end() ? it->second.get() : nullptr;
+    }
     for (u32 i = 0; i < prepared.num_stages; ++i) {
         const auto& stage = prepared.stages[i];
         const auto* pgm = regs.ProgramForStage(static_cast<u32>(stage.hw_stage));
@@ -704,6 +782,9 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             return nullptr;
         }
         const auto params = AmdGpu::GetParams(*pgm);
+        if (trusted && (params.hash != stage.hash || params.Base() != stage.pgm_base)) {
+            NotePrepTrustDivergence("program", stage.hash, params.Base());
+        }
         if (params.hash != stage.hash) {
             return nullptr;
         }
@@ -714,7 +795,13 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         if (info.pgm_base != stage.pgm_base || info.flattened_ud_buf.size() != stage.flat_size ||
             std::memcmp(info.flattened_ud_buf.data(), stage.flat,
                         stage.flat_size * sizeof(u32)) != 0) {
+            if (trusted) {
+                NotePrepTrustDivergence("flat", stage.hash, info.pgm_base);
+            }
             return nullptr;
+        }
+        if (trusted && !info.gpu_leaves.empty()) {
+            NotePrepTrustDivergence("gpu leaves", stage.hash, info.pgm_base);
         }
     }
     const auto it = graphics_pipelines.find(prepared.key);
@@ -1225,11 +1312,14 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         // thread. A jump out of the specialization leaks its partial allocations (rare).
         sigjmp_buf recover;
         if (sigsetjmp(recover, 0)) {
+            Shader::t_srt_read_pages = nullptr;
             worker.failed = true;
             return {};
         }
         runtime_fault_recover = &recover;
+        Shader::t_srt_read_pages = &worker.read_pages;
         info.RefreshFlatBuf();
+        Shader::t_srt_read_pages = nullptr;
         auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
         runtime_fault_recover = nullptr;
         const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);

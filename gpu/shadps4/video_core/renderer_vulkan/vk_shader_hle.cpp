@@ -306,7 +306,10 @@ static bool CopyGuestThroughBacking(Rasterizer& rasterizer, VAddr dst, VAddr src
         return false;
     }
     rasterizer.NoteGuestWrite(dst, size);
-    return Core::Memory::Instance()->TryWriteBacking(reinterpret_cast<void*>(dst), backing, size);
+    const bool written =
+        Core::Memory::Instance()->TryWriteBacking(reinterpret_cast<void*>(dst), backing, size);
+    SrtNoteWrite(dst, size); // uc3 R.21: again once written
+    return written;
 }
 
 static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,

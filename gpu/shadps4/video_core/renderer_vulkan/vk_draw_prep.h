@@ -76,10 +76,64 @@ struct PreparedVertexInputs {
     bool valid;
 };
 
+/// uc3 R.20/R.21 (GOW3_PREP_TRUST): which guest memory changed since a prepared draw's worker
+/// walked its resource tables. Every command-stream write and every written binding of a draw
+/// or dispatch takes a sequence number and stamps the pages it covers (direct-mapped and
+/// untagged, so a collision only invalidates more). Writes over 64 pages and events that can
+/// release CPU-written data (waits) move the big/global stamps instead.
+inline constexpr u32 SrtPageSlots = 1u << 16;
+inline std::atomic<u64> g_srt_write_seq{0};
+inline std::atomic<u64> g_srt_global_seq{0};
+inline std::atomic<u64> g_srt_big_seq{0};
+inline std::atomic<u64> g_srt_page_seq[SrtPageSlots];
+/// Diagnostics: 0 waits (global), 1 page writes, 2 big writes, 3 packets that wrote without a
+/// noted range (global).
+inline std::atomic<u64> g_srt_bumps[4];
+inline void SrtGlobalEvent(u32 source = 0) noexcept {
+    const u64 seq = g_srt_write_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
+    g_srt_global_seq.store(seq, std::memory_order_release);
+    g_srt_bumps[source].fetch_add(1, std::memory_order_relaxed);
+}
+inline void SrtNoteWrite(u64 address, u64 size) noexcept {
+    if (size == 0) {
+        return;
+    }
+    const u64 seq = g_srt_write_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const u64 first = address >> 12, last = (address + size - 1) >> 12;
+    if (last - first >= 64) {
+        g_srt_big_seq.store(seq, std::memory_order_release);
+        g_srt_bumps[2].fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    for (u64 page = first; page <= last; ++page) {
+        g_srt_page_seq[page % SrtPageSlots].store(seq, std::memory_order_release);
+    }
+    g_srt_bumps[1].fetch_add(1, std::memory_order_relaxed);
+}
+/// 0: unchanged since `snap`; 1 a global event, 2 a big write, 3 a page write.
+inline u32 SrtChangedSince(u64 snap, const u64* pages, u32 count) noexcept {
+    if (g_srt_global_seq.load(std::memory_order_acquire) > snap) {
+        return 1;
+    }
+    if (g_srt_big_seq.load(std::memory_order_acquire) > snap) {
+        return 2;
+    }
+    for (u32 i = 0; i < count; ++i) {
+        if (g_srt_page_seq[pages[i] % SrtPageSlots].load(std::memory_order_acquire) > snap) {
+            return 3;
+        }
+    }
+    return 0;
+}
+
 struct PreparedDraw {
     enum : u32 { Pending = 0, Ready = 1, Unavailable = 2 };
     std::atomic<u32> state{Pending};
     u64 reg_checksum{};
+    u64 srt_snap{};        ///< R.21: g_srt_write_seq read before the worker's walk
+    bool no_gpu_leaves{};  ///< R.20: the worker's walk found no GPU-written dwords
+    u32 num_read_pages{};  ///< R.21: guest pages the walks read (0xFF: too many, untrusted)
+    std::array<u64, 24> read_pages{};
     GraphicsPipelineKey key{};
     u32 num_stages{};
     std::array<PreparedStage, MaxShaderStages> stages{};

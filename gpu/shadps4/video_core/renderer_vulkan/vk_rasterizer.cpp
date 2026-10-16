@@ -524,6 +524,7 @@ bool Rasterizer::RingDedupOn() {
 }
 
 void Rasterizer::NoteGuestWrite(VAddr address, u64 size) {
+    SrtNoteWrite(address, size);
     if (RingDedup() && size) {
         DedupNoteWrite(address, size);
     }
@@ -547,6 +548,7 @@ void Rasterizer::DedupNoteWrite(VAddr address, u64 size) {
 }
 
 void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
+    SrtNoteWrite(address, size);
     if (!draw_pipe || !size) {
         return;
     }
@@ -3660,6 +3662,7 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
             // Both buffers were not transferred to GPU yet. Can safely copy in host memory.
             NoteGuestWrite(dst, num_bytes);
             std::memcpy(std::bit_cast<void*>(dst), std::bit_cast<void*>(src), num_bytes);
+            SrtNoteWrite(dst, num_bytes); // uc3 R.21: again once written
             return;
         }
     }

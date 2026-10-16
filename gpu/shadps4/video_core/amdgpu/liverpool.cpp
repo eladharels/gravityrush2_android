@@ -565,6 +565,8 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             }
             memcpy(dump_const->Address<void*>(),
                    cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
+            // uc3 R.21: stamped again once written, for walks that read before the copy.
+            Vulkan::SrtNoteWrite(dump_const->Address<VAddr>(), dump_const->Size());
             break;
         }
         case PM4ItOpcode::IncrementCeCounter: {
@@ -899,6 +901,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // They may write guest memory: not before fences deferred earlier.
                 rasterizer->WaitDeferredSignals();
             }
+            const u64 srt_seq_before = Vulkan::g_srt_write_seq.load(std::memory_order_relaxed);
             switch (opcode) {
             case PM4ItOpcode::Nop: {
                 const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
@@ -1518,6 +1521,18 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
                                 static_cast<u32>(opcode), count);
             }
+            // uc3 R.21: a wait may release data the CPU wrote while the GPU waited; a packet
+            // that wrote guest memory without noting its range counts as a global change.
+            if (opcode == PM4ItOpcode::MemSemaphore || opcode == PM4ItOpcode::Rewind ||
+                opcode == PM4ItOpcode::WaitRegMem || opcode == PM4ItOpcode::WaitOnCeCounter) {
+                Vulkan::SrtGlobalEvent(0);
+            } else if ((opcode == PM4ItOpcode::DmaData || opcode == PM4ItOpcode::WriteData ||
+                        opcode == PM4ItOpcode::CopyData || opcode == PM4ItOpcode::EventWriteEop ||
+                        opcode == PM4ItOpcode::EventWriteEos ||
+                        opcode == PM4ItOpcode::ReleaseMem) &&
+                       Vulkan::g_srt_write_seq.load(std::memory_order_relaxed) == srt_seq_before) {
+                Vulkan::SrtGlobalEvent(3);
+            }
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
             break;
         }
@@ -1646,6 +1661,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
+        const u64 srt_seq_before = Vulkan::g_srt_write_seq.load(std::memory_order_relaxed);
         switch (opcode) {
         case PM4ItOpcode::Nop: {
             const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
@@ -1887,6 +1903,15 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         default:
             UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
                             static_cast<u32>(opcode), header->type3.NumWords());
+        }
+        // uc3 R.21: see ProcessGraphics.
+        if (opcode == PM4ItOpcode::MemSemaphore || opcode == PM4ItOpcode::Rewind ||
+            opcode == PM4ItOpcode::WaitRegMem) {
+            Vulkan::SrtGlobalEvent(0);
+        } else if ((opcode == PM4ItOpcode::DmaData || opcode == PM4ItOpcode::WriteData ||
+                    opcode == PM4ItOpcode::CopyData || opcode == PM4ItOpcode::ReleaseMem) &&
+                   Vulkan::g_srt_write_seq.load(std::memory_order_relaxed) == srt_seq_before) {
+            Vulkan::SrtGlobalEvent(3);
         }
 
         acb = NextPacket(acb, next_dw_off);

@@ -4,6 +4,23 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-16 (madrugada, 3) — R.20/R.21 confiança no pipeline preparado (`GOW3_PREP_TRUST`, desligado): correto, mas ~0% de acerto
+
+- Ideia (pesquisa, Opus): na etapa A, quando os registradores batem com os do worker de preparação, reaproveitar o `flattened_ud_buf` que o worker já calculou, sem refazer `GetParams` e o walker da SRT (~1,55 µs por draw).
+- R.20 usava uma época global, que mudava a cada escrita ou espera do command stream: ~0 acertos.
+- R.21 troca a época por uma tabela de páginas de 4 KiB (64k entradas, sem tag) com números de sequência:
+  - O worker anota as páginas que o walker lê.
+  - Escritas do CP, `NoteGuestWrite` e bindings gravados marcam as páginas que cobrem. Escritas acima de 64 páginas marcam um carimbo "grande".
+  - Esperas (`MemSemaphore`, `WaitRegMem`, `Rewind`, `WaitOnCeCounter`) e pacotes que escrevem sem anotar a faixa marcam um carimbo global.
+  - Cópias da CPU (`DumpConstRam`, `CopyBuffer` no host, HLE) marcam de novo depois de escrever.
+- Modo sombra (`GOW3_PREP_TRUST=2`, `medir_r920_sombra.bat`), Castelo (save 038):
+  - 60 FPS, imagem correta, 0 divergências.
+  - Porém ~0 acertos: todas as falhas vêm de evento global. Por segundo, são ~50 mil esperas e ~80 mil pacotes de escrita sem faixa anotada, contra ~115 mil draws.
+  - Como o worker prepara uma submissão à frente, quase sempre há uma espera no meio.
+- Fica no código, desligado por padrão (`=1` confia, `=2` sombra). Para dar resultado seria preciso anotar a faixa dos pacotes de escrita e não tratar toda espera como global. O Matheus pediu para parar as implementações novas, então isso fica para depois.
+
+---
+
 ## 2026-10-16 (madrugada, 2) — O quadro de 33 ms a cada 5 s vinha do relatório de diagnóstico: Castelo e ruas a 60 FPS cravados
 
 - Com `medir_r916b.bat` (= `medir_r916` sem `GOW3_PERF_DIAG`):

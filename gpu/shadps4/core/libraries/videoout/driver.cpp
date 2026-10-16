@@ -661,6 +661,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         frames ? double(Gow3Stats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(Gow3Stats::scene_draws.exchange(0)) / frames : 0.0);
             presenter->GetRasterizer().GetPipelineCache().ReportCompilerStats();
+            presenter->GetRasterizer().GetPipelineCache().ReportPrepTrust();
             Vulkan::WaitDiagnostics::Report();
             // Frame pacing: spread of the guest flip intervals (judder that the mean hides).
             if (intervals.size() > 2) {

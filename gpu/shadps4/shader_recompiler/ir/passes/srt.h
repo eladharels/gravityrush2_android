@@ -79,6 +79,9 @@ void SetSrtWalkerHooks(PFN_SrtLoadPtr load_ptr, PFN_SrtFixup fixup,
 /// Runs a walker. `sync` false: GPU-written bytes are not read back. `leaves`: see PFN_SrtFixup.
 void RunSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat, size_t flat_dw,
                   bool sync = true, std::vector<SrtGpuLeaf>* leaves = nullptr);
+/// uc3 R.21: while set on a thread, RunSrtWalker adds the guest pages it reads (table pointers
+/// and flattened leaves, 4 KiB pages) to this list (unsorted, may repeat).
+inline thread_local std::vector<u64>* t_srt_read_pages = nullptr;
 /// Reads one GPU-written dword back through the hook (or plainly when there is none).
 void SrtReadDword(u64 src, u32* out);
 /// True while the walker of this thread may read GPU-written bytes back.
