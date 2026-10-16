@@ -10,6 +10,7 @@
 #include <ranges>
 #include <string>
 #include <unordered_set>
+#include <x86intrin.h>
 #include "gow3_threads.h"
 
 #include "common/hash.h"
@@ -432,6 +433,13 @@ std::atomic<u64> g_gow3_compile_ns;
 std::atomic<u32> g_gow3_compiles;
 std::atomic<u64> g_gow3_capture_ns, g_gow3_async_ns, g_gow3_compile_wait_ns;
 std::atomic<u64> g_gow3_snapshot_ns, g_gow3_guest_wait_ns;
+// uc3: GOW3_STAGEB_PROFILE splits stage A's "A:gfx pipeline" step: [0] publish/pump cycles,
+// [1] prepared-pipeline check cycles, [2] calls.
+std::atomic<u64> g_gow3_gfx_pipe_split[3];
+static bool GfxPipeSplit() {
+    static const bool on = std::getenv("GOW3_STAGEB_PROFILE") != nullptr;
+    return on;
+}
 std::atomic<u32> g_gow3_pool_reuses;
 std::atomic<u32> g_gow3_pending_draws;
 namespace {
@@ -715,13 +723,24 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared) {
+    const bool split = GfxPipeSplit();
+    const u64 t0 = split ? __rdtsc() : 0;
     SeedWorkerCaches();
     PublishShaders();
     PublishGraphics();
     PumpWarmUp();
     used_prepared = nullptr;
+    const u64 t1 = split ? __rdtsc() : 0;
+    if (split) {
+        g_gow3_gfx_pipe_split[0].fetch_add(t1 - t0, std::memory_order_relaxed);
+        g_gow3_gfx_pipe_split[2].fetch_add(1, std::memory_order_relaxed);
+    }
     if (prepared) {
-        if (const auto* pipeline = TryPreparedPipeline(*prepared)) {
+        const auto* pipeline = TryPreparedPipeline(*prepared);
+        if (split) {
+            g_gow3_gfx_pipe_split[1].fetch_add(__rdtsc() - t1, std::memory_order_relaxed);
+        }
+        if (pipeline) {
             used_prepared = prepared;
             return pipeline;
         }

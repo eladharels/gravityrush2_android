@@ -4,6 +4,16 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-16 (madrugada, 2) — O quadro de 33 ms a cada 5 s vinha do relatório de diagnóstico: Castelo e ruas a 60 FPS cravados
+
+- Com `medir_r916b.bat` (= `medir_r916` sem `GOW3_PERF_DIAG`):
+  - Castelo (save 038): 60,0 FPS em todas as janelas depois de assentar, pior quadro ~18 ms, 0 quadros acima de 1,5x a mediana.
+  - Ruas (save 036): 60,0 na maioria das janelas, com um ou outro 59,4–59,6.
+- Com `GOW3_PERF_DIAG=1`, o relatório de 5 s (`Readback profile`, impresso sob o `readback_mutex` na thread da GPU, mais o perfil de esperas) causava um quadro de ~33 ms por janela. Sugestão da pesquisa (Opus). Para medir FPS, não use `PERF_DIAG`.
+- O perfil da etapa A (`GOW3_STAGEB_PROFILE=1`) agora divide o "A:gfx pipeline". No Castelo: publish/pump 0,04 µs por draw; checagem do pipeline preparado ~1,55 µs, que refaz o `GetParams` e o walker da SRT por estágio. É o alvo do R.20 (pesquisa), para dar folga.
+
+---
+
 ## 2026-10-16 (madrugada) — Esperas síncronas pela GPU: readback adiado de imagens no `gow3.ini` + leitura de buffer na fila de transferência (R.9.15/R.9.16, desligados); Castelo ~53 → 59,4–60 FPS
 
 Com `GOW3_PERF_DIAG=1` no Castelo (save 038), ~19% do tempo eram esperas síncronas pela GPU:

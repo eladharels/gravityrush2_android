@@ -1179,6 +1179,16 @@ void Rasterizer::PrintPipeStats() {
                         dedup_hits / seconds, dedup_misses / seconds, dedup_stale / seconds);
             dedup_hits = dedup_misses = dedup_stale = 0;
         }
+        {
+            extern std::atomic<u64> g_gow3_gfx_pipe_split[3];
+            const u64 pub = g_gow3_gfx_pipe_split[0].exchange(0, std::memory_order_relaxed);
+            const u64 chk = g_gow3_gfx_pipe_split[1].exchange(0, std::memory_order_relaxed);
+            const u64 calls = g_gow3_gfx_pipe_split[2].exchange(0, std::memory_order_relaxed);
+            if (calls) {
+                std::printf("  A:gfx pipeline split (us/draw): publish+pump %.2f, prepared check %.2f\n",
+                            seconds * 1e6 * pub / cycles / calls, seconds * 1e6 * chk / cycles / calls);
+            }
+        }
         std::printf("  stage B by step (%% of time, us/call):");
         for (u32 i = 0; i < SbCount; ++i) {
             const u64 c = stageb_cycles[i].exchange(0, std::memory_order_relaxed);
