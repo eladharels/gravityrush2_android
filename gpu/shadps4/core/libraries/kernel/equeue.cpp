@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <magic_enum/magic_enum.hpp>
 
@@ -22,7 +23,25 @@ namespace Libraries::Kernel {
 extern boost::asio::io_context io_context;
 extern void KernelSignalRequest();
 
-static std::unordered_map<s32, EqueueInternal*> kqueues;
+// uc3 (from Supermedo/uncharted_pc, GPL): guest threads create, look up and delete queues at
+// the same time; an unguarded map hung UC2 at startup. unordered_map nodes stay put on rehash,
+// so a slot reference outlives the lock (only erase invalidates it, as before).
+static struct LockedEqueues {
+    std::mutex mutex;
+    std::unordered_map<s32, EqueueInternal*> map;
+    bool contains(s32 eq) {
+        std::scoped_lock lock{mutex};
+        return map.contains(eq);
+    }
+    EqueueInternal*& operator[](s32 eq) {
+        std::scoped_lock lock{mutex};
+        return map[eq];
+    }
+    void erase(s32 eq) {
+        std::scoped_lock lock{mutex};
+        map.erase(eq);
+    }
+} kqueues;
 static constexpr auto HrTimerSpinlockThresholdNs = 1200000u;
 
 EqueueInternal* GetEqueue(OrbisKernelEqueue eq) {

@@ -337,6 +337,11 @@ enum class InterruptSelect : u32 {
     IrqUndocumented = 3,
 };
 
+/// uc3 (GOW3_TIMESTAMP_DIAG=1): statistics of the GPU timestamps written to guest labels.
+void NoteGpuTimestamp(u64 address, u64 value, bool perf_counter);
+/// uc3 (GOW3_READBACK_LABEL_GUARD=1): a label about to be written to guest memory.
+void NoteLabelWriteHook(u64 address, u64 size);
+
 static u64 GetGpuClock64() {
     auto now = std::chrono::high_resolution_clock::now();
     auto duration = now.time_since_epoch();
@@ -480,11 +485,11 @@ struct PM4CmdEventWriteEop {
             break;
         }
         case DataSelect::GpuClock64: {
-            write_mem(address, GetGpuClock64(), sizeof(u64));
+            { const u64 ts = GetGpuClock64(); NoteGpuTimestamp(reinterpret_cast<u64>(address), ts, false); write_mem(address, ts, sizeof(u64)); }
             break;
         }
         case DataSelect::PerfCounter: {
-            write_mem(address, GetGpuPerfCounter(), sizeof(u64));
+            { const u64 ts = GetGpuPerfCounter(); NoteGpuTimestamp(reinterpret_cast<u64>(address), ts, true); write_mem(address, ts, sizeof(u64)); }
             break;
         }
         default: {
@@ -953,6 +958,9 @@ struct PM4CmdReleaseMem {
     }
 
     void SignalFence(auto&& signal_irq, auto&& gds_to_mem) const {
+        if (data_sel.Value() != DataSelect::GdsMemStore) {
+            NoteLabelWriteHook(Address<u64>(), sizeof(u64));
+        }
         switch (data_sel.Value()) {
         case DataSelect::Data32Low: {
             *Address<u32*>() = DataDWord();
@@ -963,11 +971,11 @@ struct PM4CmdReleaseMem {
             break;
         }
         case DataSelect::GpuClock64: {
-            *Address<u64*>() = GetGpuClock64();
+            { const u64 ts = GetGpuClock64(); NoteGpuTimestamp(Address<u64>(), ts, false); *Address<u64*>() = ts; }
             break;
         }
         case DataSelect::PerfCounter: {
-            *Address<u64*>() = GetGpuPerfCounter();
+            { const u64 ts = GetGpuPerfCounter(); NoteGpuTimestamp(Address<u64>(), ts, true); *Address<u64*>() = ts; }
             break;
         }
         case DataSelect::GdsMemStore: {

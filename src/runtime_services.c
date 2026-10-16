@@ -711,6 +711,8 @@ static const RuntimeExport exports[]={
     {"sceNpLookupAbortRequest",ok_void}, {"sceNpLookupPollAsync",np_poll}, {"sceNpLookupNpId",np_signed_out},
     {"sceNpScoreCreateNpTitleCtx",np_request_ctx}, {"sceNpScoreDeleteNpTitleCtx",ok_void},
     {"sceNpScoreCreateRequest",np_request}, {"sceNpScoreDeleteRequest",ok_void}, {"sceNpScoreAbortRequest",ok_void},
+    /* UC2: score polling and peer net info, offline (NIDs m1DfNRstkSQ, zFgFHId7vAE). */
+    {"sceNpScorePollAsync",np_poll}, {"sceNpSignalingGetPeerNetInfo",np_signed_out},
     {"sceNpWebApiInitialize",lib_init_id}, {"sceNpWebApiTerminate",ok_void},
     {"sceNpWebApiCreateContext",np_signed_out},
     {"sceNpWebApiCreateRequest",np_signed_out}, {"sceNpWebApiSendRequest",np_signed_out},

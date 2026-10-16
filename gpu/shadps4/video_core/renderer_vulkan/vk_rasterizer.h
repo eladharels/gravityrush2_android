@@ -134,6 +134,13 @@ public:
     /// R.9.10, stage A: guest memory written right now, or by work handed to stage B, other
     /// than NotePendingGpuWrite's (HLE copies, CP host copies, DumpConstRam, compute labels).
     void NoteGuestWrite(VAddr address, u64 size);
+    /// uc3 (GOW3_HLE_COMPUTE_SAFE), stage A: a write handed to the recording thread and not
+    /// recorded yet overlaps the range.
+    bool HlePendingWrite(VAddr address, u64 size) {
+        return PendingWriteOverlaps(address, size);
+    }
+    /// uc3: stage A is running an asynchronous compute queue, not the graphics ring.
+    bool OnComputeQueue() const;
     /// R.9.12: waits for the constant ring copies queued so far (before a guest memory write).
     void WaitRingCopies() {
         if (ring_copier) {

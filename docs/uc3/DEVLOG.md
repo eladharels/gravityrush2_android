@@ -4,6 +4,38 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-16 (madrugada, 7) — UC1/UC2: primeiro boot; UC2 roda; vagão do trem cai cedo com compute pipe + readback assíncrono (toggles e diagnósticos novos, todos desligados)
+
+- **Preparação para UC1/UC2 (OK do Matheus).**
+  - `equeue.cpp`: o mapa de kqueues agora fica atrás de um mutex (`LockedEqueues`), como no uncharted_pc do SuperMedo (GPL).
+  - UC2: dois NIDs que faltavam resolvidos em `src/runtime_services.c`: `sceNpScorePollAsync` (`np_poll`) e `sceNpSignalingGetPeerNetInfo` (`np_signed_out`). `tools/nid_names.py` atualizado.
+  - Ajm (fim de job do áudio) ficou de fora por decisão do Matheus, até aparecer som faltando.
+- **Primeiro boot.**
+  - UC1 (`boot_uc1.bat`, eboot.bin): o menu da coletânea abre a 60 FPS, mas ao carregar o UC1 o jogo afirma `offsetTableIndex` (`GenerateOffset`, `TGenericOffsetPtr.h:100`) e depois lê `0xffff…` numa NdJobWorker, logo após montar o SAVEDATA01P. Log: `out/boot-uc1-assert.log`. Investigação pendente.
+  - UC2 (`boot_uc2.bat`, big2-ps4_Shipping.elf): roda, sem asserts nem faltas, 51–60 FPS, saves próprios (02P/020/0CC).
+- **Trem do prólogo do UC2: o vagão cai antes do Drake chegar.**
+  - Relógios conferidos (process_time e contador em CLOCK_MONOTONIC, 1e9); `engine_fps` não se aplica ao UC2.
+  - Bissecção do Matheus, com o critério final de **pular tarde** (pular cedo esconde o bug):
+    - sem toggles novos: passa;
+    - tudo ligado: falha;
+    - tudo menos compute pipe (`uc2_trem_I2_sem_compute_pipe.bat`): passa;
+    - tudo menos readback assíncrono/sideq (`uc2_trem_G2_sem_async.bat`): passa;
+    - tudo menos leaf copy, ou menos o readback rápido: falha.
+  - **Conclusão:** precisa de `GOW3_COMPUTE_PIPE` + `GOW3_READBACK_ASYNC` juntos.
+  - Cronômetro do Matheus num percurso fixo: 17,6 s (I2, passa) contra 17,2 s (tudo ligado, falha). O Drake anda igual; o que muda é o momento em que o vagão cai.
+- **Hipóteses testadas, todas atrás de toggles desligados:**
+  - `GOW3_HLE_READBACK_WAIT`: o HLE de cópia escalar espera readbacks da origem/destino e cai para a GPU se a origem foi escrita pela GPU. Não resolveu.
+  - `GOW3_HLE_COMPUTE_SAFE=1/2`: o HLE cai para a GPU com escrita pendente, ou vindo da fila de compute. Nunca agiu no UC2.
+  - `GOW3_READBACK_ASYNC_DRAIN`: a drenagem em `Rasterizer::ReadMemory` roda na thread que faltou, onde não faz nada (`!OnStageA`); agora drena na thread de comandos. Melhorou (3–4 de 7, pulando cedo), mas não resolve.
+  - `GOW3_READBACK_LABEL_GUARD`: um readback que chega atrasado não sobrescreve rótulos/fences escritos depois dele. Nunca agiu.
+  - `GOW3_READBACK_DIRTY_RETRY`: readback "sujo" (a GPU reescreveu a janela no meio) é lido de novo, síncrono. Agiu (~13 por partida), não resolveu.
+  - `GOW3_READBACK_ASYNC_ACB_SYNC`: faltas em janelas escritas pelo compute assíncrono (marcadas na etapa A) usam o caminho síncrono. Agiu (112 janelas, 2 mil leituras), não resolveu.
+  - `GOW3_TIMESTAMP_DIAG`: estatística dos timestamps de GPU escritos em rótulos. No UC2 são raros (marcadores de perfil, ~1/s por slot), iguais nos dois casos; não são a base de tempo do jogo.
+- **Para jogar o UC2 hoje:** `uc2_trem_I2_sem_compute_pipe.bat`.
+- **Próximo:** entender o que o compute pipe muda na ordem entre a fila de compute assíncrona e as leituras do jogo; a mesma família pode explicar a animação do UC3 que às vezes "volta um quadro".
+
+---
+
 ## 2026-10-16 (madrugada, 6) — Texturas trocadas: o HLE de cópia escalar agora avisa os caches (`GOW3_HLE_INVALIDATE`, desligado); aviso de espera presa da GPU
 
 - **Sintoma.** Com o `jogar_60`, o Matheus viu texturas trocadas de forma intermitente:

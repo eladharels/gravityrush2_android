@@ -671,6 +671,9 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         const u64 size = memory->ClampRangeSize(address, vsharp.GetSize());
         if (desc.is_written) {
             NotePendingGpuWrite(address, size);
+            if (OnComputeQueue()) {
+                buffer_cache.NoteAcbWrite(address, size);
+            }
             continue;
         }
         // The stream path of BufferCache::ObtainBuffer, taken here: small, read-only, not
@@ -1697,6 +1700,11 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
     ResetBindings(false);
     scheduler.KickRecording();
+}
+
+bool Rasterizer::OnComputeQueue() const {
+    return liverpool && liverpool->CurrentQueueId() >= 0 &&
+           static_cast<u32>(liverpool->CurrentQueueId()) != AmdGpu::Liverpool::GfxQueueId;
 }
 
 void Rasterizer::DispatchDirect() {

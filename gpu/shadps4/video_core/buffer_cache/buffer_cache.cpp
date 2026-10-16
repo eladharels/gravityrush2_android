@@ -26,6 +26,7 @@
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -76,6 +77,55 @@ std::optional<u32> FindMemoryType(const vk::PhysicalDeviceMemoryProperties& prop
     return std::nullopt;
 }
 
+namespace {
+BufferCache* label_guard_instance = nullptr;
+
+bool ReadbackLabelGuard() {
+    static const bool enabled = EmulatorSettingsImpl::Flag("GOW3_READBACK_LABEL_GUARD", false);
+    return enabled;
+}
+std::atomic<u64> label_guard_hits{0};
+} // namespace
+
+static bool ReadbackAcbSync() {
+    static const bool enabled = EmulatorSettingsImpl::Flag("GOW3_READBACK_ASYNC_ACB_SYNC", false);
+    return enabled;
+}
+
+void BufferCache::NoteAcbWrite(VAddr address, u64 size) {
+    if (!ReadbackAcbSync() || size == 0) {
+        return;
+    }
+    const VAddr first = address >> WriteTickShift;
+    const VAddr last = std::min<VAddr>((address + size - 1) >> WriteTickShift, first + 63);
+    for (VAddr window = first; window <= last; ++window) {
+        if (acb_windows[window % acb_windows.size()].exchange(window + 1, std::memory_order_relaxed) !=
+            window + 1) {
+            static std::atomic<u32> marked{0};
+            const u32 n = marked.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 4 || (n & 15) == 0) {
+                std::printf("uc3: async compute windows marked: %u\n", n);
+            }
+        }
+    }
+}
+
+void BufferCache::NoteLabelWrite(VAddr address, u64 size) {
+    auto* self = label_guard_instance;
+    if (!self || !ReadbackLabelGuard() || self->async_count.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+    std::scoped_lock lk{self->async_mutex};
+    for (const auto& entry : self->async_pending) {
+        for (const auto& copy : entry->copies) {
+            if (copy.address < address + size && address < copy.address + copy.size) {
+                entry->keep.emplace_back(address, size);
+                break;
+            }
+        }
+    }
+}
+
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                          Vulkan::Runtime& runtime_, AmdGpu::Liverpool* liverpool_,
                          TextureCache& texture_cache_, PageManager& tracker)
@@ -86,6 +136,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       stream_buffer{instance, scheduler, MemoryType::Stream, STREAM_BUFFER_SIZE},
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
       memory_semaphore{instance, "memory"} {
+    label_guard_instance = this;
     while (arena_page_bits > MIN_ARENA_PAGE_BITS &&
            (u64{2} << arena_page_bits) > instance.GetMaxBufferSize()) {
         --arena_page_bits;
@@ -529,7 +580,21 @@ static bool ReadbackAsync() {
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks,
                              bool from_fault) {
-    const bool async = from_fault && !assume_locks && ReadbackAsync();
+    bool async = from_fault && !assume_locks && ReadbackAsync();
+    if (async && ReadbackAcbSync()) {
+        // uc3: windows an async compute dispatch writes take the synchronous path: the command
+        // processor stays blocked instead of running ahead into the next frame's compute work
+        // (UC2 train: Drake fell behind with READBACK_ASYNC + COMPUTE_PIPE).
+        const VAddr window = device_addr >> WriteTickShift;
+        if (acb_windows[window % acb_windows.size()].load(std::memory_order_relaxed) == window + 1) {
+            async = false;
+            static std::atomic<u32> acb_sync{0};
+            const u32 n = acb_sync.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 3 || (n & 1023) == 0) {
+                std::printf("uc3: async compute window read synchronously: %u\n", n);
+            }
+        }
+    }
     if (!async) {
         (assume_locks ? Gow3Stats::uc3_rb_sync_gpu
          : is_write   ? Gow3Stats::uc3_rb_sync_write
@@ -538,6 +603,22 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }
     std::shared_ptr<AsyncReadback> pending;
     const auto flush_request = [this, device_addr, size, is_write, async, &pending] {
+        // uc3 (GOW3_READBACK_ASYNC_DRAIN=1): the drain in Rasterizer::ReadMemory runs on the
+        // faulting thread, where it does nothing. Work still queued for the recording thread
+        // (GOW3_COMPUTE_PIPE: async compute dispatches) is recorded after this copy and its
+        // writes are marked later; the UC2 train carriage fell early with READBACK_ASYNC +
+        // COMPUTE_PIPE + the scalar copy HLE. Drain here, on the command processor thread.
+        static const bool async_drain = EmulatorSettingsImpl::Flag("GOW3_READBACK_ASYNC_DRAIN", false);
+        if (async && async_drain) {
+            if (auto* rasterizer = liverpool->GetRasterizer()) {
+                static std::atomic<u32> drains{0};
+                const u32 n = drains.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 2 || (n & 4095) == 0) {
+                    std::printf("uc3: async readback drains: %u\n", n);
+                }
+                rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonRasterizer);
+            }
+        }
         if (ReadbackAll()) {
             WaitAsyncReadbacks(0, 0);
             DownloadAllGpuModified();
@@ -606,6 +687,23 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }
     if (pending) {
         CompleteAsyncReadback(*pending, device_addr, size, is_write);
+        // uc3 (GOW3_READBACK_DIRTY_RETRY=1): the GPU wrote the window after this copy was
+        // recorded, so the bytes that landed are an older generation (UC2 train: Drake fell
+        // behind with READBACK_ASYNC + COMPUTE_PIPE). Read it again, synchronously.
+        static const bool dirty_retry = EmulatorSettingsImpl::Flag("GOW3_READBACK_DIRTY_RETRY", false);
+        bool dirty;
+        {
+            std::scoped_lock lk{async_mutex};
+            dirty = pending->dirty;
+        }
+        if (dirty_retry && dirty) {
+            static std::atomic<u32> retries{0};
+            const u32 n = retries.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 3 || (n & 63) == 0) {
+                std::printf("uc3: dirty async readback read again: %u\n", n);
+            }
+            ReadMemory(device_addr, size, is_write, false, false);
+        }
     }
 }
 
@@ -788,10 +886,49 @@ void BufferCache::CompleteAsyncReadback(AsyncReadback& readback, VAddr device_ad
     }
     const auto& download = readback.download;
     download.buffer->Invalidate(download.offset, download.size);
-    for (const auto& copy : readback.copies) {
-        auto* dst_addr = std::bit_cast<u8*>(copy.address);
-        Gow3WriteLog::NoteDownload(copy.address, download.mapped + copy.staging_offset, copy.size);
-        memory->TryWriteBacking(dst_addr, download.mapped + copy.staging_offset, copy.size);
+    if (ReadbackLabelGuard()) {
+        // Labels written since this copy was recorded keep their newer bytes: the copy lands
+        // around them (under async_mutex, so a label noted later finds the entry gone).
+        std::scoped_lock lk{async_mutex};
+        for (const auto& copy : readback.copies) {
+            const u8* src = download.mapped + copy.staging_offset;
+            Gow3WriteLog::NoteDownload(copy.address, src, copy.size);
+            VAddr cursor = copy.address;
+            const VAddr end = copy.address + copy.size;
+            std::vector<std::pair<VAddr, u64>> holes;
+            for (const auto& [address, size] : readback.keep) {
+                if (address < end && cursor < address + size) {
+                    holes.emplace_back(std::max(address, copy.address),
+                                       std::min(address + size, end));
+                }
+            }
+            std::ranges::sort(holes);
+            for (const auto& [begin, hole_end] : holes) {
+                if (begin > cursor) {
+                    memory->TryWriteBacking(std::bit_cast<u8*>(cursor), src + (cursor - copy.address),
+                                            begin - cursor);
+                }
+                cursor = std::max(cursor, hole_end);
+                label_guard_hits.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (cursor < end) {
+                memory->TryWriteBacking(std::bit_cast<u8*>(cursor), src + (cursor - copy.address),
+                                        end - cursor);
+            }
+        }
+        const u64 hits = label_guard_hits.load(std::memory_order_relaxed);
+        static u64 printed = 0;
+        if (hits && (hits >> 6) != (printed >> 6)) {
+            printed = hits;
+            std::printf("uc3: async readback label guard: %llu labels kept\n",
+                        static_cast<unsigned long long>(hits));
+        }
+    } else {
+        for (const auto& copy : readback.copies) {
+            auto* dst_addr = std::bit_cast<u8*>(copy.address);
+            Gow3WriteLog::NoteDownload(copy.address, download.mapped + copy.staging_offset, copy.size);
+            memory->TryWriteBacking(dst_addr, download.mapped + copy.staging_offset, copy.size);
+        }
     }
     {
         std::scoped_lock lk{async_mutex};

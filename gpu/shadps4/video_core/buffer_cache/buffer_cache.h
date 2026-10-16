@@ -60,6 +60,13 @@ public:
                          TextureCache& texture_cache, PageManager& tracker);
     ~BufferCache();
 
+    /// uc3 (GOW3_READBACK_LABEL_GUARD=1): a label or fence the command processor writes to
+    /// guest memory; async readbacks still in flight must not land over it with older bytes.
+    static void NoteLabelWrite(VAddr address, u64 size);
+    /// uc3 (GOW3_READBACK_ASYNC_ACB_SYNC=1), stage A: a dispatch from an async compute queue
+    /// will write this range; read faults in its 512 KiB windows take the synchronous path.
+    void NoteAcbWrite(VAddr address, u64 size);
+
     /// Returns a pointer to GDS device local buffer.
     [[nodiscard]] const Buffer* GetGdsBuffer() const noexcept {
         return &gds_buffer;
@@ -119,6 +126,10 @@ public:
     /// guest memory yet (gpu_modified_ranges, or an async readback still landing). GPU-side
     /// threads only.
     [[nodiscard]] bool IsGpuWritten(VAddr addr, u64 size);
+    /// uc3: lets async readbacks overlapping [addr, addr + size) land in guest memory.
+    void WaitReadbacksLanded(VAddr addr, u64 size) {
+        WaitAsyncReadbacks(addr, addr + size);
+    }
     /// uc3 (trace): "gpu_modified_ranges [start, end)", "async readback" or "image readback".
     const char* DescribeGpuWritten(VAddr addr, u64 size);
     /// uc3 (Fable R.8.4): stage B, next to a leaf's GPU copy into the constant ring: also
@@ -234,6 +245,7 @@ private:
     };
     static constexpr u64 WriteTickShift = 19;
     std::array<WriteTick, 4096> write_ticks{};
+    std::array<std::atomic<u64>, 4096> acb_windows{}; ///< window index + 1, async compute writers
     /// Writes too large to note per window (whole arenas) raise this instead.
     std::atomic<u64> big_write_tick{};
     void NoteGpuWrite(VAddr device_addr, u64 size);
@@ -272,6 +284,7 @@ private:
         };
         std::vector<Copy> copies;
         bool dirty{};                 ///< guarded by async_mutex
+        std::vector<std::pair<VAddr, u64>> keep; ///< label bytes not to overwrite (async_mutex)
         std::atomic<bool> done{};
         u32 side_slot{~0u};           ///< R.9.6: copied on the side queue, waits on this slot
     };

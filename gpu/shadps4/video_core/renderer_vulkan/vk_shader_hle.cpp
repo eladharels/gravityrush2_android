@@ -385,6 +385,41 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
         return reject("mapping");
     }
     auto& buffer_cache = rasterizer.GetBufferCache();
+    // uc3 (GOW3_HLE_READBACK_WAIT=1): an async buffer readback clears the source's GPU marks when
+    // it starts, before its bytes land in guest memory. Copying in between takes stale data and
+    // skips the dispatch (UC2: the train carriage fell early with READBACK_ASYNC + this HLE).
+    // Let overlapping readbacks land first; a source still GPU-written keeps the dispatch.
+    static const bool readback_wait = [] {
+        const char* env = std::getenv("GOW3_HLE_READBACK_WAIT");
+        return env && env[0] == '1';
+    }();
+    if (readback_wait) {
+        // The destination too: a readback landing after the copy would overwrite it.
+        buffer_cache.WaitReadbacksLanded(src.base_address, size);
+        buffer_cache.WaitReadbacksLanded(dst.base_address, size);
+    }
+    // uc3 (GOW3_HLE_COMPUTE_SAFE): the UC2 train carriage still fell early with this HLE,
+    // GOW3_COMPUTE_PIPE and the async readbacks all on (any two of them pass).
+    // 1: a write handed to the recording thread and not recorded yet overlaps the source or the
+    // destination: the dispatch runs. 2: also every copy issued from an async compute queue.
+    static const int compute_safe = [] {
+        const char* env = std::getenv("GOW3_HLE_COMPUTE_SAFE");
+        return env ? std::atoi(env) : 0;
+    }();
+    if (compute_safe) {
+        static std::atomic<u32> pending_hits{0}, queue_hits{0};
+        const bool pending = rasterizer.HlePendingWrite(src.base_address, size) ||
+                             rasterizer.HlePendingWrite(dst.base_address, size);
+        if (pending || (compute_safe >= 2 && rasterizer.OnComputeQueue())) {
+            const u32 n = (pending ? pending_hits : queue_hits).fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 3 || (n & 4095) == 0) {
+                std::printf("uc3: scalar copy HLE compute safe: %u pending-write fallbacks, %u "
+                            "async compute queue fallbacks\n",
+                            pending_hits.load(), queue_hits.load());
+            }
+            return false;
+        }
+    }
     static const bool depth_sync = [] {
         const char* env = std::getenv("GOW3_DEPTH_COPY_SYNC");
         return !(env && env[0] == '0');
@@ -418,6 +453,10 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
         } else {
             report(gpu_only, "GPU copy only");
         }
+        return false;
+    }
+    if (readback_wait && buffer_cache.IsGpuWritten(src.base_address, size)) {
+        report(gpu_only, "GPU copy only (source GPU-written)");
         return false;
     }
     if (!CopyGuestThroughBacking(rasterizer, dst.base_address, src.base_address, size)) {

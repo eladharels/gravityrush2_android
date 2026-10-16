@@ -171,6 +171,11 @@ public:
         gfx_queue.dcb_buffer.reserve(GfxReservedSize);
     }
 
+    /// uc3: the queue the command processor is running (GfxQueueId for the graphics ring).
+    s32 CurrentQueueId() const {
+        return curr_qid;
+    }
+
     inline ComputeProgram& GetCsRegs() {
         return mapped_queues[curr_qid].cs_state;
     }

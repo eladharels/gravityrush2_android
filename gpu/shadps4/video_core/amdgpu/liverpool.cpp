@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <mutex>
+#include <unordered_map>
 #include <pthread.h>
 #ifndef _WIN32
 #include <sys/resource.h>
@@ -30,6 +32,58 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 namespace AmdGpu {
+
+void NoteLabelWriteHook(u64 address, u64 size) {
+    VideoCore::BufferCache::NoteLabelWrite(address, size);
+}
+
+void NoteGpuTimestamp(u64 address, u64 value, bool perf_counter) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_TIMESTAMP_DIAG");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    struct Entry {
+        u64 previous = 0, count = 0, sum = 0, min = ~0ULL, max = 0;
+        bool perf = false;
+    };
+    static std::mutex mutex;
+    static std::unordered_map<u64, Entry> entries;
+    static auto last_print = std::chrono::steady_clock::now();
+    std::scoped_lock lk{mutex};
+    auto& e = entries[address];
+    e.perf = perf_counter;
+    if (e.previous && value > e.previous) {
+        const u64 delta = value - e.previous;
+        ++e.count;
+        e.sum += delta;
+        e.min = std::min(e.min, delta);
+        e.max = std::max(e.max, delta);
+    }
+    e.previous = value;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_print < std::chrono::seconds(1)) {
+        return;
+    }
+    last_print = now;
+    // Deltas in ms: the clock is ns; the perf counter runs at the GPU core clock.
+    const double perf_ms = 1000.0 / double(Libraries::GnmDriver::sceGnmGetGpuCoreClockFrequency());
+    int printed = 0;
+    for (auto& [addr, entry] : entries) {
+        if (entry.count && printed++ < 8) {
+            const double unit = entry.perf ? perf_ms : 1e-6;
+            std::printf("uc3: GPU timestamp %#llx (%s): %llu writes/s, delta avg %.3f ms, min %.3f, "
+                        "max %.3f\n",
+                        static_cast<unsigned long long>(addr), entry.perf ? "perf" : "clock",
+                        static_cast<unsigned long long>(entry.count), entry.sum * unit / entry.count,
+                        entry.min * unit, entry.max * unit);
+        }
+        entry.count = entry.sum = entry.max = 0;
+        entry.min = ~0ULL;
+    }
+}
 
 static const char* dcb_task_name{"DCB_TASK"};
 static const char* ccb_task_name{"CCB_TASK"};
@@ -286,6 +340,7 @@ void SignalEop(const PM4CmdEventWriteEop& eop) {
         [](void* address, u64 data, u32 num_bytes) {
             auto* memory = Core::Memory::Instance();
             Gow3WriteLog::Note(reinterpret_cast<u64>(address), &data, num_bytes, Gow3WriteLog::Fence);
+            VideoCore::BufferCache::NoteLabelWrite(reinterpret_cast<VAddr>(address), num_bytes);
             if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                 memcpy(address, &data, num_bytes);
             }
@@ -382,6 +437,7 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
     event_eos.SignalFence([](void* address, u64 value, u32 num_bytes) {
         auto* memory = Core::Memory::Instance();
         Gow3WriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, Gow3WriteLog::Fence);
+        VideoCore::BufferCache::NoteLabelWrite(reinterpret_cast<VAddr>(address), num_bytes);
         if (!memory->TryWriteBacking(address, &value, num_bytes)) {
             memcpy(address, &value, num_bytes);
         }
@@ -407,6 +463,7 @@ void SignalReleaseMem(Vulkan::Rasterizer& rasterizer, const ReleaseMemTask& task
         void* address = packet.Address<void*>();
         Gow3WriteLog::Note(reinterpret_cast<u64>(address), &value, sizeof(value),
                            Gow3WriteLog::Fence);
+        VideoCore::BufferCache::NoteLabelWrite(reinterpret_cast<VAddr>(address), sizeof(value));
         if (!Core::Memory::Instance()->TryWriteBacking(address, &value, sizeof(value))) {
             std::memcpy(address, &value, sizeof(value));
         }
@@ -419,10 +476,10 @@ void SignalReleaseMem(Vulkan::Rasterizer& rasterizer, const ReleaseMemTask& task
         write(packet.DataQWord());
         break;
     case DataSelect::GpuClock64:
-        write(GetGpuClock64());
+        { const u64 ts = GetGpuClock64(); NoteGpuTimestamp(packet.Address<u64>(), ts, false); write(ts); }
         break;
     case DataSelect::PerfCounter:
-        write(GetGpuPerfCounter());
+        { const u64 ts = GetGpuPerfCounter(); NoteGpuTimestamp(packet.Address<u64>(), ts, true); write(ts); }
         break;
     case DataSelect::GdsMemStore:
         rasterizer.CopyBuffer(packet.Address<VAddr>(), packet.gds_index,
