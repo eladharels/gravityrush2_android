@@ -24,20 +24,53 @@ vem do [port do Bloodborne para Windows](https://github.com/Supermedo/bloodborne
 do [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) original do deadinside28. Por
 isso muitos nomes ainda começam com `gow3` / `GOW3_` (o executável é `gow3-probe.exe`).
 
+## Por que este projeto
+
+A ideia inicial era portar só o **Uncharted 3**, o único da trilogia que eu ainda não tinha jogado e também o que o shadPS4 tem mais
+dificuldade de rodar.
+Como os três jogos da coletânea usam o mesmo motor e o mesmo dump, o Uncharted 2 e o Uncharted 1
+vieram depois quase de graça, e agora o objetivo é a trilogia inteira.
+
 ## Situação
+
+Atualizado em 16/10/2026.
 
 | Jogo | Executável | Situação |
 |---|---|---|
-| Uncharted 3 | `big3-ps4_Shipping.elf` | Jogável; **60 FPS** no Castelo, nas ruas e no museu de Cartagena com as otimizações de `windows\jogar_uc3.bat` |
-| Uncharted 2 | `big2-ps4_Shipping.elf` | Jogável (51–60 FPS), com saves próprios. Use `windows\jogar_uc2.bat` |
-| Uncharted 1 | `eboot.bin` | Abre e roda a 60 FPS (`windows\jogar_uc1.bat`); pouco testado |
+| Uncharted 1 | `eboot.bin` | Roda a **60 FPS**, com som (inclusive os tiros); pouco testado além do começo |
+| Uncharted 2 | `big2-ps4_Shipping.elf` | Jogável, 51–60 FPS, com saves próprios |
+| Uncharted 3 | `big3-ps4_Shipping.elf` | Jogável a **60 FPS cravados** (Castelo, ruas e museu de Cartagena), sem bugs visuais conhecidos. **Vou terminar o UC3 hoje**, jogando do início ao fim no port |
 
-Problemas conhecidos: alguns sons do motor (Ajm) faltam; no prólogo do trem do UC2 o vagão cai
-cedo demais se `GOW3_COMPUTE_PIPE=1`; defeitos do núcleo que o shadPS4 também tem (cabelo branco
-depois de carregar checkpoint, pontos de poeira). Escala de resolução interna (FSR/DLSS) não
-funciona no Uncharted: os ganchos herdados são específicos do God of War III.
+O que foi resolvido no UC3 nos últimos dias: cabelo branco do Drake jovem (`BUFFER_LOAD` com addr64),
+texturas trocadas (colete do barman, piso do museu, porta do banheiro) e o desempenho, que saiu de
+18–24 FPS nas ruas e no castelo para 60.
+
+Problemas conhecidos:
+- **UC2:** no prólogo do trem, com `GOW3_COMPUTE_PIPE=1`, o vagão cai cedo demais. Por isso o UC2 roda
+  sem essa opção. A investigação está pausada.
+- **UC1 e UC2:** pouco testados. Avise se faltar algum som ou aparecer algum defeito.
+- Escala de resolução interna (FSR/DLSS) não funciona no Uncharted: os ganchos herdados são
+  específicos do God of War III.
 
 O diário do projeto, com o que foi feito e por quê, está em [docs/uc3/DEVLOG.md](docs/uc3/DEVLOG.md).
+
+## Diferença para o uncharted_pc do Supermedo
+
+O [uncharted_pc](https://github.com/Supermedo/uncharted_pc) do Supermedo é outro port nativo da mesma
+coletânea, também GPL e da mesma família (os dois descendem do bloodborne_pc do deadinside28). Os dois
+foram feitos em paralelo, e este aqui aproveitou várias correções dele, sempre com crédito (ver
+[Créditos](#créditos)). A comparação abaixo é com a versão 0.3.1 dele (15/10/2026):
+
+| | Este port (ucndc_pc) | uncharted_pc (Supermedo) |
+|---|---|---|
+| Origem | Fork do port do God of War III (gow3_pc) | Fork direto do bloodborne_pc (bbport) |
+| Núcleo de vídeo | shadPS4 0.19.0 com correções da nightly de 12/10 (rastreador de memória, cache de texturas) | shadPS4 de 24/09 com backports do recompilador |
+| Leituras da GPU pelo jogo | Modo **preciso** (o cenário é desenhado com os dados certos), acelerado para chegar a 60 FPS: leituras assíncronas, fila lateral, envio adiantado, cópias do ring em outra thread | Modo **relaxado** por padrão, contornando o problema com a HLE da cópia escalar |
+| Como as otimizações entram | Cada uma atrás de uma opção, **desligada por padrão**, medida e registrada no [DEVLOG](docs/uc3/DEVLOG.md) | Ligadas por padrão, com opções para desligar |
+| Outras diferenças nossas | Barreiras justas em buffers formatados, hash completo de imagens pequenas, MP3 no Ajm, ferramentas de diagnóstico (perfil de GPU, rastreio de faltas e escritas) | — |
+| O que ele tem e este ainda não | — | Upscalers e geração de quadros, opção de 120 FPS, mouse no UC3, menu da coletânea pelo `eboot.bin` |
+
+Os dois projetos se ajudam: se algo funciona lá e não aqui (ou o contrário), vale comparar.
 
 ## Requisitos
 
@@ -106,6 +139,8 @@ conjunto testado. As principais:
 | `GOW3_FRAME_STATS` | Estatísticas de quadro no log |
 | `GOW3_EXECUTABLE` | Qual jogo abrir (`big3-ps4_Shipping.elf`, `big2-ps4_Shipping.elf`, `eboot.bin`) |
 | `GOW3_LOW_IMAGE` | Carrega o executável abaixo de 2 GB (necessário no UC1) |
+| `GOW3_AJM_END_RULES` | Regras de fim de job do Ajm (decodificador de áudio), do SuperMedo (UC1) |
+| `GOW3_EOP_TICK_WAIT` | O assert `m_gfxEopTick` espera a GPU em vez de parar o jogo |
 
 A lista completa, com medições, está no [DEVLOG](docs/uc3/DEVLOG.md).
 
@@ -115,11 +150,13 @@ A lista completa, com medições, está no [DEVLOG](docs/uc3/DEVLOG.md).
   original (a base de tudo, também chamada de bbport).
 - **Supermedo** (Mohammed Albarghouthi): o [port do Bloodborne para Windows](https://github.com/Supermedo/bloodborne_pc)
   e o [uncharted_pc](https://github.com/Supermedo/uncharted_pc), de onde vieram ideias e correções
-  (HLE da cópia escalar de constantes, `BUFFER_LOAD` com addr64, regras de fim de job do Ajm, limite
-  de quadros à frente).
+  (HLE da cópia escalar de constantes, `BUFFER_LOAD` com addr64, regras de fim de job do Ajm, patch de espera do
+  `m_gfxEopTick` da 0.3.2, abertura com `O_CREAT` em pasta somente leitura para o som do UC1).
 - **Felipe Prado** e colaboradores: [gow3_pc](https://github.com/FelipePrado0/gow3_pc), o port do
   God of War III do qual este repositório é fork, com as correções de renderização do
   [cuesta4](https://github.com/cuesta4/shadPS4/tree/eltutz).
+- **Mindro** (ManoharPadul): a [build do shadPS4 para a coletânea Uncharted](https://github.com/ManoharPadul/ShadPS4),
+  cujas notas de versão mostraram quais problemas procurar (cache de texturas, configurações recomendadas).
 - **Equipe do shadPS4**: o núcleo de vídeo [shadPS4](https://github.com/shadps4-emu/shadPS4), que
   faz toda a tradução de GPU e shaders para Vulkan.
 

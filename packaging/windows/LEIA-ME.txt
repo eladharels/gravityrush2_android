@@ -1,0 +1,59 @@
+Uncharted: The Nathan Drake Collection para PC (ucndc_pc)
+=========================================================
+[English below]
+
+Port não oficial. Nenhum arquivo do jogo vem neste pacote: você precisa do dump do seu
+próprio PS4 (testado: CUSA02344 com a atualização 01.02).
+
+Requisitos
+- Windows 10 (1903 ou mais novo) ou 11, 64 bits.
+- Placa de vídeo com Vulkan 1.3 e driver atualizado.
+  Mais nada: não precisa instalar Python, MSYS2 nem abrir terminal.
+
+Como jogar
+1. Extraia esta pasta para qualquer lugar, por exemplo C:\Jogos\ucndc_pc (não rode de dentro do zip).
+2. Abra "Uncharted Launcher.exe". Se o Windows mostrar "O Windows protegeu o computador",
+   clique em "Mais informações" e depois em "Executar assim mesmo": o programa não é assinado.
+3. Em "Pasta do jogo", escolha a pasta do dump (a que tem eboot.bin e big3-ps4_Shipping.elf).
+   Se a atualização estiver ao lado (por exemplo CUSA02344-UPDATE), ela é encontrada sozinha.
+4. Clique em JOGAR no jogo que quiser. A primeira vez demora mais e pode engasgar um pouco
+   enquanto os shaders são criados; depois fica liso.
+
+Situação
+- Uncharted 1: experimental.
+- Uncharted 2: jogável.
+- Uncharted 3: jogável, 60 FPS.
+
+Durante o jogo
+- Insert no teclado, ou R3 + L2 no controle, abre o menu do port.
+- "Atalho na área de trabalho" cria um atalho que abre direto o último jogo escolhido.
+
+Dados
+- Saves, cache de shaders e o log ficam em user\ (guarde essa pasta ao atualizar).
+- Configurações: gow3.ini e launcher.json, nesta pasta.
+
+Problemas
+- O jogo não abre ou fecha sozinho: clique em "Log" no launcher e, ao relatar, envie
+  o arquivo user\last_run.log.
+
+Uncharted é marca registrada da Sony Interactive Entertainment. Este projeto não tem
+relação com a Sony, a Naughty Dog ou a Bluepoint Games. Licença: GPL v2 ou posterior
+(LICENSE). Código-fonte e créditos: veja o repositório do projeto.
+
+---------------------------------------------------------------------------------------------
+
+Unofficial port. No game files are included: you need a dump of your own PS4
+(tested: CUSA02344 with the 01.02 update).
+
+Requirements: 64-bit Windows 10 (1903+) or 11 and a Vulkan 1.3 GPU with a current driver.
+Nothing else to install.
+
+How to play
+1. Extract this folder anywhere (not inside the zip).
+2. Open "Uncharted Launcher.exe" (if SmartScreen appears: More info, Run anyway).
+3. Pick the game folder of your dump (the one with eboot.bin and big3-ps4_Shipping.elf); an
+   update folder next to it (such as CUSA02344-UPDATE) is found automatically.
+4. Click PLAY on a game. The first start is slower and may stutter while shaders are built.
+
+In game, Insert (or R3 + L2) opens the port menu. Saves, shader cache and the log are in
+user\. When reporting a problem, send user\last_run.log.

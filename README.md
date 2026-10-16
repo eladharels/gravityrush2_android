@@ -24,21 +24,55 @@ which comes from Supermedo's [Bloodborne Windows port](https://github.com/Superm
 and deadinside28's original [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc). That is
 why many names still start with `gow3` / `GOW3_` (the executable is `gow3-probe.exe`).
 
+## Why this project
+
+The original idea was to port only **Uncharted 3**, the one game in the trilogy I had never played and also the one
+shadPS4 has the most trouble running.
+Since the three games in the collection share the same engine and the same dump, Uncharted 2 and
+Uncharted 1 came later almost for free, and the goal is now the whole trilogy.
+
 ## Status
+
+Updated 2026-10-16.
 
 | Game | Executable | Status |
 |---|---|---|
-| Uncharted 3 | `big3-ps4_Shipping.elf` | Playable; **60 FPS** in the Chateau, the Cartagena streets and the museum with the optimizations in `windows\jogar_uc3.bat` |
-| Uncharted 2 | `big2-ps4_Shipping.elf` | Playable (51–60 FPS), with its own saves. Use `windows\jogar_uc2.bat` |
-| Uncharted 1 | `eboot.bin` | Boots and runs at 60 FPS (`windows\jogar_uc1.bat`); lightly tested |
+| Uncharted 1 | `eboot.bin` | Runs at **60 FPS** with sound (gunshots included); lightly tested past the start |
+| Uncharted 2 | `big2-ps4_Shipping.elf` | Playable, 51–60 FPS, with its own saves |
+| Uncharted 3 | `big3-ps4_Shipping.elf` | Playable at a **locked 60 FPS** (the Chateau, the Cartagena streets and the museum), no known visual bugs. **I'm finishing UC3 today**, playing it start to end on the port |
 
-Known issues: some engine sounds (Ajm) are missing; in the Uncharted 2 train prologue the carriage
-falls too early with `GOW3_COMPUTE_PIPE=1`; core bugs shadPS4 also has (white hair after loading a
-checkpoint, dust dots). Internal resolution scaling (FSR/DLSS) does not work for Uncharted: the
-inherited hooks are specific to God of War III.
+Fixed in UC3 over the last few days: young Drake's white hair (addr64 `BUFFER_LOAD`), swapped
+textures (bartender's vest, museum floor, bathroom door) and performance, which went from 18–24 FPS
+in the streets and the Chateau to 60.
+
+Known issues:
+- **UC2:** in the train prologue, with `GOW3_COMPUTE_PIPE=1`, the carriage falls too early, so UC2
+  runs without that option. The investigation is paused.
+- **UC1 and UC2:** lightly tested. Please report missing sounds or visual bugs.
+- Internal resolution scaling (FSR/DLSS) does not work for Uncharted: the inherited hooks are
+  specific to God of War III.
 
 The project log (in Portuguese), with what was done and why, is in
 [docs/uc3/DEVLOG.md](docs/uc3/DEVLOG.md).
+
+## How this differs from Supermedo's uncharted_pc
+
+Supermedo's [uncharted_pc](https://github.com/Supermedo/uncharted_pc) is another native port of the
+same collection, also GPL and from the same family (both descend from deadinside28's bloodborne_pc).
+The two were made in parallel, and this one took several of its fixes, always credited (see
+[Credits](#credits)). Compared with its version 0.3.1 (2026-10-15):
+
+| | This port (ucndc_pc) | uncharted_pc (Supermedo) |
+|---|---|---|
+| Origin | Fork of the God of War III port (gow3_pc) | Direct fork of bloodborne_pc (bbport) |
+| Video core | shadPS4 0.19.0 with fixes from the 2026-10-12 nightly (memory tracker, texture cache) | shadPS4 from 2026-09-24 with recompiler backports |
+| GPU readbacks by the game | **Precise** mode (the scenery is drawn from the right data), sped up to reach 60 FPS: async readbacks, side queue, early submits, ring copies on another thread | **Relaxed** mode by default, working around the problem with the scalar copy HLE |
+| How optimizations land | Each behind an option, **off by default**, measured and logged in the [DEVLOG](docs/uc3/DEVLOG.md) | On by default, with options to turn them off |
+| Other things this port has | Tight barriers on formatted buffers, full hash of small images, MP3 in Ajm, diagnostic tools (GPU profile, fault and write tracing) | — |
+| What it has that this one does not yet | — | Upscalers and frame generation, 120 FPS option, mouse in UC3, collection menu through `eboot.bin` |
+
+The two projects help each other: when something works there and not here (or the other way round),
+comparing them is worth it.
 
 ## Requirements
 
@@ -107,6 +141,8 @@ turn on the tested set. The main ones:
 | `GOW3_FRAME_STATS` | Frame statistics in the log |
 | `GOW3_EXECUTABLE` | Which game to start (`big3-ps4_Shipping.elf`, `big2-ps4_Shipping.elf`, `eboot.bin`) |
 | `GOW3_LOW_IMAGE` | Loads the executable below 2 GB (needed for Uncharted 1) |
+| `GOW3_AJM_END_RULES` | Ajm (audio decoder) end-of-job rules, from SuperMedo (Uncharted 1) |
+| `GOW3_EOP_TICK_WAIT` | The `m_gfxEopTick` assert waits for the GPU instead of stopping the game |
 
 The full list, with measurements, is in the [DEVLOG](docs/uc3/DEVLOG.md).
 
@@ -116,10 +152,12 @@ The full list, with measurements, is in the [DEVLOG](docs/uc3/DEVLOG.md).
   native port (the base of everything, also called bbport).
 - **Supermedo** (Mohammed Albarghouthi): the [Bloodborne Windows port](https://github.com/Supermedo/bloodborne_pc)
   and [uncharted_pc](https://github.com/Supermedo/uncharted_pc), the source of ideas and fixes used
-  here (scalar constant copy HLE, addr64 `BUFFER_LOAD`, Ajm end-of-job rules, frames-ahead limit).
+  here (scalar constant copy HLE, addr64 `BUFFER_LOAD`, Ajm end-of-job rules, the `m_gfxEopTick` wait patch from 0.3.2, read-only `O_CREAT` open for Uncharted 1 sound).
 - **Felipe Prado** and contributors: [gow3_pc](https://github.com/FelipePrado0/gow3_pc), the God of
   War III port this repository is a fork of, with the rendering fixes by
   [cuesta4](https://github.com/cuesta4/shadPS4/tree/eltutz).
+- **Mindro** (ManoharPadul): the [shadPS4 build for the Uncharted collection](https://github.com/ManoharPadul/ShadPS4),
+  whose release notes showed which problems to look for (texture cache, recommended settings).
 - **shadPS4 team**: the [shadPS4](https://github.com/shadps4-emu/shadPS4) video core, which does all
   the GPU and shader translation to Vulkan.
 
