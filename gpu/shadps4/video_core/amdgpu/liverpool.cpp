@@ -527,6 +527,36 @@ bool Liverpool::PendingFenceValue(VAddr address, u32& value) {
     return false;
 }
 
+void Liverpool::ReportStuckWait(const PM4CmdWaitRegMem& wait, const char* queue) {
+    const bool memory = wait.mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
+    const u32 current = memory ? *wait.Address<const u32*>() : regs.reg_array[wait.Reg()];
+    u32 pending = 0;
+    const bool has_pending = memory && rasterizer &&
+                             PendingFenceValue(wait.Address<VAddr>(), pending);
+    std::printf("uc3: %s WaitRegMem stuck 2 s: %s 0x%llx function %u ref 0x%x mask 0x%x, "
+                "now 0x%x, pending fence %s0x%x; %u submits queued (gfx %zu)",
+                queue, memory ? "memory" : "register",
+                memory ? static_cast<unsigned long long>(wait.Address<VAddr>())
+                       : static_cast<unsigned long long>(wait.Reg()),
+                static_cast<unsigned>(wait.function.Value()), wait.ref, wait.mask, current,
+                has_pending ? "" : "none ", pending, num_submits.load(),
+                mapped_queues[GfxQueueId].submits.size());
+    if (rasterizer) {
+        auto& scheduler = rasterizer->GetScheduler();
+        const auto [issued, done] = scheduler.DeferredSignalCounts();
+        const u64 tick = scheduler.CurrentTick();
+        std::printf("; draw pipe %s, tick %llu (previous %s), deferred signals %llu issued "
+                    "%llu done, %zu chunks queued",
+                    rasterizer->DrawPipeIdle() ? "idle" : "busy",
+                    static_cast<unsigned long long>(tick),
+                    tick > 1 && scheduler.IsFree(tick - 1) ? "done" : "not done",
+                    static_cast<unsigned long long>(issued), static_cast<unsigned long long>(done),
+                    scheduler.QueuedChunks());
+    }
+    std::printf("\n");
+    std::fflush(stdout);
+}
+
 Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
     FIBER_ENTER(ccb_task_name);
 
@@ -1449,10 +1479,18 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 // Else the value may come from a fence that thread has yet to write: let it
                 // catch up before yielding to other queues.
+                // uc3: a wait unmet for 2 s is a hang in the making; say what it waits for.
+                const auto wait_started = std::chrono::steady_clock::now();
+                bool wait_reported = false;
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     if (rasterizer && !rasterizer->DrawPipeIdle()) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                         continue;
+                    }
+                    if (!wait_reported &&
+                        std::chrono::steady_clock::now() - wait_started > std::chrono::seconds{2}) {
+                        wait_reported = true;
+                        ReportStuckWait(*wait_reg_mem, "gfx");
                     }
                     YIELD_GFX();
                 }
@@ -1856,7 +1894,14 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 rasterizer->RingDedupClear();
             }
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
+            const auto wait_started = std::chrono::steady_clock::now();
+            bool wait_reported = false;
             while (!wait_reg_mem->Test(regs.reg_array)) {
+                if (!wait_reported &&
+                    std::chrono::steady_clock::now() - wait_started > std::chrono::seconds{2}) {
+                    wait_reported = true;
+                    ReportStuckWait(*wait_reg_mem, "compute");
+                }
                 YIELD_ASC(vqid);
             }
             break;

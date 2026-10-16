@@ -305,6 +305,30 @@ static bool CopyGuestThroughBacking(Rasterizer& rasterizer, VAddr dst, VAddr src
         !backing || end - src < size) {
         return false;
     }
+    // uc3 (GOW3_HLE_INVALIDATE=1): the backing write bypasses page protection, so the caches
+    // never learn of it and later draws may use their stale GPU copy (swapped textures). Do
+    // what a CPU write fault does, before the write (after it, the invalidation would download
+    // the old GPU bytes over the copy): constant ring copies queued so far, GPU data of the
+    // source not read back yet, then the destination marked CPU-modified.
+    static const bool invalidate = [] {
+        const char* env = std::getenv("GOW3_HLE_INVALIDATE");
+        return env && env[0] == '1';
+    }();
+    if (invalidate) {
+        static std::atomic<u32> calls{0}, src_readbacks{0};
+        rasterizer.WaitRingCopies();
+        auto& texture_cache = rasterizer.GetTextureCache();
+        if (texture_cache.HasPendingReadbackBytes(src, size)) {
+            src_readbacks.fetch_add(1, std::memory_order_relaxed);
+            texture_cache.ResolveReadbacks(src, size, true, VideoCore::ReadbackSource::CpuRead);
+        }
+        rasterizer.InvalidateMemory(dst, size, true);
+        const u32 n = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n == 1 || (n & 16383) == 0) {
+            std::printf("uc3: scalar copy HLE invalidate: %u copies, %u source readbacks\n", n,
+                        src_readbacks.load());
+        }
+    }
     rasterizer.NoteGuestWrite(dst, size);
     const bool written =
         Core::Memory::Instance()->TryWriteBacking(reinterpret_cast<void*>(dst), backing, size);

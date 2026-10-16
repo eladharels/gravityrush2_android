@@ -4,6 +4,31 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-16 (madrugada, 6) — Texturas trocadas: o HLE de cópia escalar agora avisa os caches (`GOW3_HLE_INVALIDATE`, desligado); aviso de espera presa da GPU
+
+- **Sintoma.** Com o `jogar_60`, o Matheus viu texturas trocadas de forma intermitente:
+  - o colete do garçom no pub;
+  - o chão do museu no primeiro carregamento de um New Game (some com reload);
+  - a porta do banheiro.
+- **A/B do Matheus (New Game até o museu):**
+  - sem readback adiado: o bug continua;
+  - sem a thread de cópia do ring: o bug continua;
+  - sem o HLE de cópia escalar: sem trocas, mas as roupas piscam (o pisca antigo de antes do HLE) e o jogo travou uma vez.
+- **Causa.** `CopyGuestThroughBacking` (`vk_shader_hle.cpp`) escreve pela visão de backing, que passa por fora da proteção de páginas. Os caches de buffer e de textura nunca ficam sabendo da escrita, e draws seguintes podem usar a cópia velha que está na GPU.
+- **Correção (`GOW3_HLE_INVALIDATE=1`, desligada por padrão).** Antes da escrita, faz o que uma falta de escrita da CPU faria:
+  1. espera as cópias do ring já enfileiradas;
+  2. resolve readbacks pendentes da origem (`CpuRead`);
+  3. chama `InvalidateMemory(dst, size, assume_locks=true)`.
+
+  Depois da escrita, a invalidação baixaria os bytes velhos da GPU por cima da cópia; por isso vem antes. A ordem foi revisada pela pesquisa (Opus).
+- **Resultado.** O Matheus jogou do New Game até a praça com `jogar_60_hle_corrigido.bat` sem nenhuma textura trocada, sem perda de FPS visível. Foram ~5,4 milhões de cópias, com 0 readbacks de origem.
+- **Travamento sem o HLE.**
+  - O despejo (minidump lido com um parser próprio + addr2line) mostrou espera mútua: todas as threads do port ociosas, a thread de comandos girando no laço de submissões e threads do jogo girando à espera da GPU.
+  - Suspeita (Opus): um `WaitRegMem` gráfico esperando um rótulo ligado a um tick que nunca foi submetido. O laço só drena enquanto a etapa B tem trabalho; depois só cede.
+  - Entrou um aviso sempre ligado: `Liverpool::ReportStuckWait`. Quando um `WaitRegMem` (gráfico ou compute) fica mais de 2 s sem ser atendido, o log mostra endereço, valor esperado e atual, fence pendente, tick atual, sinais adiados e chunks na fila. Para isso foram criados `Scheduler::DeferredSignalCounts()` e `QueuedChunks()`.
+
+---
+
 ## 2026-10-16 (madrugada, 5) — R.22: preparo de draw reaproveitado com validação por valor (`GOW3_PREP_TRUST`, desligado); a 120 Hz, +2 a 4 FPS só no modo sem validação
 
 - **A 120 Hz o limite é a CPU.** O Matheus pediu os testes com o FPS destravado (`GOW3_VBLANK_HZ=120`, `medir_120*.bat`). Sem nada novo, o Castelo (save 038) fica em 61–66 FPS, com piores quadros de 25–34 ms. A etapa A leva ~17 ms por flip.

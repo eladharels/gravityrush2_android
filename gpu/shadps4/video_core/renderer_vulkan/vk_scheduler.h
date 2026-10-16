@@ -836,6 +836,15 @@ public:
     /// the write cannot overtake an earlier fence. Otherwise the guest, seeing the later value,
     /// may free memory the earlier fence then writes into (corrupted heap, guest fault).
     void WaitDeferredSignals();
+    /// uc3: deferred signals issued and done so far (hang diagnostics).
+    [[nodiscard]] std::pair<u64, u64> DeferredSignalCounts() const noexcept {
+        return {deferred_signals_issued.load(std::memory_order_relaxed),
+                deferred_signals_done->load(std::memory_order_relaxed)};
+    }
+    /// uc3: commands still queued for the recording thread (hang diagnostics).
+    [[nodiscard]] size_t QueuedChunks() const noexcept {
+        return queued_chunks.load(std::memory_order_relaxed);
+    }
 
     /// Whether a render pass with exactly this state is open.
     [[nodiscard]] bool IsRenderingWith(const RenderState& state) const {

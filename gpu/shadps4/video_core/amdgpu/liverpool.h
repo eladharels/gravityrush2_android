@@ -33,6 +33,8 @@ struct VideoOutPort;
 
 namespace AmdGpu {
 
+struct PM4CmdWaitRegMem;
+
 union PM4Header;
 
 struct Liverpool {
@@ -82,6 +84,8 @@ struct Liverpool {
     std::deque<PendingFence> pending_fences;
     void NotePendingFences(const auto& event);
     bool PendingFenceValue(VAddr address, u32& value);
+    /// uc3: prints what a WaitRegMem unmet for seconds waits for (hang diagnostics).
+    void ReportStuckWait(const PM4CmdWaitRegMem& wait, const char* queue);
     void NotePendingWrite(const struct PM4CmdWriteData& write_data, u32 num_bytes);
     /// uc3 (Fable R.9.2, GOW3_ACB_FENCE_NOTE=1): a compute ReleaseMem label handed to the pipe.
     void NotePendingReleaseMem(const struct PM4CmdReleaseMem& release_mem);
