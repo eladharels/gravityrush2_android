@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import queue
 import runpy
+import shutil
 import subprocess
 import sys
 import threading
@@ -25,9 +26,10 @@ if WINDOWS:
 FROZEN = getattr(sys, 'frozen', False)
 PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
-DATA_DIR = Path(os.environ.get('GOW3_DATA_DIR', PORT_DIR))
+DATA_DIR = Path(os.environ.get('UC_DATA_DIR') or os.environ.get('GOW3_DATA_DIR') or PORT_DIR)
 SETTINGS_FILE = DATA_DIR / 'launcher.json'
-INI_FILE = DATA_DIR / 'gow3.ini'
+INI_FILE = DATA_DIR / 'ucndc.ini'
+OLD_INI_FILE = DATA_DIR / 'gow3.ini'  # name before 0.3; copied once, left in place
 USER_DIR = DATA_DIR / 'user'
 LOG_FILE = USER_DIR / 'last_run.log'
 APP_NAME = 'Uncharted Collection PC'
@@ -53,13 +55,41 @@ GAMES = [
     ('uc3', "Uncharted 3: Drake's Deception", 'big3-ps4_Shipping.elf', ('Jogável · 60 FPS', 'Playable · 60 FPS'),
      {'GOW3_COMPUTE_PIPE': '1'}),
 ]
-# gow3.ini values the games were tested with, written when the file does not exist yet.
-INI_DEFAULTS = {'upscaler': 'off', 'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
-                'async_shaders': '1', 'frames_queued': '1', 'render_resolution': 'native',
+# ucndc.ini values the games were tested with, written when the file does not exist yet.
+# Only keys the Uncharted games use (render_resolution, engine_fps, fsr1, rcas and upscaler are GoW3 patches).
+INI_DEFAULTS = {'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
+                'async_shaders': '1', 'frames_queued': '1',
                 'deferred_readback': '1', 'stale_readback': '0', 'show_fps': '1', 'overlay_fps': '1'}
 DISPLAY_MODES = [('windowed', ('Janela', 'Window')), ('borderless', ('Janela sem borda', 'Borderless')),
                  ('fullscreen', ('Tela cheia', 'Fullscreen'))]
-DEFAULTS = {'game_dir': '', 'update_dir': '', 'language': '', 'last_game': 'uc3'}
+DEFAULTS = {'game_dir': '', 'update_dir': '', 'language': '', 'last_game': 'uc3', 'disabled': []}
+# What each optimization does (Options > Advanced); the games turn them on by default.
+TOGGLE_HELP = {
+    'GOW3_READBACK_ASYNC': ('Leituras da GPU sem parar a fila', 'GPU readbacks without draining the queue'),
+    'GOW3_READBACK_FAST': ('Leitura rápida de buffers', 'Fast buffer readbacks'),
+    'GOW3_READBACK_FAST_WAIT': ('Espera só a escrita certa da GPU', 'Wait only for the right GPU write'),
+    'GOW3_READBACK_FAST_SIDEQ': ('Leituras na fila de transferência', 'Readbacks on the transfer queue'),
+    'GOW3_READBACK_SIDEQ': ('Fila lateral de leituras', 'Side readback queue'),
+    'GOW3_SCALAR_COPY_HLE': ('Cópia de constantes em código nativo', 'Constant copies in native code'),
+    'GOW3_HLE_INVALIDATE': ('Avisa os caches da cópia nativa (evita texturas trocadas)', 'Tell caches about native copies (no swapped textures)'),
+    'GOW3_COMPUTE_PIPE': ('Atalho no processamento de compute (UC1 e UC3)', 'Compute processing shortcut (UC1 and UC3)'),
+    'GOW3_LEAF_COPY': ('Cópia das folhas de recursos', 'Resource leaf copies'),
+    'GOW3_EAGER_SUBMIT': ('Envia comandos à GPU mais cedo', 'Submit GPU work earlier'),
+    'GOW3_EAGER_SUBMIT_US': ('Intervalo do envio antecipado', 'Early submit interval'),
+    'GOW3_ASYNC_SUBMIT': ('Envio em outra thread', 'Submit on another thread'),
+    'GOW3_DEFERRED_SUBMIT': ('Envio adiado sem esperar a gravação', 'Deferred submit without waiting'),
+    'GOW3_RING_COPY_THREAD': ('Cópias do ring buffer em outra thread', 'Ring buffer copies on another thread'),
+    'GOW3_RING_DEDUP': ('Não repete cópias do ring buffer', 'Skip repeated ring buffer copies'),
+    'GOW3_FRAME_STATS': ('Estatísticas de quadro no log', 'Frame statistics in the log'),
+    'GOW3_EOP_TICK_WAIT': ('Evita o erro m_gfxEopTick (UC1)', 'Avoid the m_gfxEopTick assert (UC1)'),
+    'GOW3_AJM_END_RULES': ('Regras de áudio do Ajm (UC1)', 'Ajm audio rules (UC1)'),
+}
+# The Uncharted engines run at 60 at most, so higher limits would do nothing.
+FPS_LIMITS = [('0', ('Sem limite (60)', 'No limit (60)')), ('30', ('30', '30')), ('60', ('60', '60'))]
+# Fixed per game, never a user switch: UC1 needs LOW_IMAGE, AJM_END_RULES and EOP_TICK_WAIT; READBACKS
+# keeps the scenery; FRAME_STATS is only a log aid; HLE_INVALIDATE follows SCALAR_COPY_HLE (texture swaps).
+FIXED = {'GOW3_READBACKS', 'GOW3_FRAME_STATS', 'GOW3_LOW_IMAGE', 'GOW3_AJM_END_RULES', 'GOW3_EOP_TICK_WAIT',
+         'GOW3_HLE_INVALIDATE'}
 
 BG, PANEL, CARD, TEXT, MUTED, ACCENT, OK, BAD = ('#15130f', '#1f1b16', '#2a241c', '#efe6d4', '#a89c86',
                                                  '#d9a441', '#7fbf6a', '#d9674f')
@@ -135,13 +165,32 @@ def available(settings, executable):
     return bool(settings['game_dir']) and (Path(settings['game_dir']) / executable).is_file()
 
 
-def ensure_ini(display_mode=None):
-    """gow3.ini with the tested values; the display mode follows the launcher."""
+def ensure_ini(updates=None):
+    """ucndc.ini with the tested values, plus what the Options window changed."""
     import graphics_options
+    adopt_old_ini()
     if not INI_FILE.is_file():
         graphics_options.write_keys(INI_FILE, INI_DEFAULTS)
-    if display_mode:
-        graphics_options.write_keys(INI_FILE, {'display_mode': display_mode})
+    if updates:
+        graphics_options.write_keys(INI_FILE, updates)
+
+
+def adopt_old_ini():
+    """Keep the settings of an older install: copy gow3.ini to ucndc.ini once (run.py does the same)."""
+    if not INI_FILE.is_file() and OLD_INI_FILE.is_file():
+        try:
+            shutil.copyfile(OLD_INI_FILE, INI_FILE)
+        except OSError:
+            pass
+
+
+def read_ini():
+    adopt_old_ini()
+    try:
+        import graphics_options
+        return {**INI_DEFAULTS, **graphics_options.read_ini(INI_FILE)}
+    except ImportError:
+        return dict(INI_DEFAULTS)
 
 
 def display_mode():
@@ -153,13 +202,23 @@ def display_mode():
     return mode if mode in {m for m, _n in DISPLAY_MODES} else 'windowed'
 
 
+def public_name(name):
+    """The documented name of a toggle: UC_X (the port still accepts the older GOW3_X)."""
+    return 'UC_' + name[len('GOW3_'):] if name.startswith('GOW3_') else name
+
+
 def game_environment(settings, key):
     _k, _title, executable, _status, extra = next(g for g in GAMES if g[0] == key)
     env = dict(os.environ)
-    for name in [n for n in env if n.startswith('GOW3_')]:
+    for name in [n for n in env if n.startswith(('GOW3_', 'UC_'))]:
         del env[name]  # only what this launcher decides
     env.update(COMMON)
     env.update(extra)
+    for name in settings.get('disabled', []):
+        if name not in FIXED:
+            env.pop(name, None)  # turned off in Options > Advanced
+    if 'GOW3_SCALAR_COPY_HLE' not in env:
+        env.pop('GOW3_HLE_INVALIDATE', None)
     env['GOW3_GAME_DIR'] = settings['game_dir']
     if settings.get('update_dir'):
         env['GOW3_PATCH_DIR'] = settings['update_dir']
@@ -216,7 +275,7 @@ def run_role(argv):
 
 
 class GameJob:
-    """A Windows job holding run.py and everything it starts (gow3-probe.exe, in-game restarts),
+    """A Windows job holding run.py and everything it starts (ucndc.exe, in-game restarts),
     so closing the launcher's Stop button ends all of it."""
 
     def __init__(self, process):
@@ -369,14 +428,8 @@ class Launcher:
         # Options and tools
         bar = tk.Frame(self.root, bg=BG)
         bar.pack(fill='x', padx=24, pady=(12, 4))
-        self.label(bar, _('Tela:', 'Display:'), 10, MUTED).pack(side='left')
-        self.mode_var = tk.StringVar()
-        names = [n[0] if LANG == 'pt' else n[1] for _m, n in DISPLAY_MODES]
-        self.mode_box = self.ttk.Combobox(bar, values=names, state='readonly', width=16, textvariable=self.mode_var)
-        self.mode_var.set(names[[m for m, _n in DISPLAY_MODES].index(display_mode())])
-        self.mode_box.pack(side='left', padx=(6, 16))
-        self.mode_box.bind('<<ComboboxSelected>>', lambda _e: self.store_mode())
-        for text, command in ((_('Pasta de saves', 'Saves folder'), lambda: open_path(USER_DIR)),
+        for text, command in ((_('Opções', 'Options'), self.options),
+                              (_('Pasta de saves', 'Saves folder'), lambda: open_path(USER_DIR)),
                               (_('Log', 'Log'), self.toggle_log),
                               (_('Atalho na área de trabalho', 'Desktop shortcut'), self.shortcut)):
             self.button(bar, text, command).pack(side='left', padx=(0, 6))
@@ -462,9 +515,83 @@ class Launcher:
         save_settings(self.settings)
         self.refresh()
 
-    def store_mode(self):
-        names = [n[0] if LANG == 'pt' else n[1] for _m, n in DISPLAY_MODES]
-        ensure_ini(DISPLAY_MODES[names.index(self.mode_var.get())][0])
+    def options(self):
+        """Options window: display, VSync, FPS limit and overlay (ucndc.ini); Advanced: the
+        optimizations each game starts with (launcher.json 'disabled')."""
+        tk, ttk = self.tk, self.ttk
+        win = tk.Toplevel(self.root, bg=BG)
+        win.title(_('Opções', 'Options'))
+        win.transient(self.root)
+        win.resizable(False, True)
+        ini = read_ini()
+        body = tk.Frame(win, bg=PANEL)
+        body.pack(fill='both', expand=True, padx=16, pady=16)
+        pick = lambda pairs: [n[0] if LANG == 'pt' else n[1] for _v, n in pairs]
+        self.label(body, _('Imagem e desempenho', 'Display and performance'), 11, TEXT, True).grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 6))
+        mode = tk.StringVar(value=pick(DISPLAY_MODES)[[m for m, _n in DISPLAY_MODES].index(display_mode())])
+        limit_values = [v for v, _n in FPS_LIMITS]
+        limit = tk.StringVar(value=pick(FPS_LIMITS)[limit_values.index(ini.get('fps_limit', '0'))
+                                                    if ini.get('fps_limit', '0') in limit_values else 0])
+        vsync = tk.BooleanVar(value=ini.get('vsync', '1') != '0')
+        fps = tk.BooleanVar(value=ini.get('overlay_fps', '1') != '0' and ini.get('show_fps', '1') != '0')
+        rows = ((_('Tela', 'Display'), ttk.Combobox(body, values=pick(DISPLAY_MODES), state='readonly', width=18, textvariable=mode)),
+                (_('Limite de FPS', 'FPS limit'), ttk.Combobox(body, values=pick(FPS_LIMITS), state='readonly', width=18, textvariable=limit)))
+        for row, (title, widget) in enumerate(rows, start=1):
+            self.label(body, title, 10, MUTED).grid(row=row, column=0, sticky='w', pady=3)
+            widget.grid(row=row, column=1, sticky='w', padx=10)
+        check = dict(bg=PANEL, fg=TEXT, selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT,
+                     font=('Segoe UI', 10), anchor='w')
+        tk.Checkbutton(body, text=_('VSync (sem tearing; recomendado)', 'VSync (no tearing; recommended)'),
+                       variable=vsync, **check).grid(row=3, column=0, columnspan=2, sticky='w')
+        tk.Checkbutton(body, text=_('Mostrar FPS na tela', 'Show FPS on screen'), variable=fps, **check).grid(row=4, column=0, columnspan=2, sticky='w')
+        self.label(body, _('Os jogos rodam a no máximo 60 FPS. No jogo, Insert (ou R3+L2) abre o menu do port.',
+                           'The games run at 60 FPS at most. In game, Insert (or R3+L2) opens the port menu.'),
+                   9, MUTED, wraplength=440, justify='left').grid(row=5, column=0, columnspan=2, sticky='w', pady=(4, 10))
+
+        advanced = tk.Frame(body, bg=PANEL)
+        disabled = set(self.settings.get('disabled', []))
+        toggles = {}
+        names = list(COMMON) + [k for g in GAMES for k in g[4] if k not in COMMON]
+        self.label(advanced, _('Otimizações (todas ligadas = configuração testada)',
+                               'Optimizations (all on = tested setup)'), 10, ACCENT, True).pack(anchor='w', pady=(0, 4))
+        for name in dict.fromkeys(names):
+            if name in FIXED:
+                continue
+            toggles[name] = tk.BooleanVar(value=name not in disabled)
+            help_text = TOGGLE_HELP.get(name, ('', ''))[0 if LANG == 'pt' else 1]
+            tk.Checkbutton(advanced, text=f'{help_text}  ({public_name(name)})', variable=toggles[name], **check).pack(anchor='w')
+        shown = tk.BooleanVar(value=bool(disabled))
+
+        def show_advanced():
+            if shown.get():
+                advanced.grid(row=7, column=0, columnspan=2, sticky='w', pady=(6, 0))
+            else:
+                advanced.grid_forget()
+        tk.Checkbutton(body, text=_('Avançado: escolher otimizações', 'Advanced: choose optimizations'),
+                       variable=shown, command=show_advanced, **check).grid(row=6, column=0, columnspan=2, sticky='w')
+        show_advanced()
+
+        def reset():
+            for var in toggles.values():
+                var.set(True)
+            vsync.set(True)
+            fps.set(True)
+            limit.set(pick(FPS_LIMITS)[0])
+
+        def save():
+            ensure_ini({'display_mode': DISPLAY_MODES[pick(DISPLAY_MODES).index(mode.get())][0],
+                        'vsync': '1' if vsync.get() else '0',
+                        'fps_limit': FPS_LIMITS[pick(FPS_LIMITS).index(limit.get())][0],
+                        'show_fps': '1' if fps.get() else '0', 'overlay_fps': '1' if fps.get() else '0'})
+            self.settings['disabled'] = sorted(k for k, v in toggles.items() if not v.get())
+            save_settings(self.settings)
+            win.destroy()
+        buttons = tk.Frame(win, bg=BG)
+        buttons.pack(fill='x', padx=16, pady=(0, 16))
+        self.button(buttons, _('Salvar', 'Save'), save, primary=True).pack(side='right')
+        self.button(buttons, _('Cancelar', 'Cancel'), win.destroy).pack(side='right', padx=6)
+        self.button(buttons, _('Restaurar padrão', 'Restore defaults'), reset).pack(side='left')
+        win.grab_set()
 
     def toggle_log(self):
         self.log_visible = not self.log_visible
@@ -488,7 +615,6 @@ class Launcher:
             return
         self.settings['last_game'] = key
         save_settings(self.settings)
-        self.store_mode()
         self.set_log('')
         try:
             self.process = start_game(self.settings, key)

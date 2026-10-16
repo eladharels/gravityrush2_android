@@ -22,15 +22,18 @@ Como jogar
 Situação
 - Uncharted 1: experimental.
 - Uncharted 2: jogável.
-- Uncharted 3: jogável, 60 FPS.
+- Uncharted 3: jogável, 60 FPS em 1080p, sem upscaling nem geração de quadros.
 
 Durante o jogo
 - Insert no teclado, ou R3 + L2 no controle, abre o menu do port.
+- O botão "Opções" do launcher ajusta tela (janela, sem borda, tela cheia), VSync, limite de
+  FPS e contador de FPS. Em "Avançado" dá para desligar otimizações; "Restaurar padrão" volta
+  à configuração testada.
 - "Atalho na área de trabalho" cria um atalho que abre direto o último jogo escolhido.
 
 Dados
 - Saves, cache de shaders e o log ficam em user\ (guarde essa pasta ao atualizar).
-- Configurações: gow3.ini e launcher.json, nesta pasta.
+- Configurações: ucndc.ini e launcher.json, nesta pasta.
 
 Problemas
 - O jogo não abre ou fecha sozinho: clique em "Log" no launcher e, ao relatar, envie
@@ -38,7 +41,7 @@ Problemas
 
 Uncharted é marca registrada da Sony Interactive Entertainment. Este projeto não tem
 relação com a Sony, a Naughty Dog ou a Bluepoint Games. Licença: GPL v2 ou posterior
-(LICENSE). Código-fonte e créditos: veja o repositório do projeto.
+(LICENSE). Código-fonte e créditos: https://github.com/zorde23/ucndc_pc
 
 ---------------------------------------------------------------------------------------------
 
@@ -55,5 +58,11 @@ How to play
    update folder next to it (such as CUSA02344-UPDATE) is found automatically.
 4. Click PLAY on a game. The first start is slower and may stutter while shaders are built.
 
+Status: Uncharted 3 plays at 60 FPS in 1080p with no upscaling or frame generation;
+Uncharted 2 is playable; Uncharted 1 is experimental.
+
+The launcher's Options button sets display mode, VSync, FPS limit and the FPS counter; Advanced
+lets you turn optimizations off ("Restore defaults" brings back the tested setup).
 In game, Insert (or R3 + L2) opens the port menu. Saves, shader cache and the log are in
 user\. When reporting a problem, send user\last_run.log.
+Source code and credits: https://github.com/zorde23/ucndc_pc

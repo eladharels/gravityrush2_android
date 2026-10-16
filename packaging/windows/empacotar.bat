@@ -1,6 +1,7 @@
 @echo off
 rem Compila o port e gera o zip para os jogadores em dist\. Rode com o jogo FECHADO.
 rem Builds the port and the players' zip in dist\. Run with the game CLOSED.
+tasklist /fi "imagename eq ucndc.exe" | find /i "ucndc.exe" >nul && (echo Feche o jogo antes. & pause & exit /b 1)
 tasklist /fi "imagename eq gow3-probe.exe" | find /i "gow3-probe.exe" >nul && (echo Feche o jogo antes. & pause & exit /b 1)
 if not defined MSYS2_ROOT set "MSYS2_ROOT=D:\msys64"
 if not exist "%MSYS2_ROOT%\usr\bin\bash.exe" set "MSYS2_ROOT=C:\msys64"

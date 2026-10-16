@@ -1,5 +1,5 @@
 @echo off
-rem Compila o port (out\gow3-probe.exe). / Builds the port (out\gow3-probe.exe).
+rem Compila o port (out\ucndc.exe). / Builds the port (out\ucndc.exe).
 call "%~dp0config.bat"
 cd /d "%~dp0.."
 set "MSYSTEM=CLANG64"

@@ -45,6 +45,7 @@ savedata/
 *.log
 *.jpg
 gow3*.ini
+ucndc*.ini
 captures/
 # Local test scripts (the public ones live in windows/)
 /*.bat

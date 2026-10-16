@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Builds dist/ucndc_pc/ and dist/ucndc_pc-v<VERSION>-windows.zip for players: "Uncharted Launcher.exe"
-# (launcher/uc_launcher.py frozen with PyInstaller, so no Python is needed), gow3-probe.exe with the
+# (launcher/uc_launcher.py frozen with PyInstaller, so no Python is needed), ucndc.exe (the port) with the
 # MSYS2 CLANG64 DLLs it loads, run.py and the preparation scripts. Nothing to install, no terminal.
 # Run from an MSYS2 CLANG64 shell after `bash build.sh` (or through packaging/windows/empacotar.bat).
 # Freezing uses a Windows Python 3.10+ (python.org; WINPYTHON overrides) and a private venv in out/pyenv.
 set -euo pipefail
 cd -- "$(dirname -- "$0")/../.."
 source ./msys2-env.sh
-[[ -f out/gow3-probe.exe ]] || { echo 'Build first: bash build.sh' >&2; exit 1; }
+exe=out/ucndc.exe
+[[ -f $exe ]] || exe=out/gow3-probe.exe  # builds from before the rename
+[[ -f $exe ]] || { echo 'Build first: bash build.sh' >&2; exit 1; }
 version=$(sed -n "s/^VERSION = '\(.*\)'/\1/p" launcher/uc_launcher.py)
 name="Uncharted Launcher"
 
@@ -38,9 +40,9 @@ rm -rf -- out/stage-uc
 mkdir -p "$dest/bin" "$dest/launcher"
 cp -r "out/pyi-dist-uc/$name/." "$dest/"
 cp launcher/uc.ico "$dest/launcher/"
-llvm-strip --strip-debug -o "$dest/bin/gow3-probe.exe" out/gow3-probe.exe
-# Every DLL gow3-probe.exe loads from the CLANG64 tree (SDL3, FFmpeg, Vulkan loader, ...).
-ldd "$dest/bin/gow3-probe.exe" | awk '/\/clang64\/bin\// {print $3}' | sort -u | while read -r dll; do
+llvm-strip --strip-debug -o "$dest/bin/ucndc.exe" "$exe"
+# Every DLL ucndc.exe loads from the CLANG64 tree (SDL3, FFmpeg, Vulkan loader, ...).
+ldd "$dest/bin/ucndc.exe" | awk '/\/clang64\/bin\// {print $3}' | sort -u | while read -r dll; do
     cp -u "$dll" "$dest/bin/"
 done
 cp -r scripts patches "$dest/"
@@ -49,7 +51,7 @@ cp packaging/windows/LEIA-ME.txt "$dest/LEIA-ME (README).txt"
 find "$dest" -name __pycache__ -prune -exec rm -r {} +
 # No game files and nothing a player made (saves, shader caches, settings, logs) may ship.
 forbidden=$(find "$dest" \( -iname eboot.bin -o -iname '*.elf' -o -iname sce_module -o -iname sce_sys \
-    -o -iname 'savedata*' -o -iname user -o -iname cache -o -iname '*.log' -o -iname gow3.ini \
+    -o -iname 'savedata*' -o -iname user -o -iname cache -o -iname '*.log' -o -iname gow3.ini -o -iname ucndc.ini \
     -o -iname launcher.json -o -iname '*.spv' -o -iname '*.pkg' -o -iname '*.sprx' -o -iname '*.prx' \
     -o -iname '*.dmp' -o -iname 'CUSA*' \) -print)
 if [[ -n $forbidden ]]; then
