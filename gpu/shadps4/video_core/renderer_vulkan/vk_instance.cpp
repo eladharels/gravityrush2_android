@@ -352,7 +352,14 @@ bool Instance::CreateDevice() {
     custom_border_color = add_extension(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
     depth_clip_control = add_extension(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
     depth_clip_enable = add_extension(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
-    vertex_input_dynamic_state = add_extension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+    // uc3: the Intel Windows driver draws nothing with VK_EXT_vertex_input_dynamic_state (black
+    // screen on HD 630); from Supermedo/uncharted_pc 0.3.3 (commit 68c8cf9, GPL).
+    // GOW3_VERTEX_INPUT_DYNAMIC=1/0 forces it on/off.
+    const char* vertex_input_env = std::getenv("GOW3_VERTEX_INPUT_DYNAMIC");
+    const bool vertex_input_wanted =
+        vertex_input_env ? vertex_input_env[0] == '1' : GetVendorID() != 0x8086;
+    vertex_input_dynamic_state =
+        vertex_input_wanted && add_extension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
     // Games excessively leave restart enabled with lists when it isn't actually needed, and it
     // slows down KosmicKrisp due to unrolling. Revisit if KosmicKrisp moves this to mesh shaders.
     list_restart = driver_id != vk::DriverId::eMesaKosmickrisp &&

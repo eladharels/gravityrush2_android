@@ -4,6 +4,17 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-16 (madrugada, 4) — Placas Intel: `VK_EXT_vertex_input_dynamic_state` desligada (correção do SuperMedo 0.3.3)
+
+- No Windows, o driver da Intel não desenha nada com `VK_EXT_vertex_input_dynamic_state`: tela preta na HD 630.
+- A correção vem do Supermedo/uncharted_pc 0.3.3 (commit 68c8cf9, GPL; issue #56 deles). O crédito é dele.
+- `vk_instance.cpp`: a extensão só é pedida quando o fornecedor da placa não é Intel (0x8086).
+  - `GOW3_VERTEX_INPUT_DYNAMIC=1/0` força ligada ou desligada.
+- Na RX 6750 XT (AMD) nada muda: compilou e a extensão continua ativa (sem aviso de indisponível no log).
+- Ainda não foi testado numa placa Intel.
+
+---
+
 ## 2026-10-16 (madrugada, 3) — R.20/R.21 confiança no pipeline preparado (`GOW3_PREP_TRUST`, desligado): correto, mas ~0% de acerto
 
 - Ideia (pesquisa, Opus): na etapa A, quando os registradores batem com os do worker de preparação, reaproveitar o `flattened_ud_buf` que o worker já calculou, sem refazer `GetParams` e o walker da SRT (~1,55 µs por draw).
