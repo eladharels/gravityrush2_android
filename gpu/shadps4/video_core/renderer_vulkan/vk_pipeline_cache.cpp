@@ -435,8 +435,9 @@ std::atomic<u32> g_gow3_compiles;
 std::atomic<u64> g_gow3_capture_ns, g_gow3_async_ns, g_gow3_compile_wait_ns;
 std::atomic<u64> g_gow3_snapshot_ns, g_gow3_guest_wait_ns;
 // uc3: GOW3_STAGEB_PROFILE splits stage A's "A:gfx pipeline" step: [0] publish/pump cycles,
-// [1] prepared-pipeline check cycles, [2] calls.
-std::atomic<u64> g_gow3_gfx_pipe_split[3];
+// [1] prepared-pipeline check cycles, [2] calls; inside the check: [3] GetParams, [4] SRT walk
+// (RefreshFlatBuf), [5] flat compare cycles.
+std::atomic<u64> g_gow3_gfx_pipe_split[6];
 static bool GfxPipeSplit() {
     static const bool on = std::getenv("GOW3_STAGEB_PROFILE") != nullptr;
     return on;
@@ -691,7 +692,7 @@ bool PipelineCache::PrepareGraphicsPipeline(PipelineSelection& worker_sel) {
 
 void PipelineCache::NotePrepTrustDivergence(const char* what, u64 hash, VAddr base) {
     if (++prep_trust_divergences <= 20) {
-        std::printf("uc3 R.21 prep trust divergence: %s, shader %#llx at %#llx\n", what,
+        std::printf("uc3 R.22 prep trust divergence: %s, shader %#llx at %#llx\n", what,
                     static_cast<unsigned long long>(hash), static_cast<unsigned long long>(base));
     }
 }
@@ -705,14 +706,14 @@ void PipelineCache::ReportPrepTrust() {
         bumps[i] = g_srt_bumps[i].exchange(0, std::memory_order_relaxed);
     }
     using ull = unsigned long long;
-    std::printf("uc3 R.21 prep trust: %llu trusted, %llu not (GPU leaves %llu, wait/unnoted %llu, "
+    std::printf("uc3 R.22 prep trust: %llu trusted (%llu by value), %llu not (GPU leaves %llu, values changed %llu, "
                 "big write %llu, page write %llu, too many pages %llu), %llu divergences (total); "
                 "stamps: waits %llu, page writes %llu, big writes %llu, unnoted packets %llu\n",
-                (ull)prep_trust_hits, (ull)prep_trust_misses, (ull)prep_trust_why[0],
+                (ull)prep_trust_hits, (ull)prep_trust_validated, (ull)prep_trust_misses, (ull)prep_trust_why[0],
                 (ull)prep_trust_why[1], (ull)prep_trust_why[2], (ull)prep_trust_why[3],
                 (ull)prep_trust_why[4], (ull)prep_trust_divergences, (ull)bumps[0],
                 (ull)bumps[1], (ull)bumps[2], (ull)bumps[3]);
-    prep_trust_hits = prep_trust_misses = 0;
+    prep_trust_hits = prep_trust_misses = prep_trust_validated = 0;
     for (auto& why : prep_trust_why) {
         why = 0;
     }
@@ -746,6 +747,15 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         } else {
             why = SrtChangedSince(prepared.srt_snap, prepared.read_pages.data(),
                                   prepared.num_read_pages);
+            // uc3 R.22: after a wait or an unnoted write, the values the walk read decide: equal
+            // values give the same flat (GPU writes still pending are on the page stamps).
+            // =3 trusts without the value check (the shadow runs never saw a value change after
+            // a wait; measurement only).
+            if (why == 1 && (trust_mode == 3 ||
+                             Shader::SrtChecksHold(prepared.checks, prepared.num_checks))) {
+                why = 0;
+                ++prep_trust_validated;
+            }
         }
         trusted = prepared.no_gpu_leaves && why == 0;
         if (trusted) {
@@ -755,7 +765,7 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             ++prep_trust_why[why];
         }
     }
-    if (trusted && trust_mode == 1) {
+    if (trusted && (trust_mode == 1 || trust_mode == 3)) {
         for (u32 i = 0; i < prepared.num_stages; ++i) {
             const auto& stage = prepared.stages[i];
             const auto* pgm = regs.ProgramForStage(static_cast<u32>(stage.hw_stage));
@@ -781,7 +791,10 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         if (!pgm || !pgm->Address<u32*>()) {
             return nullptr;
         }
+        const bool split = GfxPipeSplit();
+        const u64 c0 = split ? __rdtsc() : 0;
         const auto params = AmdGpu::GetParams(*pgm);
+        const u64 c1 = split ? __rdtsc() : 0;
         if (trusted && (params.hash != stage.hash || params.Base() != stage.pgm_base)) {
             NotePrepTrustDivergence("program", stage.hash, params.Base());
         }
@@ -792,9 +805,16 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         info.pgm_base = params.Base();
         info.user_data = params.user_data;
         info.RefreshFlatBuf();
-        if (info.pgm_base != stage.pgm_base || info.flattened_ud_buf.size() != stage.flat_size ||
-            std::memcmp(info.flattened_ud_buf.data(), stage.flat,
-                        stage.flat_size * sizeof(u32)) != 0) {
+        const u64 c2 = split ? __rdtsc() : 0;
+        const bool flat_differs =
+            info.pgm_base != stage.pgm_base || info.flattened_ud_buf.size() != stage.flat_size ||
+            std::memcmp(info.flattened_ud_buf.data(), stage.flat, stage.flat_size * sizeof(u32)) != 0;
+        if (split) {
+            g_gow3_gfx_pipe_split[3].fetch_add(c1 - c0, std::memory_order_relaxed);
+            g_gow3_gfx_pipe_split[4].fetch_add(c2 - c1, std::memory_order_relaxed);
+            g_gow3_gfx_pipe_split[5].fetch_add(__rdtsc() - c2, std::memory_order_relaxed);
+        }
+        if (flat_differs) {
             if (trusted) {
                 NotePrepTrustDivergence("flat", stage.hash, info.pgm_base);
             }
@@ -1313,13 +1333,16 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         sigjmp_buf recover;
         if (sigsetjmp(recover, 0)) {
             Shader::t_srt_read_pages = nullptr;
+            Shader::t_srt_checks = nullptr;
             worker.failed = true;
             return {};
         }
         runtime_fault_recover = &recover;
         Shader::t_srt_read_pages = &worker.read_pages;
+        Shader::t_srt_checks = &worker.checks;
         info.RefreshFlatBuf();
         Shader::t_srt_read_pages = nullptr;
+        Shader::t_srt_checks = nullptr;
         auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
         runtime_fault_recover = nullptr;
         const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);

@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "common/types.h"
+#include "shader_recompiler/ir/passes/srt.h"
 #include "video_core/amdgpu/regs.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 
@@ -94,6 +95,15 @@ inline void SrtGlobalEvent(u32 source = 0) noexcept {
     g_srt_global_seq.store(seq, std::memory_order_release);
     g_srt_bumps[source].fetch_add(1, std::memory_order_relaxed);
 }
+/// uc3 R.22: the last big writes with their page ranges, so a big write only invalidates the
+/// prepared draws that read inside it. Written and read on the command processor thread.
+inline constexpr u32 SrtBigRing = 256;
+struct SrtBigWrite {
+    std::atomic<u64> seq{0};
+    std::atomic<u64> first{0}, last{0};
+};
+inline SrtBigWrite g_srt_big_ring[SrtBigRing];
+inline std::atomic<u64> g_srt_big_count{0};
 inline void SrtNoteWrite(u64 address, u64 size) noexcept {
     if (size == 0) {
         return;
@@ -101,6 +111,11 @@ inline void SrtNoteWrite(u64 address, u64 size) noexcept {
     const u64 seq = g_srt_write_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
     const u64 first = address >> 12, last = (address + size - 1) >> 12;
     if (last - first >= 64) {
+        auto& slot = g_srt_big_ring[g_srt_big_count.fetch_add(1, std::memory_order_acq_rel) %
+                                    SrtBigRing];
+        slot.first.store(first, std::memory_order_relaxed);
+        slot.last.store(last, std::memory_order_relaxed);
+        slot.seq.store(seq, std::memory_order_release);
         g_srt_big_seq.store(seq, std::memory_order_release);
         g_srt_bumps[2].fetch_add(1, std::memory_order_relaxed);
         return;
@@ -110,18 +125,37 @@ inline void SrtNoteWrite(u64 address, u64 size) noexcept {
     }
     g_srt_bumps[1].fetch_add(1, std::memory_order_relaxed);
 }
-/// 0: unchanged since `snap`; 1 a global event, 2 a big write, 3 a page write.
+/// 0: unchanged since `snap`; 1 only a global event (R.22: the values may still be checked),
+/// 2 a big write, 3 a page write.
 inline u32 SrtChangedSince(u64 snap, const u64* pages, u32 count) noexcept {
-    if (g_srt_global_seq.load(std::memory_order_acquire) > snap) {
-        return 1;
-    }
     if (g_srt_big_seq.load(std::memory_order_acquire) > snap) {
-        return 2;
+        // Newest first, down to the first big write before the snapshot.
+        const u64 total = g_srt_big_count.load(std::memory_order_acquire);
+        u64 scanned = 0;
+        for (u64 n = total; n > 0; --n, ++scanned) {
+            if (scanned == SrtBigRing) {
+                return 2;
+            }
+            const auto& slot = g_srt_big_ring[(n - 1) % SrtBigRing];
+            if (slot.seq.load(std::memory_order_acquire) <= snap) {
+                break;
+            }
+            const u64 first = slot.first.load(std::memory_order_relaxed);
+            const u64 last = slot.last.load(std::memory_order_relaxed);
+            for (u32 i = 0; i < count; ++i) {
+                if (pages[i] >= first && pages[i] <= last) {
+                    return 2;
+                }
+            }
+        }
     }
     for (u32 i = 0; i < count; ++i) {
         if (g_srt_page_seq[pages[i] % SrtPageSlots].load(std::memory_order_acquire) > snap) {
             return 3;
         }
+    }
+    if (g_srt_global_seq.load(std::memory_order_acquire) > snap) {
+        return 1;
     }
     return 0;
 }
@@ -134,6 +168,8 @@ struct PreparedDraw {
     bool no_gpu_leaves{};  ///< R.20: the worker's walk found no GPU-written dwords
     u32 num_read_pages{};  ///< R.21: guest pages the walks read (0xFF: too many, untrusted)
     std::array<u64, 24> read_pages{};
+    const Shader::SrtCheck* checks{}; ///< R.22: values the walks read, owned by the submission
+    u32 num_checks{};
     GraphicsPipelineKey key{};
     u32 num_stages{};
     std::array<PreparedStage, MaxShaderStages> stages{};

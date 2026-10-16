@@ -120,6 +120,7 @@ struct PrepWorker {
     std::unordered_map<const Program*, Shader::Info> infos;
     boost::container::static_vector<Stage, MaxShaderStages> stages;
     std::vector<u64> read_pages; ///< R.21: guest pages the SRT walks read (unsorted)
+    std::vector<Shader::SrtCheck> checks; ///< R.22: values the SRT walks read
     bool failed = false;
 };
 
@@ -161,6 +162,7 @@ public:
     u64 prep_trust_hits = 0, prep_trust_misses = 0, prep_trust_divergences = 0;
     /// R.21 miss reasons: GPU leaves, wait/unnoted packet, big write, page write, too many pages.
     u64 prep_trust_why[5]{};
+    u64 prep_trust_validated = 0;
 
     /// gow3: the prepared draw the last GetGraphicsPipeline used, or null (regular path).
     [[nodiscard]] const PreparedDraw* UsedPrepared() const noexcept {

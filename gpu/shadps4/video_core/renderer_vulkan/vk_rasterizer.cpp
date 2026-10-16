@@ -1182,13 +1182,18 @@ void Rasterizer::PrintPipeStats() {
             dedup_hits = dedup_misses = dedup_stale = 0;
         }
         {
-            extern std::atomic<u64> g_gow3_gfx_pipe_split[3];
+            extern std::atomic<u64> g_gow3_gfx_pipe_split[6];
             const u64 pub = g_gow3_gfx_pipe_split[0].exchange(0, std::memory_order_relaxed);
             const u64 chk = g_gow3_gfx_pipe_split[1].exchange(0, std::memory_order_relaxed);
             const u64 calls = g_gow3_gfx_pipe_split[2].exchange(0, std::memory_order_relaxed);
+            const u64 params = g_gow3_gfx_pipe_split[3].exchange(0, std::memory_order_relaxed);
+            const u64 walk = g_gow3_gfx_pipe_split[4].exchange(0, std::memory_order_relaxed);
+            const u64 cmp = g_gow3_gfx_pipe_split[5].exchange(0, std::memory_order_relaxed);
             if (calls) {
-                std::printf("  A:gfx pipeline split (us/draw): publish+pump %.2f, prepared check %.2f\n",
-                            seconds * 1e6 * pub / cycles / calls, seconds * 1e6 * chk / cycles / calls);
+                const double us = seconds * 1e6 / cycles / calls;
+                std::printf("  A:gfx pipeline split (us/draw): publish+pump %.2f, prepared check %.2f "
+                            "(GetParams %.2f, SRT walk %.2f, flat compare %.2f)\n",
+                            us * pub, us * chk, us * params, us * walk, us * cmp);
             }
         }
         std::printf("  stage B by step (%% of time, us/call):");

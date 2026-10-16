@@ -83,13 +83,35 @@ bool SrtWalkerSyncAllowed() {
     return t_srt_sync;
 }
 
+extern "C" int runtime_memory_region_backing(uintptr_t address, uintptr_t* start, uintptr_t* end,
+                                             int* mapped, const unsigned char** backing);
 namespace {
 thread_local PFN_SrtLoadPtr t_srt_inner_load = nullptr;
+// uc3 R.22: the unprotected host address that reads guest `address` (the guest address itself
+// when it has no backing view).
+u64 SrtHostOf(u64 address, u64 need) {
+    uintptr_t start = 0, end = 0;
+    int mapped = 0;
+    const unsigned char* backing = nullptr;
+    if (!runtime_memory_region_backing(address, &start, &end, &mapped, &backing) || !mapped ||
+        !backing || end - address < need) {
+        return address;
+    }
+    return reinterpret_cast<u64>(backing);
+}
+void SrtRecordCheck(u64 guest, u32 size) {
+    SrtCheck check{SrtHostOf(guest, size), 0, size, 0};
+    std::memcpy(&check.value, reinterpret_cast<const void*>(check.host), size);
+    t_srt_checks->push_back(check);
+}
 // uc3 R.21: records the page of each table pointer the walker loads (guest_base 0 is user data).
 SrtPtr PS4_SYSV_ABI RecordingSrtLoadPtr(const u8* host_base, u64 guest_base, u64 off) {
     if (guest_base != 0 && t_srt_read_pages) {
         t_srt_read_pages->push_back((guest_base + off) >> 12);
         t_srt_read_pages->push_back((guest_base + off + 7) >> 12);
+        if (t_srt_checks) {
+            SrtRecordCheck(guest_base + off, 8);
+        }
     }
     return t_srt_inner_load(host_base, guest_base, off);
 }
@@ -111,6 +133,9 @@ void RunSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat, size_t 
         for (const u64 address : src) {
             if (address) {
                 t_srt_read_pages->push_back(address >> 12);
+                if (t_srt_checks) {
+                    SrtRecordCheck(address, 4);
+                }
             }
         }
     }

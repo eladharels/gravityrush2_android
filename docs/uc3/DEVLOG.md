@@ -4,6 +4,28 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-16 (madrugada, 5) — R.22: preparo de draw reaproveitado com validação por valor (`GOW3_PREP_TRUST`, desligado); a 120 Hz, +2 a 4 FPS só no modo sem validação
+
+- **A 120 Hz o limite é a CPU.** O Matheus pediu os testes com o FPS destravado (`GOW3_VBLANK_HZ=120`, `medir_120*.bat`). Sem nada novo, o Castelo (save 038) fica em 61–66 FPS, com piores quadros de 25–34 ms. A etapa A leva ~17 ms por flip.
+- **Onde vai o custo.** O perfil (`GOW3_STAGEB_PROFILE`) agora divide a checagem do pipeline preparado, que custa 1,63 µs por draw:
+  - walker da SRT: 1,18 µs;
+  - `GetParams`: 0,13 µs;
+  - comparação do flat: 0,11 µs.
+- **R.22, em cima do R.21:**
+  - O worker anota, além das páginas, o valor de cada ponteiro (8 bytes) e de cada folha (4 bytes) que o walker leu. Guarda o endereço da visão de backing, a mesma leitura sem proteção que o walker usa.
+  - Esperas e pacotes sem faixa deixam de invalidar tudo. Depois deles, o draw vale se os valores lidos não mudaram. Escritas da GPU ainda pendentes continuam nos carimbos de página.
+  - Escritas grandes (mais de 64 páginas) entram num anel de 256 faixas. Só invalidam quem leu dentro delas.
+- **Sombra a 120 Hz:** ~80% dos draws confiáveis, 0 divergências. Em milhões de validações, os valores nunca mudaram depois de uma espera. O resto falha por escrita de página.
+- **`GOW3_PREP_TRUST=1` (seguro):**
+  - O walker cai para ~0,3 µs por draw e o `GetParams` para 0,01.
+  - Mas a checagem inteira continua em ~1,5 µs: ler de novo os valores custa o mesmo que o walker (são as mesmas leituras espalhadas).
+  - FPS sem ganho (58–69).
+- **`GOW3_PREP_TRUST=3` (sem validar por valor, só para medição):** 63–70 FPS contra 61–66, e piores quadros de ~25 ms.
+- **Fica desligado por padrão.** O resto da etapa A pesa mais: `A:draw` 46%, `A:post` 41%, `P:ring` 20%.
+- **Velocidade a 120 Hz:** nos testes, o combate começou e o Drake morreu parado antes do que nas execuções a 60 Hz. Isso pode indicar jogo acelerado; precisa ser medido antes de recomendar 120.
+
+---
+
 ## 2026-10-16 (madrugada, 4) — Placas Intel: `VK_EXT_vertex_input_dynamic_state` desligada (correção do SuperMedo 0.3.3)
 
 - No Windows, o driver da Intel não desenha nada com `VK_EXT_vertex_input_dynamic_state`: tela preta na HD 630.

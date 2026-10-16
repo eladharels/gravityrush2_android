@@ -82,6 +82,28 @@ void RunSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat, size_t 
 /// uc3 R.21: while set on a thread, RunSrtWalker adds the guest pages it reads (table pointers
 /// and flattened leaves, 4 KiB pages) to this list (unsorted, may repeat).
 inline thread_local std::vector<u64>* t_srt_read_pages = nullptr;
+/// uc3 R.22: with t_srt_read_pages, also the value of every guest location the walk read (table
+/// pointers: 8 bytes, flattened leaves: 4), at the host address that reads it unprotected. Equal
+/// values later mean the walk would produce the same flat.
+struct SrtCheck {
+    u64 host;
+    u64 value;
+    u32 size;
+    u32 pad;
+};
+inline thread_local std::vector<SrtCheck>* t_srt_checks = nullptr;
+/// True when every check still holds.
+inline bool SrtChecksHold(const SrtCheck* checks, u32 count) noexcept {
+    for (u32 i = 0; i < count; ++i) {
+        const auto& check = checks[i];
+        u64 value = 0;
+        __builtin_memcpy(&value, reinterpret_cast<const void*>(check.host), check.size == 8 ? 8 : 4);
+        if (value != check.value) {
+            return false;
+        }
+    }
+    return true;
+}
 /// Reads one GPU-written dword back through the hook (or plainly when there is none).
 void SrtReadDword(u64 src, u32* out);
 /// True while the walker of this thread may read GPU-written bytes back.

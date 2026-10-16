@@ -450,6 +450,7 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 prep_worker.failed = false;
                 sel.draw_indirect_params = {};
                 prep_worker.read_pages.clear();
+                prep_worker.checks.clear();
                 const u64 srt_snap = g_srt_write_seq.load(std::memory_order_acquire);
                 if (pipeline_cache.PrepareGraphicsPipeline(sel)) {
                     draw.reg_checksum = checksum;
@@ -464,6 +465,8 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                         draw.num_read_pages = static_cast<u32>(pages.size());
                         std::copy(pages.begin(), pages.end(), draw.read_pages.begin());
                     }
+                    draw.checks = arena.AppendArray(prep_worker.checks.data(), prep_worker.checks.size());
+                    draw.num_checks = static_cast<u32>(prep_worker.checks.size());
                     draw.key = sel.graphics_key;
                     draw.num_stages = static_cast<u32>(prep_worker.stages.size());
                     for (u32 i = 0; i < draw.num_stages; ++i) {
