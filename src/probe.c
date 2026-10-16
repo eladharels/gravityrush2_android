@@ -205,6 +205,99 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 static LONG WINAPI unhandled_fault(EXCEPTION_POINTERS *info) { return fatal_exception(info); }
+/* GOW3_EOP_TICK_WAIT=1 (from SuperMedo's uncharted_pc 0.3.2, GPL). Naughty Dog's FrameBegin
+ * (ndlib/render/fg-draw-mgr.cpp) asserts that the frame it recycles has its GPU end-of-pipe
+ * tick. It never waits: on PS4 the GPU always keeps up. Here the GPU side can fall behind
+ * (shaders building on a cold cache), so the assertion's branch is found through its message,
+ * in any version of the three games, and the failed check waits (pause, check again) instead. */
+static void patch_eop_tick_wait(uint64_t image_size) {
+    static const char message[]="GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick";
+    unsigned char *text=NULL;
+    for (uint64_t i=0;i+sizeof(message)<=image_size;++i)
+        if (image[i]=='G' && !memcmp(image+i,message,sizeof(message))) { text=image+i; break; }
+    if (!text) { printf("Frame pacing: EOP tick message not found\n"); return; }
+    int patched=0;
+    for (uint64_t at=0;at+7<=image_size;++at) {
+        /* lea rdi, [rip+rel32] -> the message */
+        if (image[at]!=0x48 || image[at+1]!=0x8d || image[at+2]!=0x3d) continue;
+        int32_t rel; memcpy(&rel,image+at+3,4);
+        if (image+at+7+rel!=text) continue;
+        /* Up to 64 bytes before: cmp qword [reg+disp32], 0 (48/49 83 /7, mod 10) ; jne past it.
+         * UC1 indexes the frame array: the same cmp with a SIB byte (one byte longer), and its
+         * assert handler is a function pointer (mov rax, [rip+x]) instead of a direct call. */
+        for (uint64_t back=10;back<=64 && back<=at;++back) {
+            unsigned char *c=image+at-back;
+            if ((c[0]!=0x48 && c[0]!=0x49) || c[1]!=0x83 || (c[2]&0xf8)!=0xb8) continue;
+            unsigned length=(c[2]&7)==4 ? 9 : 8;
+            if (c[length-1]!=0x00 || c[length]!=0x75) continue;
+            unsigned char *jne=c+length, *ok=jne+2+(int8_t)jne[1];
+            if (ok<=image+at) continue;
+            if (jne[2]!=0xe8 && !(jne[2]==0x48 && jne[3]==0x8b && jne[4]==0x05)) continue;
+            /* after the jne: pause; jmp back to the cmp */
+            jne[2]=0xf3; jne[3]=0x90; jne[4]=0xeb; jne[5]=(unsigned char)(int8_t)(c-(jne+6));
+            printf("Frame pacing: the EOP tick check at %#" PRIx64 " waits for the GPU\n",
+                   (uint64_t)(c-image));
+            ++patched;
+            break;
+        }
+    }
+    if (!patched) printf("Frame pacing: EOP tick check not found\n");
+}
+/* GOW3_SCREAM_LOG=1 (UC1 1.02 diagnostics): the game's sound engine (SCEA Scream) logs through
+ * one function (0x3c0750) that drops messages above a verbosity kept in .bss (0) and hands the
+ * rest to four optional callbacks, all NULL in the shipped game. The verbosity test is removed
+ * and the first callback load reads a host printer. Checked against the exact code bytes. */
+static int scream_log_left=4000;
+static ABI void scream_log(const char *message, int level) {
+    if (scream_log_left<=0) return;
+    --scream_log_left;
+    size_t n=strlen(message);
+    printf("Scream[%d]: %s%s", level, message, n && message[n-1]=='\n' ? "" : "\n");
+}
+/* The Scream voice/bank errors ("%s(%d) : ...") go through a second printer (0x407ae0): skipped
+ * while a flag is set, then handed to the game's output through a pointer at 0x963540. */
+static ABI void scream_report(const char *message) {
+    if (scream_log_left<=0) return;
+    --scream_log_left;
+    size_t n=strlen(message);
+    printf("Scream report: %s%s", message, n && message[n-1]=='\n' ? "" : "\n");
+}
+static void install_scream_log(uint64_t image_size) {
+    static const unsigned char test[]={0x48,0x8d,0x05,0xb6,0x0a,0x98,0x00,0x39,0x18,0x0f,0x8c,0xa4,0x00,0x00,0x00,0x48};
+    static const unsigned char slot_load[]={0x48,0x8b,0x05,0xe7,0x74,0x9b,0x00};
+    const uint64_t test_at=0x3c07e3, slot_load_at=0x3c083a, slot=0xd77d28;
+    if (slot+8>image_size || memcmp(image+test_at,test,sizeof(test)) ||
+        memcmp(image+slot_load_at,slot_load,sizeof(slot_load))) {
+        printf("Scream log: code not recognised (not UC1 1.02), off\n");
+        return;
+    }
+    /* The engine clears the four slots when it (re)initialises, so the first slot load
+     * (mov rax, [rip+slot]) is pointed at a cell of our own instead. */
+    unsigned char *cell=allocate(page_size);
+    uintptr_t printer=(uintptr_t)scream_log;
+    memcpy(cell,&printer,8);
+    int64_t rel=(int64_t)(uintptr_t)cell-(int64_t)(uintptr_t)(image+slot_load_at+7);
+    if (rel!=(int32_t)rel) { printf("Scream log: no cell within 2 GiB of the image, off\n"); return; }
+    int32_t rel32=(int32_t)rel;
+    memset(image+test_at+9,0x90,6); /* jl past the printing: every level prints */
+    memcpy(image+slot_load_at+3,&rel32,4);
+    printf("Scream log: on (sound engine messages print as Scream[level])\n");
+    static const unsigned char gate[]={0x48,0x8d,0x05,0x84,0x20,0x9b,0x00,0x83,0x38,0x00,0x75,0x63};
+    static const unsigned char out[]={0x48,0x8d,0x05,0x85,0xb9,0x55,0x00,0x48,0x8d,0x3d,0x3e,0x20,0x9b,0x00,0xff,0x10};
+    const uint64_t gate_at=0x407b55, out_at=0x407bb4;
+    if (memcmp(image+gate_at,gate,sizeof(gate)) || memcmp(image+out_at,out,sizeof(out))) {
+        printf("Scream report: code not recognised, off\n");
+        return;
+    }
+    uintptr_t reporter=(uintptr_t)scream_report;
+    memcpy(cell+8,&reporter,8);
+    rel=(int64_t)(uintptr_t)(cell+8)-(int64_t)(uintptr_t)(image+out_at+7);
+    if (rel!=(int32_t)rel) return;
+    rel32=(int32_t)rel;
+    memset(image+gate_at+10,0x90,2); /* jne past the report while it is switched off */
+    memcpy(image+out_at+3,&rel32,4);
+    printf("Scream report: on\n");
+}
 /* Guest code reads its TCB with `mov rax, gs:[0]` (link_*.py rewrote fs:[0]); on Windows
  * the displacement becomes the TEB TLS slot that holds the guest TCB (runtime_thread.c). */
 uint32_t runtime_thread_tcb_offset(void);
@@ -751,6 +844,8 @@ int main(int argc, char **argv) {
     image = allocate(round_page(size));
     printf("Image base: %p (guest code addresses in traces are image offsets from here)\n",
            (void *)image);
+    if (getenv("GOW3_LOW_IMAGE") && (uintptr_t)image+size>UINT64_C(0x80000000))
+        printf("GOW3_LOW_IMAGE: no free host range below 2 GiB, image stays high\n");
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
     if (!cpu_only) {
@@ -825,6 +920,10 @@ int main(int argc, char **argv) {
     } else if (gpu_enabled) {
         printf("Game hooks: none for title %s (God of War III cheats and multipliers off)\n", title_id[0] ? title_id : "?");
     }
+    if (gpu_enabled && getenv("GOW3_EOP_TICK_WAIT") && getenv("GOW3_EOP_TICK_WAIT")[0]=='1')
+        patch_eop_tick_wait(size);
+    if (gpu_enabled && getenv("GOW3_SCREAM_LOG") && getenv("GOW3_SCREAM_LOG")[0]=='1')
+        install_scream_log(size);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif

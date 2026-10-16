@@ -148,7 +148,7 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     const char *dump=getenv("GOW3_AUDIO_DUMP");
     if (dump) {
         char path[4096];
-        snprintf(path,sizeof(path),"%s.port%d.%dch.%s",dump,id,p->downmix ? 2 : p->channels,p->is_float ? "f32" : "s16");
+        snprintf(path,sizeof(path),"%s.port%d.%dch.%s",dump,id,p->channels,p->is_float ? "f32" : "s16");
         p->dump=fopen(path,"wb");
     }
     ++ports_opened;
@@ -193,8 +193,9 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
             if (p->is_float) { float v; memcpy(&v,(const char *)data+from*4,4); v*=gain; memcpy(converted+to*4,&v,4); }
             else { int16_t v; memcpy(&v,(const char *)data+from*2,2); v=(int16_t)((float)v*gain); memcpy(converted+to*2,&v,2); }
         }
+        /* GOW3_AUDIO_DUMP: the game's own buffer (PS4 channel order, before volume and downmix). */
+        if (p->dump) fwrite(data,1,bytes,p->dump);
         if (p->downmix) bytes=downmix_stereo(converted,(size_t)p->frames,p->is_float);
-        if (p->dump) fwrite(converted,1,bytes,p->dump);
         if (p->stats) {
             uint64_t now=now_ns();
             if (!p->stat_start_ns) { p->stat_start_ns=now; p->stat_min_queued=1<<30; }
@@ -264,6 +265,11 @@ static ABI int32_t audio_volume(int32_t handle, int32_t flags, const int32_t *vo
         if (volume[c]<0 || volume[c]>VOLUME_0DB) { pthread_mutex_unlock(&p->lock); return ERR_INVALID_VOLUME; }
         p->volume[c]=volume[c];
     }
+    if (p->stats) {
+        printf("Audio volume port %d flags %#x:",(int)(p-ports),(unsigned)flags);
+        for (int c=0;c<8;++c) printf(" %d",p->volume[c]);
+        printf("\n");
+    }
     pthread_mutex_unlock(&p->lock);
     return 0;
 }
@@ -278,7 +284,13 @@ static ABI int32_t audio_state(int32_t handle, PortState *state) {
     switch (p->type) {
     case 2: case 3: state->output=0x40; state->channel=1; break;          /* headphone */
     case 4: state->output=0x04; state->channel=1; state->volume=127; break; /* pad speaker */
-    default: state->output=0x01; state->channel=(uint8_t)(p->channels>2 ? 2 : p->channels); break;
+    default: {
+        /* GOW3_AUDIO_SURROUND=1: report the port's own channel count (7.1 for 8-channel ports);
+           the mix is folded to the device here. UC1's sound driver otherwise clamps to 2. */
+        static int surround=-1;
+        if (surround<0) { const char *e=getenv("GOW3_AUDIO_SURROUND"); surround=e && e[0]=='1'; }
+        state->output=0x01; state->channel=(uint8_t)(p->channels>2 && !surround ? 2 : p->channels); break;
+    }
     }
     return 0;
 }

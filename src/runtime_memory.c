@@ -700,9 +700,18 @@ uintptr_t runtime_memory_resolve(const char *name) {
  * [LOW_MIN, USER_MIN): PS4 code packs pointers into 40-bit fields. */
 #define LOW_MIN UINT64_C(0x0800000000)
 static uintptr_t low_next=LOW_MIN;
+/* GOW3_LOW_IMAGE=1 starts host-owned guest memory at 0x400000, where the PS4 loads
+ * the main executable. Bluepoint's GenericOffsetTable (UC1) only encodes pointers in
+ * [0, 2 GiB) and [0x1000000000, +2 GiB); an image at LOW_MIN trips its assert. */
+static int low_start_checked;
 void *runtime_low_map(size_t size, int prot) {
     size=align_up(size,PAGE);
     write_lock();
+    if (!low_start_checked) {
+        const char *v=getenv("GOW3_LOW_IMAGE");
+        low_start_checked=1;
+        if (v && *v && *v!='0') low_next=UINT64_C(0x400000);
+    }
 #ifdef _WIN32
     void *p=NULL;
     while (!p && low_next+size<=USER_MIN) {

@@ -4,6 +4,27 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-16 (madrugada, 9) — UC2 fica na configuração I2; UC1: regras de fim de job do Ajm e patch do assert `m_gfxEopTick` (toggles desligados)
+
+- **UC2, vagão do trem (decisão do Matheus: por enquanto, I2).** No prólogo o vagão cai cedo se o pulo é tardio. Precisa de `GOW3_COMPUTE_PIPE` e `GOW3_READBACK_ASYNC` juntos, e piora quanto mais liso o jogo roda a 60.
+  - Descartados: timestamps, sobrescrita de label, landings sujos, ordem das faltas nas janelas da ACB, fila lateral (o par sozinho, N3, reproduz) e tempo das labels. Com `GOW3_TOGGLE_FILE` máscara 2199023255552 (RecorderFences desligado), O passou 3/3 só com o par, mas o ritmo ficou travado; P = todos os toggles + máscara 0/4.
+  - O `ProcessCommands` já drena o B antes do `flush_request` (o `ASYNC_DRAIN` é redundante). O pisca de textura sem `SCALAR_COPY_HLE` é o antigo.
+  - Configuração do UC2 por enquanto = I2 (sem `COMPUTE_PIPE`): `boot_uc2.bat`. Logs `out/trem-n1-0546.log`, `out/trem-O-0603.log`, `out/trem-P-0606.log`; notas em `investigacao-opus.md` (R.24).
+- **UC1, som (`GOW3_AJM_END_RULES=1`, do uncharted_pc do SuperMedo, GPL).** Um job do Ajm termina sem pedir mais entrada quando o último sample já saiu, e a saída cheia depois de quadros decodificados encerra o job normalmente (`NOT_ENOUGH_ROOM` só quando nem o primeiro quadro cabe). No UC1 fala e efeitos já tocavam; o tiro continua mudo e o log não mostra erro do Ajm, então a causa é outra. Novo `GOW3_AUDIO_TRACE=2`: registra todos os jobs (`boot_uc1_audio.bat`).
+- **UC1, tiro sem som (aberto).** Diagnósticos novos, todos desligados por padrão:
+  - `GOW3_AUDIO_DUMP` agora grava o buffer cru do jogo (ordem PS4, antes de volume e downmix); com `GOW3_AUDIO_STATS`, o log mostra cada `sceAudioOutSetVolume`.
+  - `GOW3_SCREAM_LOG=1` (só UC1 1.02, confere os bytes): liga as mensagens do motor de som (Scream/BoomRangBuss, função `0x3c0750`, e o relatório de erros de voz/banco em `0x407ae0`).
+  - `GOW3_AUDIO_SURROUND=1`: o `sceAudioOutGetPortState` anuncia os 8 canais da porta em vez de 2.
+  - Resultado: os jobs do Ajm voltam todos sem erro, todos os bancos são ATRAC9 mono, o volume é igual em todos os canais e o Scream não reporta erro nenhum nos tiros. O áudio cru mostra que o próprio jogo não mistura o tiro. Com 7.1 anunciado (o driver deixa de reduzir 8 para 2), o tiro continua mudo. Causa ainda desconhecida; bats `boot_uc1_audio*.bat`, `boot_uc1_scream.bat`, `boot_uc1_surround.bat`.
+- **Assert `m_gfxEopTick` (`GOW3_EOP_TICK_WAIT=1`, do SuperMedo 0.3.2).** `patch_eop_tick_wait` acha a mensagem do assert na imagem e faz a checagem esperar a GPU (`pause; jmp` de volta ao `cmp`). No UC1 a checagem usa um byte SIB (`cmpq $0,0xa08(%rax,%rcx,1)` em `0x4d2776`) e o handler é um ponteiro de função, então o padrão foi ampliado para as duas formas.
+
+## 2026-10-16 (madrugada, 8) — UC1 passa do assert offsetTableIndex: imagem carregada abaixo de 2 GiB (`GOW3_LOW_IMAGE=1`)
+
+- **Causa.** O UC1 parava no assert `offsetTableIndex` (`TGenericOffsetPtr.h:100`) logo depois de montar o save. A `GenericOffsetTable` da Bluepoint (tabela em `0xdbc980`, contador em `0xdbc9a0`, iniciada em `0x7e14a`) só codifica ponteiros em [0, 2 GiB) e [0x1000000000, +2 GiB): 31 bits de offset e o bit 31 escolhe a tabela. O port mapeava a imagem em `0x800000000` (`LOW_MIN` do `runtime_low_map`), então o primeiro ponteiro para os dados do próprio jogo (`0x8007ba7ea`) não cabia em nenhuma faixa. No PS4 o executável fica em `0x400000`.
+- **Correção.** `GOW3_LOW_IMAGE=1` (desligado por padrão) faz o `runtime_low_map` começar em `0x400000`. Imagem, traps, stubs e pilhas descem juntos, então os saltos rel32 dos hooks continuam ao alcance. O `probe.c` avisa se não houver faixa livre abaixo de 2 GiB. Nada no port classifica endereços do guest por `LOW_MIN`.
+- **Resultado.** `boot_uc1_low.bat`: imagem em `0xbbf0000`, sem assert, o Matheus jogou e está tudo ok; 60 FPS (pior quadro 17,9 ms).
+- Alternativa guardada (sugestão do Opus): corrigir a base da entrada 0 da tabela para a base real da imagem, só no UC1.
+
 ## 2026-10-16 (madrugada, 7) — UC1/UC2: primeiro boot; UC2 roda; vagão do trem cai cedo com compute pipe + readback assíncrono (toggles e diagnósticos novos, todos desligados)
 
 - **Preparação para UC1/UC2 (OK do Matheus).**

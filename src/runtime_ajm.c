@@ -77,10 +77,15 @@ static Context *contexts[MAX_CONTEXTS+1];
 static Batch batches[MAX_BATCHES];
 static size_t jobs_run, frames_decoded, batches_run;
 
-/* GOW3_AUDIO_TRACE=1: instance configurations and jobs that return a non-zero result. */
-static int trace_left=-1;
+/* GOW3_AUDIO_TRACE=1: instance configurations and jobs that return a non-zero result;
+   GOW3_AUDIO_TRACE=2: every job. */
+static int trace_left=-1, trace_all;
 static int ajm_trace(void) {
-    if (trace_left<0) { const char *e=getenv("GOW3_AUDIO_TRACE"); trace_left=e && e[0]=='1' ? 400 : 0; }
+    if (trace_left<0) {
+        const char *e=getenv("GOW3_AUDIO_TRACE");
+        trace_all=e && e[0]=='2';
+        trace_left=e && (e[0]=='1' || trace_all) ? (trace_all ? 200000 : 400) : 0;
+    }
     return trace_left>0 && trace_left--;
 }
 static uint32_t ident(uint32_t word) { return word & 0x3f; }
@@ -388,12 +393,24 @@ static void run_job(Context *ctx, uint32_t id, Job *job) {
     uint64_t in_start=in_size, out_start=output_room(&out);
     uint32_t frames=0;
     int32_t internal=0;
+    static int end_rules=-1;
+    if (end_rules<0) { const char *e=getenv("GOW3_AJM_END_RULES"); end_rules=e && e[0]=='1'; }
     if (in_size) for (;;) {
         if (in->gapless_loop && gapless_end(in)) { gapless_reset(in); in->total_samples=0; }
+        /* GOW3_AJM_END_RULES=1 (from SuperMedo's uncharted_pc, GPL): the stream's last sample
+           is out, so the job is done without asking for more input. Uncharted decodes each
+           sound effect to its end in one go and dropped every effect whose last job
+           reported partial input (engine noise, gunfire, menu clicks). */
+        if (end_rules && gapless_end(in) && frames) break;
         if (in->codec==CODEC_AT9 && (in->codec_flags & 1) && in_size>=4 && !memcmp(input,"RIFF",4)) { parse_riff(in,&input,&in_size); in->total_samples=0; }
         if (in->codec==CODEC_MP3 && (flags_result|=mp3_next(in,input,in_size))) break;
         if (!in->initialized) { flags_result|=RESULT_NOT_INITIALIZED; break; }
-        if (!gapless_end(in) && output_room(&out)<next_frame_bytes(in)) flags_result|=RESULT_NOT_ENOUGH_ROOM;
+        if (!gapless_end(in) && output_room(&out)<next_frame_bytes(in)) {
+            /* With end rules, a full output after decoded frames ends the job normally (as on
+               the PS4): the error is only for an output too small for the first frame. */
+            if (end_rules && frames) break;
+            flags_result|=RESULT_NOT_ENOUGH_ROOM;
+        }
         if (in_size<in->superframe_remain) flags_result|=RESULT_PARTIAL_INPUT;
         if (flags_result) break;
         uint32_t written=0;
@@ -404,7 +421,7 @@ static void run_job(Context *ctx, uint32_t id, Job *job) {
         if (!RUN_MULTIPLE_FRAMES(f)) break;
     }
     free(joined);
-    if (flags_result && ajm_trace())
+    if ((flags_result || trace_all) && ajm_trace())
         printf("Audio trace: Ajm job instance %u flags %#llx -> result %#x internal %d; input %llu/%llu used, output %llu/%llu written, frames %u\n",
                id,(unsigned long long)f,flags_result,internal,(unsigned long long)(in_start-in_size),(unsigned long long)in_start,
                (unsigned long long)(out_start-output_room(&out)),(unsigned long long)out_start,frames);
