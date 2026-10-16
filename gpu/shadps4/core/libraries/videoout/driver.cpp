@@ -561,7 +561,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         "compiles), %llu indirect, %llu indirect without pipeline; readbacks: "
                         "%llu all-at-once, %.1f MB; %llu with hot windows (+%llu windows); "
                         "fault write ticks: %llu open, %llu in flight (%.1f ticks behind), "
-                        "%llu done, %llu unknown; fast path: %llu side copies (%.2f ms), "
+                        "%llu done, %llu unknown; fast path: %llu side copies (%.2f ms, %llu after waiting for the write), "
                         "%llu full waits; GPU: %llu pass ends, %llu barriers (%llu on graphics stages), "
                         "%llu layout transitions (%llu on 1080p+ images)\n",
                         (unsigned long long)(Gow3Stats::draws.load() - uc3_window_draws),
@@ -581,6 +581,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         (unsigned long long)Gow3Stats::uc3_rb_unknown.exchange(0),
                         (unsigned long long)Gow3Stats::uc3_rb_side.exchange(0),
                         Gow3Stats::uc3_rb_side_ns.exchange(0) / 1e6,
+                        (unsigned long long)Gow3Stats::uc3_rb_side_waits.exchange(0),
                         (unsigned long long)Gow3Stats::uc3_rb_full.exchange(0),
                         (unsigned long long)Gow3Stats::uc3_pass_ends.exchange(0),
                         (unsigned long long)Gow3Stats::uc3_barriers.exchange(0),

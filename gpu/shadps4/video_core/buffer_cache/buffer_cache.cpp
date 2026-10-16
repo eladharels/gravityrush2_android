@@ -347,10 +347,89 @@ bool BufferCache::SideDownload(std::span<const SideCopies> work, const Buffer* s
     if (semaphore->KnownGpuTick() < write_tick + 1) {
         semaphore->Refresh();
         if (semaphore->KnownGpuTick() < write_tick + 1) {
-            return false;
+            // uc3 R.9.15 (GOW3_READBACK_FAST_WAIT=1): when the write's command buffers are
+            // already committed, wait only for them instead of submitting the open command
+            // buffer and waiting for all queued work (scheduler.Finish()).
+            static const bool wait_write = EmulatorSettingsImpl::Flag("GOW3_READBACK_FAST_WAIT", false);
+            if (!wait_write || write_tick + 1 >= scheduler.CurrentTick()) {
+                return false;
+            }
+            scheduler.Wait(write_tick + 1);
+            Gow3Stats::uc3_rb_side_waits.fetch_add(1, std::memory_order_relaxed);
         }
     }
     const vk::Device device = instance.GetDevice();
+    // uc3 R.9.16 (GOW3_READBACK_FAST_SIDEQ=1): the copy goes to the transfer queue, so it does
+    // not wait behind the work queued on the graphics queue after the write (the side command
+    // buffer there cost ~0.3 ms per readback in the castle). The finished write tick carries
+    // the memory dependency, as in SideQueueCopy.
+    static const bool use_sideq = EmulatorSettingsImpl::Flag("GOW3_READBACK_FAST_SIDEQ", false);
+    if (use_sideq && instance.GetSideQueue()) {
+        const auto start = std::chrono::steady_clock::now();
+        {
+            std::scoped_lock lk{sideq_mutex};
+            if (!sideq_pool) {
+                sideq_pool = Vulkan::Check<"create side queue command pool">(device.createCommandPool({
+                    .flags = vk::CommandPoolCreateFlagBits::eTransient |
+                             vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+                    .queueFamilyIndex = instance.GetSideQueueFamilyIndex(),
+                }));
+            }
+            if (!sideq_sync_cmdbuf) {
+                const vk::CommandBufferAllocateInfo alloc_info = {
+                    .commandPool = sideq_pool,
+                    .level = vk::CommandBufferLevel::ePrimary,
+                    .commandBufferCount = 1U,
+                };
+                Vulkan::Check<"allocate side queue command buffer">(
+                    device.allocateCommandBuffers(&alloc_info, &sideq_sync_cmdbuf));
+                sideq_sync_fence = Vulkan::Check<"create side queue fence">(device.createFence({}));
+            }
+            Vulkan::Check(sideq_sync_cmdbuf.reset());
+            Vulkan::Check(sideq_sync_cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
+            for (const auto& entry : work) {
+                sideq_sync_cmdbuf.copyBuffer(entry.arena->Handle(), staging->Handle(),
+                                             static_cast<u32>(entry.copies.size()), entry.copies.data());
+            }
+            const vk::MemoryBarrier2 after = {
+                .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+                .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+                .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+            };
+            sideq_sync_cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .memoryBarrierCount = 1U,
+                .pMemoryBarriers = &after,
+            });
+            Vulkan::Check(sideq_sync_cmdbuf.end());
+            const u64 wait_value = write_tick + 1;
+            const vk::Semaphore wait_semaphore = semaphore->Handle();
+            const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eAllCommands;
+            const vk::TimelineSemaphoreSubmitInfo timeline_si = {
+                .waitSemaphoreValueCount = 1U,
+                .pWaitSemaphoreValues = &wait_value,
+            };
+            const vk::SubmitInfo submit_info = {
+                .pNext = &timeline_si,
+                .waitSemaphoreCount = 1U,
+                .pWaitSemaphores = &wait_semaphore,
+                .pWaitDstStageMask = &wait_stage,
+                .commandBufferCount = 1U,
+                .pCommandBuffers = &sideq_sync_cmdbuf,
+            };
+            const auto result = instance.GetSideQueue().submit(submit_info, sideq_sync_fence);
+            ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during side submit");
+        }
+        Vulkan::Check(device.waitForFences(sideq_sync_fence, true, std::numeric_limits<u64>::max()));
+        Vulkan::Check(device.resetFences(sideq_sync_fence));
+        Gow3Stats::uc3_rb_side.fetch_add(1, std::memory_order_relaxed);
+        Gow3Stats::uc3_rb_side_ns.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                 start)
+                .count(),
+            std::memory_order_relaxed);
+        return true;
+    }
     if (!side_pool) {
         side_pool = Vulkan::Check<"create readback command pool">(device.createCommandPool({
             .flags = vk::CommandPoolCreateFlagBits::eTransient |

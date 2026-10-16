@@ -4,6 +4,22 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-16 (madrugada) — Esperas síncronas pela GPU: readback adiado de imagens no `gow3.ini` + leitura de buffer na fila de transferência (R.9.15/R.9.16, desligados); Castelo ~53 → 59,4–60 FPS
+
+Com `GOW3_PERF_DIAG=1` no Castelo (save 038), ~19% do tempo eram esperas síncronas pela GPU:
+
+- **`texture_cache.cpp` `ProcessDownloadImages`:** `scheduler.Finish()` ~100 vezes por segundo. As imagens são 2x2/4x4/8x8 RGBA16F, uma cadeia de exposição.
+  - Causa: o `gow3.ini` do Matheus estava com `deferred_readback=0`, e o `run.py` reexporta `GOW3_DEFERRED_READBACK` a partir do ini, então `-Set` sozinho não liga a opção.
+  - Com `deferred_readback=1`, a espera some: Castelo de ~53 para 57–59 FPS, imagem correta. O Matheus autorizou ligar no ini dele; o original ficou em `out/gow3.ini.antes-deferred`.
+- **`buffer_cache.cpp` `DownloadMemory`:** cerca de 45 leituras por segundo, feitas pela própria GPU, faziam `CopyBuffer` + `Finish()`.
+  - Com `GOW3_READBACK_FAST=1` (já existia), todas viram cópia lateral, porque a escrita já terminou.
+  - Mas a cópia lateral na fila gráfica espera o trabalho enfileirado depois da escrita (~5% do tempo).
+- **R.9.15 (`GOW3_READBACK_FAST_WAIT=1`):** se a escrita está num command buffer já fechado, `SideDownload` espera só o tick dela em vez de cair no `Finish()`. Quase nunca é necessário (0–1 vez por janela).
+- **R.9.16 (`GOW3_READBACK_FAST_SIDEQ=1`, requer `GOW3_READBACK_SIDEQ=1`):** `SideDownload` envia a cópia na fila de transferência, esperando o tick da escrita no timeline (já sinalizado), como o `SideQueueCopy`. O custo das cópias laterais caiu de 260–320 ms para ~47 ms a cada 5 s.
+- **Resultado (`medir_r916.bat`):** Castelo 59,4–60 FPS; ruas 59–60 FPS. A etapa B fica 65% ocupada, a espera por ticks da GPU fica em 0%, a imagem está correta e não houve asserts. Resta ~1 quadro de ~34 ms a cada 5 s.
+
+---
+
 ## 2026-10-15 (noite, 4) — Correções de segurança no R.9.12/R.9.13 (revisão Opus); ruas 59,8–60 FPS, O Castelo ~55 FPS
 
 - **Thread de cópia do anel:** passa a ler a memória do jogo sempre pela visão de backing (`CopySparseMemoryBacking`), sem tocar páginas protegidas. Antes, uma falta de página dentro dela podia esperar a GPU, que esperava a própria cópia (travamento raro).

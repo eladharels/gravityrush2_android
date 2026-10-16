@@ -102,7 +102,7 @@ inline std::atomic<std::uint64_t> uc3_rb_open{0}, uc3_rb_inflight{0}, uc3_rb_don
     uc3_rb_unknown{0}, uc3_rb_inflight_ticks{0};
 // uc3: GOW3_READBACK_FAST downloads: done on the side (no queue drain) / the full wait, and the
 // time spent waiting for the side copies.
-inline std::atomic<std::uint64_t> uc3_rb_side{0}, uc3_rb_side_ns{0}, uc3_rb_full{0};
+inline std::atomic<std::uint64_t> uc3_rb_side{0}, uc3_rb_side_ns{0}, uc3_rb_full{0}, uc3_rb_side_waits{0};
 // gow3 R.9.7: steady_clock ns when the latest flip packet was decoded (stage A) and reached the
 // recording side (stage B, SignalFlip); the stall log measures them from the previous flip.
 inline std::atomic<std::int64_t> flip_a_ns{0}, flip_b_ns{0}, flip_game_ns{0};

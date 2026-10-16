@@ -252,6 +252,9 @@ private:
     vk::CommandPool side_pool{};
     vk::CommandBuffer side_cmdbuf{};
     vk::Fence side_fence{};
+    /// uc3 R.9.16: SideDownload on the transfer queue (GOW3_READBACK_FAST_SIDEQ=1).
+    vk::CommandBuffer sideq_sync_cmdbuf{};
+    vk::Fence sideq_sync_fence{};
 
     /// uc3 (GOW3_READBACK_ASYNC=1): a read fault's download in flight. The GPU thread records
     /// the copies into a held staging buffer, submits them and goes back to its work; the
