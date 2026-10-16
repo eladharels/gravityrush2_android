@@ -184,6 +184,8 @@ A lista completa, com medições, está no [DEVLOG](docs/uc3/DEVLOG.md).
   cujas notas de versão mostraram quais problemas procurar (cache de texturas, configurações recomendadas).
 - **Equipe do shadPS4**: o núcleo de vídeo [shadPS4](https://github.com/shadps4-emu/shadPS4), que
   faz toda a tradução de GPU e shaders para Vulkan.
+- **Claude** ([Anthropic](https://www.anthropic.com)): desenvolvido com a ajuda do Claude (pesquisa,
+  código, testes, empacotamento e documentação).
 
 Também usados: [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9), [FFmpeg](https://ffmpeg.org),
 [SDL3](https://github.com/libsdl-org/SDL), [Dear ImGui](https://github.com/ocornut/imgui),

@@ -186,6 +186,8 @@ The full list, with measurements, is in the [DEVLOG](docs/uc3/DEVLOG.md).
   whose release notes showed which problems to look for (texture cache, recommended settings).
 - **shadPS4 team**: the [shadPS4](https://github.com/shadps4-emu/shadPS4) video core, which does all
   the GPU and shader translation to Vulkan.
+- **Claude** ([Anthropic](https://www.anthropic.com)): developed with Claude's help (research, code,
+  testing, packaging and documentation).
 
 Also used: [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9), [FFmpeg](https://ffmpeg.org),
 [SDL3](https://github.com/libsdl-org/SDL), [Dear ImGui](https://github.com/ocornut/imgui),
