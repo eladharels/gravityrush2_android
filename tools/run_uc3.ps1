@@ -6,9 +6,13 @@
 # The log goes to out\last-run.log (the previous one is kept as out\previous-run.log).
 param([string[]]$Set = @(), [string[]]$Extra = @())
 $port = Split-Path -Parent $PSScriptRoot
-$env:MSYSTEM = 'CLANG64'; $env:CHERE_INVOKING = '1'; $env:MSYS2_ROOT = 'D:/msys64'
+$env:MSYSTEM = 'CLANG64'; $env:CHERE_INVOKING = '1'
+# Caminhos: windows\config.bat (ou variaveis de ambiente) tem prioridade; senao, o layout da maquina de desenvolvimento.
+if (-not $env:MSYS2_ROOT) { $env:MSYS2_ROOT = 'D:/msys64' }
 # Layout antigo: junctions CUSA02344\app0 e \patch. Layout novo: jogo em CUSA02344, atualizacao em CUSA02344-UPDATE.
-if (Test-Path 'D:/Uncharted/CUSA02344/app0') {
+if ($env:GOW3_GAME_DIR) {
+    if (-not $env:GOW3_PATCH_DIR) { $env:GOW3_PATCH_DIR = "$($env:GOW3_GAME_DIR)-UPDATE" }
+} elseif (Test-Path 'D:/Uncharted/CUSA02344/app0') {
     $env:GOW3_GAME_DIR = 'D:/Uncharted/CUSA02344/app0'
     $env:GOW3_PATCH_DIR = 'D:/Uncharted/CUSA02344/patch'
 } else {
@@ -34,5 +38,5 @@ Set-Location $port
 if (Test-Path out\last-run.log) { Move-Item -Force out\last-run.log out\previous-run.log }
 Write-Host 'Iniciando o Uncharted 3... (log em out\last-run.log; feche a janela do jogo para terminar)'
 $args_line = ($Extra | ForEach-Object { "'$_'" }) -join ' '
-& D:\msys64\usr\bin\bash.exe -lc "python run.py $args_line 2>&1 | tee out/last-run.log | grep -E --line-buffered 'STOP|Fault|ASSERTION|ErrorDialog|LoadExec|first picture|first fiber'"
+& (Join-Path $env:MSYS2_ROOT 'usr\bin\bash.exe') -lc "python run.py $args_line 2>&1 | tee out/last-run.log | grep -E --line-buffered 'STOP|Fault|ASSERTION|ErrorDialog|LoadExec|first picture|first fiber'"
 Write-Host "Fim. Log completo: $port\out\last-run.log"

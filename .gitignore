@@ -23,3 +23,28 @@ perf.data
 mods.json
 patches.json
 !launcher/gow3.png
+
+# --- Publicacao (UC3): nada do jogo nem da maquina local vai para o repositorio ---
+# Game data from a PS4 dump never goes in the repository.
+CUSA*/
+app0/
+sce_sys/
+eboot.bin
+*.elf
+*.self
+*.sprx
+*.prx
+*.sfo
+*.psarc
+*.pak
+# Saves, logs, crash dumps, captures and local settings
+SAVEDATA*/
+savedata/
+*.dmp
+*.DMP
+*.log
+*.jpg
+gow3*.ini
+captures/
+# Local test scripts (the public ones live in windows/)
+/*.bat
