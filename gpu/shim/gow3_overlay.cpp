@@ -293,6 +293,16 @@ std::string OverlayText() {
 
 constexpr const char* Unsupported = "Unavailable: game version or code signature mismatch.";
 
+// uc3: the Game tab (cheats, multipliers), the upscaler and the startup patches (render
+// resolution, engine frame rate) are God of War III code patches; other games hide them.
+bool GodOfWar() {
+    static const bool gow = [] {
+        const std::string_view title = Common::ElfInfo::Instance().Title();
+        return title.empty() || title.find("God of War") != std::string_view::npos;
+    }();
+    return gow;
+}
+
 void GameTab() {
     auto& s = Gow3Settings::Get();
     ImGui::SeparatorText("Cheats");
@@ -373,6 +383,7 @@ void ImageTab() {
     const bool upscaling = iw < ww && ih < wh;
     const bool downscaling = iw > ww || ih > wh;
     const bool rcas_blocked = s.rcas && !s.rcas_applied;
+    if (GodOfWar()) {
     ImGui::SeparatorText("Scaling and sharpening");
     if (BeginRows("##scaling")) {
         CheckRow("Upscale with FSR 1", s.fsr1,
@@ -388,6 +399,7 @@ void ImageTab() {
         ImGui::EndDisabled();
         ImGui::EndTable();
     }
+    }
     ImGui::SeparatorText("Information");
     if (BeginRows("##image_info")) {
         char text[96];
@@ -395,8 +407,10 @@ void ImageTab() {
         InfoRow("Game image", text);
         std::snprintf(text, sizeof(text), "%d x %d", ww, wh);
         InfoRow("Window", text);
-        InfoRow("FSR 1", !s.fsr1 ? "off" : upscaling ? "active" : "no effect (image not smaller than window)");
-        InfoRow("Sharpening", s.rcas_applied ? "applied" : "not applied");
+        if (GodOfWar()) {
+            InfoRow("FSR 1", !s.fsr1 ? "off" : upscaling ? "active" : "no effect (image not smaller than window)");
+            InfoRow("Sharpening", s.rcas_applied ? "applied" : "not applied");
+        }
         ImGui::EndTable();
     }
 }
@@ -427,12 +441,14 @@ void PerformanceTab() {
     }
     ImGui::SeparatorText("Applied on restart");
     if (BeginRows("##restart")) {
-        static const char* const resolution_labels[] = {"Native (1080p)", "480p", "720p", "1440p", "1800p", "4K"};
-        ChoiceRow("Render resolution", s.render_resolution, resolution_labels, nullptr, int(G::Resolutions.size()),
-                  "The resolution the game draws at. Higher is sharper and slower.");
-        static const char* const engine_labels[] = {"60 (original)", "120", "240"};
-        ChoiceRow("Engine frame rate", s.engine_fps, engine_labels, G::EngineFps.data(), int(G::EngineFps.size()),
-                  "The highest frame rate the game itself runs at.");
+        if (GodOfWar()) {
+            static const char* const resolution_labels[] = {"Native (1080p)", "480p", "720p", "1440p", "1800p", "4K"};
+            ChoiceRow("Render resolution", s.render_resolution, resolution_labels, nullptr, int(G::Resolutions.size()),
+                      "The resolution the game draws at. Higher is sharper and slower.");
+            static const char* const engine_labels[] = {"60 (original)", "120", "240"};
+            ChoiceRow("Engine frame rate", s.engine_fps, engine_labels, G::EngineFps.data(), int(G::EngineFps.size()),
+                      "The highest frame rate the game itself runs at.");
+        }
         CheckRow("Game reads GPU data without waiting", s.stale_readback,
                  "Big FPS gain. Switch it off if lighting or objects look wrong.");
         CheckRow("Deferred GPU readbacks", s.deferred_readback,
@@ -455,6 +471,9 @@ void OverlayTab() {
         static const char* const names[] = {"FPS", "Frametime", "Upscaler", "GPU (name and use)", "CPU (game)",
                                             "RAM (game / total)", "VRAM (used / available)"};
         for (unsigned item = 0; item < 7; ++item) {
+            if (item == 2 && !GodOfWar()) {
+                continue; // Upscaler
+            }
             const unsigned bit = 1u << item;
             bool on = (s.overlay_items & bit) != 0;
             if (ImGui::Checkbox(names[item], &on)) {
@@ -508,7 +527,9 @@ void OverlayTab() {
         add(s.orb_pickup_supported.load(), "orb pickups");
         add(s.damage_supported.load(), "damage");
         add(s.actor_watch_supported.load(), "enemy health");
-        InfoRow("Game hooks", hooks.empty() ? "none" : hooks.c_str());
+        if (GodOfWar()) {
+            InfoRow("Game hooks", hooks.empty() ? "none" : hooks.c_str());
+        }
         ImGui::EndTable();
     }
 }
@@ -541,6 +562,14 @@ void Menu() {
     }
     footer_help = nullptr;
     constexpr int TabCount = 4;
+    // Tab 0 (Game) only exists for God of War III; menu_tab keeps the tab's id either way.
+    const int first_tab = GodOfWar() ? 0 : 1;
+    if (s.menu_tab < first_tab) {
+        s.menu_tab = first_tab;
+    }
+    if (requested_tab >= 0 && requested_tab < first_tab) {
+        requested_tab = first_tab;
+    }
     const ImGuiIO& io = ImGui::GetIO();
     if (!io.WantTextInput) {
         const int step = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
@@ -548,13 +577,14 @@ void Menu() {
                              ? -1
                              : 0;
         if (step) {
-            requested_tab = (s.menu_tab + step + TabCount) % TabCount;
+            const int shown = TabCount - first_tab;
+            requested_tab = first_tab + (s.menu_tab - first_tab + step + shown) % shown;
         }
     }
     const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f + ImGui::GetTextLineHeightWithSpacing() * 2.0f;
     if (ImGui::BeginTabBar("##tabs")) {
         static const char* const tabs[TabCount] = {"Game", "Image", "Performance", "Overlay"};
-        for (int tab = 0; tab < TabCount; ++tab) {
+        for (int tab = first_tab; tab < TabCount; ++tab) {
             const ImGuiTabItemFlags flags = requested_tab == tab ? ImGuiTabItemFlags_SetSelected : 0;
             if (!ImGui::BeginTabItem(tabs[tab], nullptr, flags)) {
                 continue;

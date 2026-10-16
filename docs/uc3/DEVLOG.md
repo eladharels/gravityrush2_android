@@ -4,6 +4,20 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-16 (manhã, 12) — Nomes sem "gow3": `ucndc.exe`, `ucndc.ini` e variáveis `UC_*`
+
+- **Pedido do Matheus.** Trocar os nomes herdados do gow3_pc que o jogador vê (partes 1 e 2 da proposta; os nomes internos de arquivos ficam).
+- **Executável.** No Windows o build gera `out/ucndc.exe` (`OUTPUT_NAME` em `gpu/CMakeLists.txt`; o alvo do ninja continua `gow3-probe`). `run.py` usa `ucndc.exe` e só cai para `gow3-probe.exe` se o novo não existir (Linux, builds antigos). `run_uc3.ps1`, `testar_ambiente.sh`, `fechar_jogo.bat`/`ler_erros.bat` da raiz e as ferramentas `uc3_*` reconhecem os dois nomes.
+- **Configuração.** `ucndc.ini`. Na primeira execução sem ele, `run.py` copia o `gow3.ini` para `ucndc.ini` (o antigo fica intacto). O jogo, sem `GOW3_CONFIG`, lê `ucndc.ini`, ou o `gow3.ini` enquanto só ele existir.
+- **Variáveis.** Toda `GOW3_<NOME>` também pode ser dada como `UC_<NOME>`; se as duas existirem, a `UC_` ganha. O alias é feito em `run.py`, no `run_uc3.ps1` (inclusive no `-Set`) e no próprio exe (`src/probe.c`, construtor de prioridade 101, antes dos inicializadores da biblioteca da GPU). O código continua lendo `GOW3_*`, então os .bat antigos seguem funcionando.
+- **Ícone.** O `ucndc.exe` usa o ícone do launcher (`launcher/uc.ico`, em `packaging/windows/gow3-probe.rc`) no lugar do ícone do God of War III.
+- **Thread de publicação.** Ajusta o launcher, `windows\*.bat`, o empacotamento e o README para os nomes novos.
+
+## 2026-10-16 (manhã, 11) — Menu do jogo (Insert / R3+L2) sem as opções do God of War III nos Uncharted
+
+- **Pedido do Matheus (com a thread de publicação, que faz a tela de Opções no launcher).** O menu herdado do gow3_pc mostrava no Uncharted coisas que só funcionam no God of War III.
+- **Mudança (`gpu/shim/gow3_overlay.cpp`).** `GodOfWar()` (título do param.sfo contém "God of War", ou título vazio) decide. Fora do GoW3 somem: a aba Game (trapaças, multiplicadores de orbes, barra de vida de inimigo), a seção de escala e nitidez (FSR 1/RCAS) e suas linhas de informação, "Render resolution" e "Engine frame rate" (patches do executável do GoW3), o item "Upscaler" do overlay e a linha "Game hooks". O `menu_tab` salvo como 0 vira a aba Image; L1/R1 percorrem só as abas visíveis. No GoW3 nada muda.
+
 ## 2026-10-16 (manhã, 10) — UC1: tiros com som (O_CREAT em /app0 abre o arquivo existente)
 
 - **Causa (achada pela thread de pesquisa, comparando com o uncharted_pc do SuperMedo, commit 5c457e7, GPL).** O UC1 abre a configuração de som (`sound1/config/ps4/...`) com `O_CREAT`. O nosso `do_open` recusava qualquer `O_CREAT` em `/app0` (somente leitura) com `EROFS`, então o Scream nunca carregava os protótipos das armas e o tiro nem chegava a tocar, sem erro nenhum (ver entrada 9).

@@ -7,10 +7,10 @@ mkdir -p out
 log=out/teste-ambiente.log
 exec > >(tee "$log") 2>&1
 echo "== $(date)"
-if tasklist 2>/dev/null | grep -qi gow3-probe; then echo "PARADO: gow3-probe.exe esta aberto"; exit 1; fi
+if tasklist 2>/dev/null | grep -qiE "gow3-probe|ucndc"; then echo "PARADO: o jogo (ucndc.exe) esta aberto"; exit 1; fi
 echo "== 1. compilacao"
 if bash build.sh; then echo "COMPILOU OK"; else echo "FALHOU A COMPILACAO (veja out/gpu-build.log)"; tail -40 out/gpu-build.log; exit 1; fi
-ls -la out/gow3-probe.exe
+ls -la out/ucndc.exe
 echo "== 2. testes"
 for t in memory-test fiber-test readback-queue-test page-state-test aliasing-test services-test png-decode-test; do
   if ninja -C out/gpu "$t" > "out/teste-build-$t.log" 2>&1; then

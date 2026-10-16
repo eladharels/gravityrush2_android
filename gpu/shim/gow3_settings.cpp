@@ -16,7 +16,22 @@ namespace {
 
 const char* Path() {
     const char* env = std::getenv("GOW3_CONFIG");
-    return env && env[0] ? env : "gow3.ini";
+    if (env && env[0]) {
+        return env;
+    }
+    // ucndc: ucndc.ini; an older gow3.ini is still read while ucndc.ini does not exist.
+    static const char* const path = [] {
+        std::FILE* file = std::fopen("ucndc.ini", "rb");
+        if (!file && (file = std::fopen("gow3.ini", "rb"))) {
+            std::fclose(file);
+            return "gow3.ini";
+        }
+        if (file) {
+            std::fclose(file);
+        }
+        return "ucndc.ini";
+    }();
+    return path;
 }
 
 float Clamp(float v, float lo, float hi) {

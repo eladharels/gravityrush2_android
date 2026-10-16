@@ -661,6 +661,35 @@ void runtime_restart(void) {
 #endif
 }
 
+/* ucndc: every GOW3_<NAME> option can also be given as UC_<NAME> (the new name wins when both
+   are set); the code keeps reading GOW3_*. Priority 101 runs before the GPU library's C++ static
+   initializers, which read options too. */
+__attribute__((constructor(101))) static void uc_environment_aliases(void) {
+#ifdef _WIN32
+    char **env = _environ;
+#else
+    extern char **environ;
+    char **env = environ;
+#endif
+    char pairs[64][512];
+    int count = 0;
+    for (; env && *env && count < 64; env++)
+        if (strncmp(*env, "UC_", 3) == 0 && strchr(*env, '=') && strlen(*env) < sizeof(pairs[0]))
+            strcpy(pairs[count++], *env);
+    for (int i = 0; i < count; i++) {
+        char *value = strchr(pairs[i], '=');
+        *value++ = 0;
+        char name[512];
+        snprintf(name, sizeof(name), "GOW3_%s", pairs[i] + 3);
+#ifdef _WIN32
+        _putenv_s(name, value);
+        SetEnvironmentVariableA(name, value[0] ? value : NULL);
+#else
+        setenv(name, value, 1);
+#endif
+    }
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifndef _WIN32

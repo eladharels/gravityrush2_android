@@ -1,8 +1,8 @@
-# uc3: saves a screenshot of the game window (gow3-probe, or -ProcessName shadPS4) to the given PNG path. The window is
+# uc3: saves a screenshot of the game window (ucndc, or -ProcessName shadPS4) to the given PNG path. The window is
 # brought to the front first, so another window on top (the chat, a browser) is not what gets
 # captured. Falls back to the whole primary screen when the game is not running.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File tools\uc3_screenshot.ps1 out\shot.png
-param([Parameter(Mandatory = $true)][string]$Path, [string]$ProcessName = "gow3-probe")
+param([Parameter(Mandatory = $true)][string]$Path, [string]$ProcessName = "ucndc")
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type @'
 using System;

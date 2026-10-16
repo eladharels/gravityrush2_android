@@ -103,10 +103,19 @@ def main():
     # As run.sh: relative paths (GOW3_GAME_DIR, GOW3_DATA_DIR, fsr4_shaders/) are from the port.
     os.chdir(PORT)
     env = os.environ
+    # ucndc: every GOW3_<NAME> option can also be given as UC_<NAME> (the new name wins).
+    for key in [key for key in env if key.upper().startswith('UC_')]:
+        env['GOW3_' + key[3:].upper()] = env[key]
     data = Path(env.get('GOW3_DATA_DIR', PORT))
     out = data / 'out'
     out.mkdir(parents=True, exist_ok=True)
-    env.setdefault('GOW3_CONFIG', str(data / 'gow3.ini'))
+    # ucndc: ucndc.ini; the first start copies an older gow3.ini to it (the old file is kept).
+    if 'GOW3_CONFIG' not in env:
+        ini = data / 'ucndc.ini'
+        if not ini.exists() and (data / 'gow3.ini').is_file():
+            shutil.copy2(data / 'gow3.ini', ini)
+            print(f'Settings: copied {data / "gow3.ini"} to {ini}', flush=True)
+        env['GOW3_CONFIG'] = str(ini)
     # Values this script derived on the previous start ("Apply and restart" inherits them) are
     # derived again from the new options.
     for key in env.pop('GOW3_DERIVED', '').split(','):
@@ -121,9 +130,11 @@ def main():
     if not env.get('GOW3_FSR411_DIR') and not (PORT / 'fsr4_411').is_dir() and (data / 'fsr4_411').is_dir():
         env['GOW3_FSR411_DIR'] = str(data / 'fsr4_411')
 
-    probe = Path(env['GOW3_PROBE']) if env.get('GOW3_PROBE') else find_executable('gow3-probe' + EXE_SUFFIX)
+    # ucndc: ucndc.exe (Windows builds), else the older gow3-probe name (Linux, old builds).
+    probe = Path(env['GOW3_PROBE']) if env.get('GOW3_PROBE') else (
+        find_executable('ucndc' + EXE_SUFFIX) or find_executable('gow3-probe' + EXE_SUFFIX))
     if not probe or not probe.is_file():
-        fail(f'gow3-probe{EXE_SUFFIX} not found: build it with build.sh or use a packaged build.')
+        fail(f'ucndc{EXE_SUFFIX} not found: build it with build.sh or use a packaged build.')
     # Development builds run from the MSYS2 tree: its CLANG64 DLLs (SDL3, FFmpeg, ...).
     if WINDOWS and not (probe.parent / 'SDL3.dll').is_file():
         clang64 = Path(env.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'

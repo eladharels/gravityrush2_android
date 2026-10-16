@@ -34,7 +34,7 @@ def progress_lines(log):
 
 def probe_pid():
     out = subprocess.run(['powershell', '-NoProfile', '-Command',
-                          '(Get-Process gow3-probe -ErrorAction SilentlyContinue | Select-Object -First 1).Id'],
+                          '(Get-Process ucndc, gow3-probe -ErrorAction SilentlyContinue | Select-Object -First 1).Id'],
                          capture_output=True, text=True).stdout.strip()
     return int(out) if out.isdigit() else None
 
@@ -85,7 +85,7 @@ def main():
             print('no hang seen' if game.poll() is None else f'game ended (exit {game.returncode})')
     finally:
         pad.write_text('')
-        subprocess.run(['taskkill', '/F', '/IM', 'gow3-probe.exe'], capture_output=True)
+        subprocess.run(['taskkill', '/F', '/IM', 'ucndc.exe', '/IM', 'gow3-probe.exe'], capture_output=True)
         game.wait(timeout=30)
 
 
