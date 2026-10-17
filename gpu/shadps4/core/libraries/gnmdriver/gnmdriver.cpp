@@ -91,8 +91,12 @@ static void ResetSubmissionLock(Platform::InterruptId irq) {
 
 static void WaitGpuIdle() {
     HLE_TRACE;
-    std::unique_lock lock{m_wait_idle};
-    cv_lock.wait(lock, [] { return submission_lock == 0; });
+    AmdGpu::NoteGateStage(AmdGpu::GateStage::IdleWaitBegin);
+    {
+        std::unique_lock lock{m_wait_idle};
+        cv_lock.wait(lock, [] { return submission_lock == 0; });
+    }
+    AmdGpu::NoteGateStage(AmdGpu::GateStage::IdleWaitEnd);
 }
 
 // Write a special NOP packet with N DWs data block
@@ -2502,6 +2506,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     LOG_DEBUG(Lib_GnmDriver, "called");
     std::scoped_lock lk{m_submit_lock};
     WaitGpuIdle();
+    AmdGpu::NoteGateStage(AmdGpu::GateStage::SubmitDone);
     if (!liverpool->IsGpuIdle()) {
         submission_lock = true;
     }

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <limits>
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
@@ -790,8 +791,21 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
             addr_reg = addr_reg + 2;
             return ir.CompositeConstruct(get_coord(addr_reg - 2, 0), get_coord(addr_reg - 1, 1));
         case AmdGpu::ImageType::Color2DArray: // x, y, slice
-        case AmdGpu::ImageType::Cube:         // x, y, face
-        case AmdGpu::ImageType::Color3D:      // x, y, z
+        case AmdGpu::ImageType::Cube: {       // x, y, face
+            addr_reg = addr_reg + 3;
+            // ucndc (GOW3_RAW_SLICE=1, off by default): GCN never normalizes the slice or the
+            // cube face; dividing it by the layer count with unnormalized coordinates read
+            // layer 0 (SuperMedo passes it raw). Candidate for the UC3 cave torch light.
+            static const bool raw_slice = [] {
+                const char* env = std::getenv("GOW3_RAW_SLICE");
+                return env && env[0] == '1';
+            }();
+            const IR::Value third = raw_slice ? IR::Value{get_addr_reg(addr_reg - 1)}
+                                              : get_coord(addr_reg - 1, 2);
+            return ir.CompositeConstruct(get_coord(addr_reg - 3, 0), get_coord(addr_reg - 2, 1),
+                                         third);
+        }
+        case AmdGpu::ImageType::Color3D: // x, y, z
             addr_reg = addr_reg + 3;
             return ir.CompositeConstruct(get_coord(addr_reg - 3, 0), get_coord(addr_reg - 2, 1),
                                          get_coord(addr_reg - 1, 2));

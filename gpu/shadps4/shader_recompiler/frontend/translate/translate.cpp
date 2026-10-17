@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "core/emulator_settings.h"
@@ -112,8 +113,20 @@ void Translator::EmitPrologue(IR::Block* first_block) {
 
         const bool is_indirect = runtime_info.sw.vs.is_indirect;
 
+        // ucndc (GOW3_A_VSIDS=1, off by default): SuperMedo's rule: subtract the base vertex
+        // only when the shader reads it back from its user SGPR; the instance ID stays raw.
+        // Candidate for the UC3 cave torch light (GPU-culled indirect draws).
+        static const bool a_vsids = [] {
+            const char* env = std::getenv("GOW3_A_VSIDS");
+            return env && env[0] == '1';
+        }();
         IR::U32 vertex_id = ir.GetAttributeU32(IR::Attribute::VertexId);
-        if (is_indirect && (fetch_data.Empty() || fetch_data.vertex_offset_sgpr == -1)) {
+        if (a_vsids) {
+            if (base_vertex_sgpr != -1 &&
+                (fetch_data.Empty() || fetch_data.vertex_offset_sgpr == -1)) {
+                vertex_id = ir.ISub(vertex_id, ir.GetAttributeU32(IR::Attribute::BaseVertex));
+            }
+        } else if (is_indirect && (fetch_data.Empty() || fetch_data.vertex_offset_sgpr == -1)) {
             vertex_id = ir.ISub(vertex_id, ir.GetAttributeU32(IR::Attribute::BaseVertex));
         } else if (base_vertex_sgpr != -1) {
             ASSERT_MSG(fetch_data.vertex_offset_sgpr == base_vertex_sgpr,
@@ -121,7 +134,8 @@ void Translator::EmitPrologue(IR::Block* first_block) {
         }
 
         IR::U32 instance_id = ir.GetAttributeU32(IR::Attribute::InstanceId);
-        if (is_indirect && (fetch_data.Empty() || fetch_data.instance_offset_sgpr == -1)) {
+        if (a_vsids) {
+        } else if (is_indirect && (fetch_data.Empty() || fetch_data.instance_offset_sgpr == -1)) {
             instance_id = ir.ISub(instance_id, ir.GetAttributeU32(IR::Attribute::BaseInstance));
         } else if (base_instance_sgpr != -1) {
             ASSERT_MSG(fetch_data.instance_offset_sgpr == base_instance_sgpr,

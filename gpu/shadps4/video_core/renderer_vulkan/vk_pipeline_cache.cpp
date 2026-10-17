@@ -657,7 +657,38 @@ void PipelineCache::FinishCompilations() {
     }
 }
 
+// uc3: GOW3_SYNC_SMALL_TARGETS=1: draws into small color targets (at most 64K pixels) compile
+// their shaders before drawing even with background compilation on. Background compilation
+// skips a draw until its shaders are ready, and some small targets are drawn only once: the
+// 256x8 light falloff table drawn at boot stayed black and the cave torch lit nothing.
+static bool SyncSmallTarget(const AmdGpu::Regs& regs) {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_SYNC_SMALL_TARGETS");
+        return env && env[0] == '1';
+    }();
+    if (!on) {
+        return false;
+    }
+    bool any = false;
+    for (u32 i = 0; i < AmdGpu::NUM_COLOR_BUFFERS; ++i) {
+        const auto& col_buf = regs.color_buffers[i];
+        if (!col_buf || !regs.color_target_mask.GetMask(i)) {
+            continue;
+        }
+        if (u64(col_buf.Pitch()) * col_buf.Height() > 65536) {
+            return false;
+        }
+        any = true;
+    }
+    return any;
+}
+
 bool PipelineCache::AsyncCompilation() const {
+    // uc3: GOW3_FORCE_SYNC_SHADERS=1 compiles every shader before its draw (diagnostic).
+    static const bool force_sync = std::getenv("GOW3_FORCE_SYNC_SHADERS") != nullptr;
+    if (force_sync) {
+        return false;
+    }
     return compiler && Gow3Settings::Get().async_shaders.load(std::memory_order_relaxed);
 }
 
@@ -859,7 +890,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         }
         return nullptr;
     }
-    if (AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect()) {
+    if (AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect() &&
+        !SyncSmallTarget(*sel.regs)) {
         const auto found = graphics_pipelines.find(sel.graphics_key);
         if (found != graphics_pipelines.end()) {
             return found->second.get();
@@ -1159,6 +1191,24 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
             GetProgram(sel, stage_in, stage_out, params, binding);
         if (!sel.infos[stage_out_idx]) {
             sel.compilation_pending = true;
+            // uc3: GOW3_SKIP_LOG=1: why a draw has no shader (cave torch table never drawn?).
+            static const bool skip_log = std::getenv("GOW3_SKIP_LOG") != nullptr;
+            if (skip_log && !sel.worker) {
+                static std::atomic<int> shown{0};
+                if (shown.fetch_add(1) < 300) {
+                    std::shared_lock lk{programs_mutex};
+                    const auto found = program_cache.find(params.hash);
+                    const bool known = found != program_cache.end();
+                    std::printf("ucndc: draw skipped: stage %u shader %#llx, known %d, failed %d, "
+                                "pending %d, modules %zu, async %d\n",
+                                stage_out_idx, (unsigned long long)params.hash, int(known),
+                                known ? int(found->second->compilation_failed) : -1,
+                                known ? int(found->second->pending != nullptr) : -1,
+                                known ? found->second->modules.size() : size_t(0),
+                                int(AsyncCompilation()));
+                    std::fflush(stdout);
+                }
+            }
             return false;
         }
         if (fetch_shader_) {
@@ -1361,7 +1411,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     auto it_pgm = program_cache.find(params.hash); // this thread is the only writer
     const bool compile_async = AsyncCompilation() && hw_stage != HwStage::Compute &&
                                !sel.regs->stage_enable.hs_en &&
-                               !EmulatorSettings.IsShaderCollect();
+                               !EmulatorSettings.IsShaderCollect() && !SyncSmallTarget(*sel.regs);
     if (!compile_async && it_pgm != program_cache.end() && it_pgm->second->pending) {
         {
             PhaseTimer waiting{g_gow3_compile_wait_ns};

@@ -243,6 +243,37 @@ static void patch_eop_tick_wait(uint64_t image_size) {
     }
     if (!patched) printf("Frame pacing: EOP tick check not found\n");
 }
+/* GOW3_JOB_SPIN=N (ucndc, off): Naughty Dog's job workers (NdJobWorkerThread 0-5, the same
+ * loop in UC1, UC2 and UC3) look for work in their queues and, when there is none and sleeping
+ * is allowed (byte [manager+0x59]), spin 1000 times with PAUSE before they block on a condition
+ * variable (10 ms timeout). The game wakes them with a broadcast tens of thousands of times a
+ * second, so on a PC, where PAUSE takes far longer than on the PS4's Jaguar, the six workers
+ * stay near a full core each. This sets the 1000 (cmp r8, 1000 ; jl spin) to N; 0 blocks at
+ * once. Found by its bytes: cmp byte [rdi+0x59],0 ; je ; cmp r8,0x3e8 ; jl.
+ * GOW3_JOB_SLEEP=1 (ucndc, off): the game clears that byte during gameplay (function at UC3
+ * 0xd96440, which also drops the workers to the lowest priority, 767) and the workers then spin
+ * with PAUSE forever, never blocking; it is set in cutscenes and loading, where the game's CPU
+ * use falls to ~5%. This removes the je, so the workers always spin N times and then block. */
+static void patch_job_spin(uint64_t image_size, const char *value, int sleep) {
+    char *end = NULL;
+    long n = value ? strtol(value, &end, 0) : 1000;
+    if (value && (!value[0] || *end || n < 0 || n > 0x7fffffff)) { printf("Job spin: bad GOW3_JOB_SPIN=%s\n", value); return; }
+    static const unsigned char head[] = {0x80, 0x7f, 0x59, 0x00, 0x74};
+    static const unsigned char cmp[] = {0x49, 0x81, 0xf8, 0xe8, 0x03, 0x00, 0x00, 0x7c};
+    uint64_t found = 0, count = 0;
+    for (uint64_t at = 0; at + sizeof(head) + 1 + sizeof(cmp) <= image_size; ++at) {
+        if (image[at] != 0x80 || memcmp(image + at, head, sizeof(head)) ||
+            memcmp(image + at + sizeof(head) + 1, cmp, sizeof(cmp))) continue;
+        found = at + sizeof(head) + 1;
+        ++count;
+    }
+    if (count != 1) { printf("Job spin: worker wait loop %s\n", count ? "found more than once, left alone" : "not found"); return; }
+    uint32_t spins = (uint32_t)n;
+    memcpy(image + found + 3, &spins, 4);
+    if (sleep) { image[found - 2] = 0x66; image[found - 1] = 0x90; } /* je -> 2-byte nop */
+    printf("Job spin: job workers spin %ld times before they sleep (was 1000)%s, at %#" PRIx64 "\n", n,
+           sleep ? ", and may sleep in gameplay too" : "", found);
+}
 /* GOW3_SCREAM_LOG=1 (UC1 1.02 diagnostics): the game's sound engine (SCEA Scream) logs through
  * one function (0x3c0750) that drops messages above a verbosity kept in .bss (0) and hands the
  * rest to four optional callbacks, all NULL in the shipped game. The verbosity test is removed
@@ -661,6 +692,248 @@ void runtime_restart(void) {
 #endif
 }
 
+/* ucndc (GOW3_IMPORT_COUNT=1, diagnostic): every resolved function import goes through a thunk
+   that counts its calls; a reporter prints the most called imports every 10 s, to see which
+   kernel calls the game's busy threads (NdJobWorkerThread) make while they wait. The thunk uses
+   only r11 (not an argument register; rax carries the vector count of variadic calls). */
+#include <pthread.h>
+static uint64_t *import_calls; /* one counter per import, 64 bytes apart */
+#define IMPORT_CALL_STRIDE 8
+static void *import_count_report(void *unused) {
+    (void)unused;
+    uint64_t *last=calloc(import_count ? import_count : 1,sizeof(*last));
+    uint64_t *order=calloc(import_count ? import_count : 1,sizeof(*order));
+    if (!last || !order) return NULL;
+    for (;;) {
+#ifdef _WIN32
+        Sleep(10000);
+#else
+        sleep(10);
+#endif
+        uint64_t total=0, n=0;
+        for (uint64_t i=0;i<import_count;++i) {
+            uint64_t now=__atomic_load_n(&import_calls[i*IMPORT_CALL_STRIDE],__ATOMIC_RELAXED);
+            uint64_t delta=now-last[i];
+            last[i]=now;
+            order[i]=delta;
+            total+=delta;
+            if (delta) ++n;
+        }
+        printf("Import calls (10 s): %" PRIu64 " calls in %" PRIu64 " imports; top:\n", total, n);
+        for (int k=0;k<15;++k) {
+            uint64_t best=0, at=import_count;
+            for (uint64_t i=0;i<import_count;++i) if (order[i]>best) { best=order[i]; at=i; }
+            if (at==import_count) break;
+            printf("  %12" PRIu64 "  %s  [%s]\n", best, runtime_import_name(names[at]), names[at]);
+            order[at]=0;
+        }
+        fflush(stdout);
+    }
+    return NULL;
+}
+
+#ifdef _WIN32
+/* ucndc (GOW3_RIP_SAMPLE=1, diagnostic): every ~1 ms suspends each guest thread whose name
+   contains GOW3_RIP_SAMPLE_FILTER (default NdJobWorker), reads its instruction pointer and
+   resumes it; every 10 s prints, per thread, where it spent its time (eboot offsets, or module
+   offsets outside the game). Finds the guest loop the job workers spin in. The filter can list
+   several names separated by "+" or commas ("*" = every guest thread). Each sample also copies the top
+   of the stack and counts the first game address on it (the likely caller), which tells what a
+   thread is waiting in when its RIP is inside a host function. Nothing is allocated or printed
+   while a thread is suspended. */
+static uint64_t rip_image_size;
+static void rip_where(uint64_t rip, char *out, size_t size);
+enum { RIP_THREADS = 48, RIP_SLOTS = 4096, RIP_STACK_QWORDS = 1024 };
+static uint64_t rip_keys[RIP_THREADS][RIP_SLOTS], caller_keys[RIP_THREADS][RIP_SLOTS];
+static uint32_t rip_counts[RIP_THREADS][RIP_SLOTS], caller_counts[RIP_THREADS][RIP_SLOTS];
+/* uc3: the first three game return addresses on the stack (a call instruction right before
+   them), packed as 21-bit eboot offsets / 16: the guest call chain a host wait came from. */
+static uint64_t chain_keys[RIP_THREADS][RIP_SLOTS];
+/* uc3: the GPU command processor thread (filter "GpuCommandProcessor") is a host thread: its
+   chain holds ucndc.exe return addresses instead. */
+static int rip_host[RIP_THREADS];
+static uint32_t chain_counts[RIP_THREADS][RIP_SLOTS];
+static int rip_after_call(uint64_t v) {
+    /* The image has unmapped holes: read the bytes before v safely. */
+    uint8_t bytes[8];
+    SIZE_T read = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(uintptr_t)(v - 8), bytes, sizeof(bytes), &read) ||
+        read != sizeof(bytes))
+        return 0;
+    const uint8_t *p = bytes + 8;
+    if (p[-5] == 0xE8) return 1;                                   /* call rel32 */
+    if (p[-2] == 0xFF && (p[-2 + 1] & 0xF8) == 0xD0) return 1;     /* call reg */
+    if (p[-3] == 0xFF && (p[-2] & 0xF8) == 0x50) return 1;         /* call [reg+disp8] */
+    if (p[-6] == 0xFF && (p[-5] == 0x15 || (p[-5] & 0xF8) == 0x90)) return 1; /* call [rip/reg+disp32] */
+    if (p[-3] == 0x41 && p[-2] == 0xFF && (p[-1] & 0xF8) == 0xD0) return 1;  /* call r8-r15 */
+    return 0;
+}
+static int rip_count(uint64_t *keys, uint32_t *counts, uint64_t key) {
+    uint32_t slot = (uint32_t)((key * UINT64_C(0x9E3779B97F4A7C15)) >> 52) & (RIP_SLOTS - 1);
+    for (int probe_n = 0; probe_n < 64; ++probe_n, slot = (slot + 1) & (RIP_SLOTS - 1)) {
+        if (keys[slot] == key) { ++counts[slot]; return 1; }
+        if (!keys[slot]) { keys[slot] = key; counts[slot] = 1; return 1; }
+    }
+    return 0;
+}
+static int rip_filter_match(const char *name, const char *filter) {
+    if (!strcmp(filter, "*")) return 1;
+    char token[64];
+    for (const char *at = filter; *at;) {
+        size_t n = strcspn(at, ",+");
+        if (n && n < sizeof(token)) { memcpy(token, at, n); token[n] = 0; if (strstr(name, token)) return 1; }
+        at += n; if (*at) ++at;
+    }
+    return 0;
+}
+static void rip_print_top(const char *label, uint64_t *keys, uint32_t *counts, uint32_t total, int top) {
+    for (int k = 0; k < top; ++k) {
+        uint32_t best = 0; int at = -1;
+        for (int s = 0; s < RIP_SLOTS; ++s) if (counts[s] > best) { best = counts[s]; at = s; }
+        if (at < 0) break;
+        char where[MAX_PATH + 32];
+        rip_where(keys[at], where, sizeof(where));
+        printf("  %s %5.1f%%  %s\n", label, total ? 100.0 * best / total : 0.0, where);
+        counts[at] = 0;
+    }
+}
+static void rip_where(uint64_t rip, char *out, size_t size) {
+    if (rip >= (uint64_t)(uintptr_t)image && rip - (uint64_t)(uintptr_t)image < rip_image_size) {
+        snprintf(out, size, "eboot+0x%" PRIx64, rip - (uint64_t)(uintptr_t)image);
+        return;
+    }
+    HMODULE module = NULL;
+    char path[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)(uintptr_t)rip, &module) && module) {
+        GetModuleFileNameA(module, path, sizeof(path));
+        const char *base = strrchr(path, '\\');
+        snprintf(out, size, "%s+0x%" PRIx64, base ? base + 1 : path, rip - (uint64_t)(uintptr_t)module);
+    } else {
+        snprintf(out, size, "0x%" PRIx64, rip);
+    }
+}
+static void *rip_sampler(void *unused) {
+    (void)unused;
+    const char *filter = getenv("GOW3_RIP_SAMPLE_FILTER");
+    if (!filter || !filter[0]) filter = "NdJobWorker";
+    uint32_t ids[64];
+    char names_now[64][32];
+    for (;;) {
+        HANDLE handles[RIP_THREADS];
+        char tnames[RIP_THREADS][32];
+        uint32_t samples[RIP_THREADS] = {0}, lost[RIP_THREADS] = {0};
+        int count = 0;
+        int listed = runtime_thread_snapshot(ids, names_now, 64);
+        for (int i = 0; i < listed && count < RIP_THREADS; ++i) {
+            if (!rip_filter_match(names_now[i], filter)) continue;
+            HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, ids[i]);
+            if (!h) continue;
+            handles[count] = h;
+            memcpy(tnames[count], names_now[i], 32);
+            memset(rip_keys[count], 0, sizeof(rip_keys[count]));
+            memset(rip_counts[count], 0, sizeof(rip_counts[count]));
+            memset(caller_keys[count], 0, sizeof(caller_keys[count]));
+            memset(caller_counts[count], 0, sizeof(caller_counts[count]));
+            memset(chain_keys[count], 0, sizeof(chain_keys[count]));
+            memset(chain_counts[count], 0, sizeof(chain_counts[count]));
+            rip_host[count] = 0;
+            ++count;
+        }
+        unsigned long cp_id = gow3gpu_cp_thread_id();
+        if (cp_id && count < RIP_THREADS && rip_filter_match("GpuCommandProcessor", filter)) {
+            HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, cp_id);
+            if (h) {
+                handles[count] = h;
+                snprintf(tnames[count], sizeof(tnames[count]), "GpuCommandProcessor");
+                memset(rip_keys[count], 0, sizeof(rip_keys[count]));
+                memset(rip_counts[count], 0, sizeof(rip_counts[count]));
+                memset(caller_keys[count], 0, sizeof(caller_keys[count]));
+                memset(caller_counts[count], 0, sizeof(caller_counts[count]));
+                memset(chain_keys[count], 0, sizeof(chain_keys[count]));
+                memset(chain_counts[count], 0, sizeof(chain_counts[count]));
+                rip_host[count] = 1;
+                ++count;
+            }
+        }
+        if (!count) { Sleep(2000); continue; }
+        ULONGLONG until = GetTickCount64() + 10000;
+        while (GetTickCount64() < until) {
+            for (int t = 0; t < count; ++t) {
+                CONTEXT context;
+                memset(&context, 0, sizeof(context));
+                context.ContextFlags = CONTEXT_CONTROL;
+                if (SuspendThread(handles[t]) == (DWORD)-1) continue;
+                BOOL ok = GetThreadContext(handles[t], &context);
+                static uint64_t stack[RIP_STACK_QWORDS];
+                SIZE_T got = 0;
+                BOOL stack_ok = FALSE;
+                for (size_t want = RIP_STACK_QWORDS; ok && !stack_ok && want >= 8; want /= 4)
+                    stack_ok = ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(uintptr_t)context.Rsp,
+                                                 stack, want * sizeof(stack[0]), &got);
+                ResumeThread(handles[t]);
+                if (!ok) continue;
+                uint64_t rip = rip_host[t] ? context.Rip & ~UINT64_C(0x3F) : context.Rip;
+                if (!rip_count(rip_keys[t], rip_counts[t], rip)) { ++lost[t]; continue; }
+                ++samples[t];
+                uint64_t caller = 0;
+                for (size_t q = 0; stack_ok && q < got / sizeof(stack[0]); ++q) {
+                    uint64_t v = stack[q];
+                    if (v != rip && v > (uint64_t)(uintptr_t)image && v - (uint64_t)(uintptr_t)image < rip_image_size) {
+                        caller = v;
+                        break;
+                    }
+                }
+                if (caller) rip_count(caller_keys[t], caller_counts[t], caller);
+                uint64_t chain = 0;
+                int links = 0;
+                uint64_t chain_base = (uint64_t)(uintptr_t)image, chain_size = rip_image_size;
+                if (rip_host[t]) {
+                    static uint64_t exe_base, exe_size;
+                    if (!exe_base) {
+                        const unsigned char *base = (const unsigned char *)GetModuleHandleA(NULL);
+                        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + ((const IMAGE_DOS_HEADER *)base)->e_lfanew);
+                        exe_size = nt->OptionalHeader.SizeOfImage;
+                        exe_base = (uint64_t)(uintptr_t)base;
+                    }
+                    chain_base = exe_base;
+                    chain_size = exe_size < (UINT64_C(1) << 25) ? exe_size : (UINT64_C(1) << 25);
+                }
+                for (size_t q = 0; stack_ok && q < got / sizeof(stack[0]) && links < 3; ++q) {
+                    uint64_t v = stack[q];
+                    if (v > chain_base + 8 && v - chain_base < chain_size && rip_after_call(v)) {
+                        chain |= (((v - chain_base) >> 4) & 0x1FFFFF) << (21 * links);
+                        ++links;
+                    }
+                }
+                if (links) rip_count(chain_keys[t], chain_counts[t], chain);
+            }
+            Sleep(1);
+        }
+        for (int t = 0; t < count; ++t) {
+            CloseHandle(handles[t]);
+            printf("RIP samples (10 s) %s: %u samples", tnames[t], samples[t]);
+            if (lost[t]) printf(", %u unbinned", lost[t]);
+            printf("\n");
+            rip_print_top(rip_host[t] ? "at64B " : "at    ", rip_keys[t], rip_counts[t], samples[t], rip_host[t] ? 150 : 10);
+            rip_print_top("caller", caller_keys[t], caller_counts[t], samples[t], 5);
+            for (int k = 0; k < 6; ++k) {
+                uint32_t best = 0; int at = -1;
+                for (int s2 = 0; s2 < RIP_SLOTS; ++s2) if (chain_counts[t][s2] > best) { best = chain_counts[t][s2]; at = s2; }
+                if (at < 0) break;
+                uint64_t c = chain_keys[t][at];
+                printf("  chain  %5.1f%%  ~%s+0x%" PRIx64 " <- ~0x%" PRIx64 " <- ~0x%" PRIx64 " (16-byte units)\n",
+                       samples[t] ? 100.0 * best / samples[t] : 0.0, rip_host[t] ? "ucndc" : "eboot",
+                       (c & 0x1FFFFF) << 4, ((c >> 21) & 0x1FFFFF) << 4, ((c >> 42) & 0x1FFFFF) << 4);
+                chain_counts[t][at] = 0;
+            }
+        }
+        fflush(stdout);
+    }
+    return NULL;
+}
+#endif
+
 /* ucndc: every GOW3_<NAME> option can also be given as UC_<NAME> (the new name wins when both
    are set); the code keeps reading GOW3_*. Priority 101 runs before the GPU library's C++ static
    initializers, which read options too. */
@@ -904,6 +1177,12 @@ int main(int argc, char **argv) {
         t[8] = 0x48; t[9] = 0xb8; memcpy(t + 10, &handler, 8);
         t[18] = 0xff; t[19] = 0xe0;
     }
+    unsigned char *import_thunks = NULL;
+    if (getenv("GOW3_IMPORT_COUNT") && getenv("GOW3_IMPORT_COUNT")[0] == '1' && !check_imports) {
+        import_thunks = allocate(round_page((import_count + 1) * 32));
+        import_calls = calloc((import_count + 1) * IMPORT_CALL_STRIDE, sizeof(*import_calls));
+        if (!import_calls) fail("allocation failed");
+    }
     for (uint64_t i = 0; i < nr; ++i) {
         uintptr_t value = relocs[i].kind == 2 ? (uintptr_t)(data_traps + page_size * relocs[i].value + relocs[i].addend)
                         : relocs[i].kind == 1 ? (uintptr_t)(traps + 32 * relocs[i].value)
@@ -917,8 +1196,34 @@ int main(int argc, char **argv) {
                 value=(uintptr_t)image+address+relocs[i].addend;
             }
         }
+        if (import_thunks && relocs[i].kind == 1 && relocs[i].addend == 0 &&
+            value != (uintptr_t)(traps + 32 * relocs[i].value)) {
+            unsigned char *t = import_thunks + 32 * relocs[i].value;
+            if (!t[0]) {
+                uintptr_t counter = (uintptr_t)&import_calls[relocs[i].value * IMPORT_CALL_STRIDE];
+                t[0] = 0x49; t[1] = 0xbb; memcpy(t + 2, &counter, 8);          /* mov r11, counter */
+                t[10] = 0xf0; t[11] = 0x49; t[12] = 0xff; t[13] = 0x03;        /* lock inc qword [r11] */
+                t[14] = 0x49; t[15] = 0xbb; memcpy(t + 16, &value, 8);         /* mov r11, target */
+                t[24] = 0x41; t[25] = 0xff; t[26] = 0xe3;                      /* jmp r11 */
+            }
+            value = (uintptr_t)t;
+        }
         memcpy(image + relocs[i].target, &value, 8);
     }
+    if (import_thunks) {
+        protect(import_thunks, round_page((import_count + 1) * 32), 5);
+        pthread_t reporter;
+        if (!pthread_create(&reporter, NULL, import_count_report, NULL)) pthread_detach(reporter);
+        printf("GOW3_IMPORT_COUNT: import calls counted, report every 10 s\n");
+    }
+#ifdef _WIN32
+    if (getenv("GOW3_RIP_SAMPLE") && getenv("GOW3_RIP_SAMPLE")[0] == '1' && !check_imports) {
+        rip_image_size = size;
+        pthread_t sampler;
+        if (!pthread_create(&sampler, NULL, rip_sampler, NULL)) pthread_detach(sampler);
+        printf("GOW3_RIP_SAMPLE: sampling guest threads every ~1 ms, report every 10 s\n");
+    }
+#endif
     if (check_imports) {
         /* Lists every import the game would stop at, without running it (needs the GPU
          * library: without --cpu-only its symbols are registered above). */
@@ -953,6 +1258,9 @@ int main(int argc, char **argv) {
         patch_eop_tick_wait(size);
     if (gpu_enabled && getenv("GOW3_SCREAM_LOG") && getenv("GOW3_SCREAM_LOG")[0]=='1')
         install_scream_log(size);
+    if ((getenv("GOW3_JOB_SPIN") && getenv("GOW3_JOB_SPIN")[0]) || (getenv("GOW3_JOB_SLEEP") && getenv("GOW3_JOB_SLEEP")[0] == '1'))
+        patch_job_spin(size, getenv("GOW3_JOB_SPIN") && getenv("GOW3_JOB_SPIN")[0] ? getenv("GOW3_JOB_SPIN") : NULL,
+                       getenv("GOW3_JOB_SLEEP") && getenv("GOW3_JOB_SLEEP")[0] == '1');
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif

@@ -46,7 +46,7 @@ O andamento está em
 - **Launcher** com as cores do jogo, em inglês com traduções parciais: ajustes rápidos na tela inicial, tela,
   desempenho, pasta do jogo e backups de save, patches, mods (ordem, presets e conflitos),
   controles com ícones de botões PlayStation ou Xbox, atualizações e diagnóstico.
-- **Menu dentro do jogo** (Insert no teclado, R3+L2 no controle), com quatro abas:
+- **Menu dentro do jogo** (Insert no teclado, L2+R2+L3+R3 no controle), com quatro abas:
   - **Game:** trapaças (vida, magia, item e Fúria de Esparta infinitos, orbes vermelhos no
     máximo); multiplicadores de 0,1x a 100x para orbes vermelhos, verdes (vida), azuis (magia)
     e dourados (Fúria de Esparta) e para dano causado e recebido; barra de vida do inimigo.
@@ -89,7 +89,7 @@ Patches e correções já vêm incluídos e são aplicados sozinhos: correção 
 com X e 120 FPS vêm ligados. Mude resolução e FPS na **Home** ou em **Performance**.
 
 **Durante o jogo**
-- **Insert** no teclado, ou **R3 + L2** no controle, abre o menu do port: trapaças,
+- **Insert** no teclado, ou **L2 + R2 + L3 + R3** no controle, abre o menu do port: trapaças,
   multiplicadores, imagem, desempenho e o contador de desempenho.
 - Os shaders salvos carregam em segundo plano. Um aviso pequeno "Loading shader cache" no canto
   mostra o progresso.
@@ -222,7 +222,7 @@ Padrão; mude na tela **Controls** do launcher.
 | Enter | Options |
 | Tab | clique esquerdo do touchpad (modo foto) |
 | Backspace | clique direito do touchpad (menu de pausa) |
-| Insert | menu do port (R3+L2 no controle) |
+| Insert | menu do port (L2+R2+L3+R3 no controle) |
 
 Em um controle sem touchpad (Xbox e outros), View abre o menu de pausa (o clique direito do
 touchpad) e L1 + View abre o modo foto (o clique esquerdo). No DualSense o touchpad funciona

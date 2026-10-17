@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include "core/memory.h"
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -465,6 +466,139 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
     // The GPU's copy of the destination is refreshed from guest memory when next used.
     buffer_cache.InvalidateMemory(dst.base_address, size, true);
     report(guest_only, "guest copy, dispatch skipped");
+    return true;
+}
+
+// uc3 (GOW3_HLE_INORDER=1, off by default; Opus's design): a scalar copy from an asynchronous
+// compute queue without draining the draw pipe first. Stage A takes the source bytes now (only
+// when no queued write overlaps them) and hands the destination write to the recording thread,
+// in order with the draws; until it lands, stage A treats the destination as a pending GPU write
+// (constants bound there, flattened leaves copied there). UC2 rooftop: ~55k drains/s, nearly all
+// before these copies.
+namespace {
+struct InOrderCopy {
+    u64 dst;
+    u32 size;
+    u32 pad;
+};
+constexpr u32 IN_ORDER_COPY_MAX = 256;
+
+void RunInOrderCopy(Rasterizer& rasterizer, const u8* data) {
+    const auto& copy = *reinterpret_cast<const InOrderCopy*>(data);
+    const u8* bytes = data + sizeof(InOrderCopy);
+    // As RunWriteData: copies deferred to the recording thread precede the write; the write
+    // itself goes through the page tracker (a protected page faults and invalidates).
+    rasterizer.WaitHostCopies();
+    std::memcpy(reinterpret_cast<void*>(copy.dst), bytes, copy.size);
+    SrtNoteWrite(copy.dst, copy.size);
+}
+} // namespace
+
+bool HleInOrderEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_HLE_INORDER");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
+// uc3: why an in-order copy fell back to the drain.
+static std::atomic<u32> in_order_rejects[9];
+void NoteInOrderReject(unsigned reason) {
+    const u32 n = in_order_rejects[reason].fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n == 1 || (n & 65535) == 0) {
+        std::printf("uc3: in-order copy fallbacks: hash %u, sharps %u, size %u, mapping %u, "
+                    "pending %u, gpu %u, backing %u, not HLE %u, no pipeline %u\n",
+                    in_order_rejects[0].load(), in_order_rejects[1].load(),
+                    in_order_rejects[2].load(), in_order_rejects[3].load(),
+                    in_order_rejects[4].load(), in_order_rejects[5].load(),
+                    in_order_rejects[6].load(), in_order_rejects[7].load(),
+                    in_order_rejects[8].load());
+    }
+}
+
+bool ExecuteScalarCopyInOrder(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
+                              Rasterizer& rasterizer) {
+    if (!ScalarCopyHLEEnabled()) {
+        return false;
+    }
+    const auto reject = [](u32 reason) {
+        NoteInOrderReject(reason);
+        return false;
+    };
+    u64 group_size = 0;
+    if (info.pgm_hash == SCALAR_COPY_SHADER_HASH) {
+        group_size = 1;
+    } else if (info.pgm_hash == SCALAR_COPY64_SHADER_HASH) {
+        group_size = 64;
+    } else {
+        return reject(0);
+    }
+    const Shader::BufferResource* guest[2]{};
+    u32 guest_count = 0;
+    for (const auto& buffer : info.buffers) {
+        if (!buffer.IsSpecial()) {
+            if (guest_count < 2) {
+                guest[guest_count] = &buffer;
+            }
+            ++guest_count;
+        }
+    }
+    const auto ud = info.UserData();
+    if (guest_count != 2 || ud.size() <= 6) {
+        return reject(1);
+    }
+    const auto src = guest[0]->GetSharp(info);
+    const auto dst = guest[1]->GetSharp(info);
+    if (src.GetStride() != 4 || dst.GetStride() != 4 || !src.base_address || !dst.base_address) {
+        return reject(1);
+    }
+    const u64 count = std::min<u64>(
+        {u64(cs_program.dim_x) * group_size, ud[6], src.num_records, dst.num_records});
+    const u64 size = count * 4;
+    if (count == 0 || size > IN_ORDER_COPY_MAX) {
+        return reject(2);
+    }
+    auto* memory = Core::Memory::Instance();
+    if (!memory->IsValidGpuMapping(src.base_address, size) ||
+        !memory->IsValidGpuMapping(dst.base_address, size)) {
+        return reject(3);
+    }
+    // Queued writes (draws, DMA, earlier in-order copies) over either side, or GPU data there:
+    // the draining path decides.
+    if (rasterizer.HlePendingWrite(src.base_address, size) ||
+        rasterizer.HlePendingWrite(dst.base_address, size)) {
+        return reject(4);
+    }
+    auto& buffer_cache = rasterizer.GetBufferCache();
+    if (buffer_cache.IsRegionGpuModified(src.base_address, size) ||
+        buffer_cache.IsRegionGpuModified(dst.base_address, size) ||
+        rasterizer.IsGpuWritten(src.base_address, size)) {
+        return reject(5);
+    }
+    uintptr_t start = 0, end = 0;
+    int mapped = 0;
+    const unsigned char* backing = nullptr;
+    if (!runtime_memory_region_backing(src.base_address, &start, &end, &mapped, &backing) ||
+        !mapped || !backing || end - src.base_address < size) {
+        return reject(6);
+    }
+    u8 packet[sizeof(InOrderCopy) + IN_ORDER_COPY_MAX];
+    *reinterpret_cast<InOrderCopy*>(packet) = {dst.base_address, static_cast<u32>(size), 0};
+    std::memcpy(packet + sizeof(InOrderCopy), backing, size);
+    if (rasterizer.RunInOrder(&RunInOrderCopy, packet, static_cast<u32>(sizeof(InOrderCopy) + size))) {
+        rasterizer.NotePendingGpuWrite(dst.base_address, size);
+        rasterizer.NoteHleInOrderWrite(dst.base_address, size);
+    }
+    static std::atomic<u32> copies{0};
+    const u32 n = copies.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 3 || (n & 65535) == 0) {
+        std::printf("uc3: scalar copy in order (GOW3_HLE_INORDER): %u copies, 0x%llx -> 0x%llx "
+                    "(%llu bytes)\n",
+                    n, static_cast<unsigned long long>(src.base_address),
+                    static_cast<unsigned long long>(dst.base_address),
+                    static_cast<unsigned long long>(size));
+    }
     return true;
 }
 

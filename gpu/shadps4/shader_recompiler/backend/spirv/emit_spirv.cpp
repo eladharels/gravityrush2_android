@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <mutex>
 #include <span>
 #include <type_traits>
@@ -433,7 +434,13 @@ void DefineEntryPoint(const Info& info, const RuntimeInfo& runtime_info, EmitCon
         if (stores_depth) {
             ctx.AddExecutionMode(main, spv::ExecutionMode::DepthReplacing);
         }
-        if (runtime_info.hw.fs.depth_before_shader) {
+        // ucndc (GOW3_NO_EARLY_Z=1, diagnosis; clear the shader cache): never force early
+        // fragment tests, as SuperMedo's port.
+        static const bool no_early_z = [] {
+            const char* env = std::getenv("GOW3_NO_EARLY_Z");
+            return env && env[0] == '1';
+        }();
+        if (runtime_info.hw.fs.depth_before_shader && !no_early_z) {
             ctx.AddExecutionMode(main, spv::ExecutionMode::EarlyFragmentTests);
             ASSERT_MSG(!stores_depth, "DEPTH_BEFORE_SHADER enabled with depth exporting shader");
         }

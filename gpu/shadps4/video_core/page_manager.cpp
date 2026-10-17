@@ -22,6 +22,7 @@
 #include "video_core/page_manager.h"
 #include "video_core/page_state.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "shader_recompiler/ir/passes/srt.h"
 
 extern "C" int runtime_memory_region_backing(uintptr_t address, uintptr_t* start, uintptr_t* end,
@@ -204,11 +205,14 @@ struct PageManager::Impl {
                 last_page = addr >> PM_PAGE_BITS;
                 tracked = SrtPagesReadTracked(addr, sizeof(u32));
             }
-            if (!tracked || !rasterizer->IsGpuWritten(addr, sizeof(u32))) {
+            // uc3 (GOW3_HLE_INORDER): a scalar copy queued for the recording thread writes here.
+            const bool inorder = Vulkan::HleInOrderEnabled() &&
+                                 rasterizer->HleInOrderPending(addr, sizeof(u32));
+            if (!inorder && (!tracked || !rasterizer->IsGpuWritten(addr, sizeof(u32)))) {
                 continue;
             }
             // Bytes an image still has to read back are not in a buffer: those read back.
-            if (copy && !rasterizer->HasImageReadbackBytes(addr, sizeof(u32))) {
+            if (copy && (inorder || !rasterizer->HasImageReadbackBytes(addr, sizeof(u32)))) {
                 flat[i] = 0;
                 leaves->push_back({static_cast<u32>(i), 0, addr});
                 ++copied;

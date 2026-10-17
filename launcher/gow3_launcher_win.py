@@ -240,7 +240,7 @@ def heading_font(size, fallback=None, every_language=False):
 
 INI_FLAGS = {'cheat_double_jumps', 'cheat_very_hard', 'sharpen', 'object_motion', 'show_fps', 'vsync', 'async_shaders', 'deferred_readback',
              'stale_readback', 'fsr1', 'rcas'}
-# The graphics keys are also in the in-game menu (Insert / R3+L2); run.py reads the startup ones.
+# The graphics keys are also in the in-game menu (Insert / L2+R2+L3+R3); run.py reads the startup ones.
 INI_DEFAULTS = {'upscaler': 'fsr4', 'preset': '1', 'sharpen': '1', 'sharpness': '0.50',
                 'object_motion': '1', 'show_fps': '1', 'output_res': '1920x1080',
                 'live_resolution': 'auto', 'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
@@ -401,7 +401,7 @@ def save_ini(values, lines):
                 continue
         out.append(line)
     if not lines:
-        out.append('# gow3 settings (in-game menu: Insert / R3+L2)')
+        out.append('# gow3 settings (in-game menu: Insert / L2+R2+L3+R3)')
     out += [f'{key}={value}' for key, value in values.items() if key not in written]
     ini_path().write_text('\n'.join(out) + '\n', encoding='utf-8')
 
@@ -882,8 +882,8 @@ class Launcher:
             self.nav[name] = item
         tk.Frame(side, bg=BG).pack(fill='both', expand=True)
         self.update_box = None
-        self.side_note = tk.Label(side, text=_('In the game: Insert or R3+L2\nopens the port\'s menu.',
-                                               'В игре: Insert или R3+L2\nоткрывает меню порта.'),
+        self.side_note = tk.Label(side, text=_('In the game: Insert or L2+R2+L3+R3\nopens the port\'s menu.',
+                                               'В игре: Insert или L2+R2+L3+R3\nоткрывает меню порта.'),
                                   bg=BG, fg=MUTED, font=(UI_FONT, 9), justify='left', wraplength=self.px(210))
         self.side_note.pack(anchor='w', padx=22, pady=(0, 18))
 
@@ -1006,8 +1006,8 @@ class Launcher:
         switch at the top of this page is on."""
         ttk = self.ttk
         f = self.scrolled_page('graphics', _('Graphics (experimental)', 'Графика (эксп.)'),
-                               _('Stored in gow3.ini; the in-game menu (Insert or R3+L2) changes the same values.',
-                                 'Хранится в gow3.ini; в игре меняется через меню (Insert или R3+L2).'))
+                               _('Stored in gow3.ini; the in-game menu (Insert or L2+R2+L3+R3) changes the same values.',
+                                 'Хранится в gow3.ini; в игре меняется через меню (Insert или L2+R2+L3+R3).'))
         self.section(f, _('Experimental'), top=4)
         self.check(f, 'experimental_upscaler', 'app', _('Enable the upscaler (experimental)'),
                    _('Off (default): the game runs without temporal upscaling. These upscalers are not calibrated '
@@ -1090,7 +1090,7 @@ class Launcher:
         self.row(f, _('Sharpening strength'), holder)
         self.section(f, _('Overlay'))
         self.check(f, 'show_fps', 'ini', _('Show performance overlay'),
-                   _('Items, size and corner: in-game menu (Insert / R3+L2) > Overlay.'))
+                   _('Items, size and corner: in-game menu (Insert / L2+R2+L3+R3) > Overlay.'))
 
     def build_performance(self):
         f = self.scrolled_page('performance', _('Performance'), _('Frame rate and speed options.'))
@@ -1332,7 +1332,7 @@ class Launcher:
                        'Backspace, Up, Down, Left, Right, F1 to F12. A name the game does not know keeps the default '
                        '(the log says which). L2/R2 on the gamepad stay on the triggers. Touchpad right opens the '
                        'game\'s pause menu; Touchpad left (photo mode) is L1 + Touchpad right on the gamepad. Insert '
-                       'and R3+L2 always open the port\'s menu. Applied when the game starts.'))
+                       'and L2+R2+L3+R3 always open the port\'s menu. Applied when the game starts.'))
         self.ttk.Button(f, text=_('Reset to defaults'), command=self.reset_controls).grid(
             row=self.next_row(f), column=0, sticky='w', pady=(14, 0))
 

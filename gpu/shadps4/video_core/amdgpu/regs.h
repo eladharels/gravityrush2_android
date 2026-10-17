@@ -4,6 +4,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <bitset>
 #include <cstring>
 #include <vector>
@@ -200,7 +202,19 @@ struct RegDirty {
     static constexpr u32 BlockWords = 32;
     static constexpr u32 NumBlocks = Regs::NumRegs / BlockWords;
     std::bitset<NumBlocks> blocks;
+    /// uc3: the same bits as 64-bit words. libc++'s bitset has no find-next, and testing all
+    /// 1664 blocks one by one for every draw cost ~9% of the command processor thread.
+    std::array<u64, (NumBlocks + 63) / 64> mask{};
     bool reset = false; ///< ClearState: defaults, then only the blocks marked after it
+
+    template <typename Func>
+    void ForEachBlock(Func&& func) const {
+        for (u32 word = 0; word < mask.size(); ++word) {
+            for (u64 bits = mask[word]; bits; bits &= bits - 1) {
+                func(word * 64 + static_cast<u32>(std::countr_zero(bits)));
+            }
+        }
+    }
 
     void Mark(u32 word, u32 count) {
         if (count == 0 || word >= Regs::NumRegs) {
@@ -209,6 +223,7 @@ struct RegDirty {
         const u32 last = std::min(word + count, Regs::NumRegs) - 1;
         for (u32 block = word / BlockWords; block <= last / BlockWords; ++block) {
             blocks.set(block);
+            mask[block / 64] |= u64{1} << (block % 64);
         }
     }
     template <typename T>
@@ -219,6 +234,7 @@ struct RegDirty {
     }
     void Clear() {
         blocks.reset();
+        mask.fill(0);
         reset = false;
     }
 };
@@ -232,13 +248,13 @@ struct RegDelta {
         reset = dirty.reset;
         blocks.clear();
         words.clear();
-        for (u32 block = 0; block < RegDirty::NumBlocks; ++block) {
-            if (dirty.blocks.test(block)) {
+        dirty.ForEachBlock([&](u32 block) {
+            {
                 blocks.push_back(u16(block));
                 const u32* src = regs.reg_array.data() + block * RegDirty::BlockWords;
                 words.insert(words.end(), src, src + RegDirty::BlockWords);
             }
-        }
+        });
     }
     void Apply(Regs& regs) const {
         if (reset) {

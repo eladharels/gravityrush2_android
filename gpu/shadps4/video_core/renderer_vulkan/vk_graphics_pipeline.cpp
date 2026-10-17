@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -322,10 +323,18 @@ GraphicsPipeline::GraphicsPipeline(
             control.separate_alpha_blend ? control.alpha_src_factor : control.color_src_factor,
             control.separate_alpha_blend ? control.alpha_func : control.color_func,
             control.separate_alpha_blend ? control.alpha_dst_factor : control.color_dst_factor};
+        // ucndc (GOW3_A_MINMAX=1, off by default): keep MIN/MAX native (factors ignored) on
+        // color and alpha, as SuperMedo does for color. Candidate for the UC3 cave torch.
+        static const bool a_minmax = [] {
+            const char* env = std::getenv("GOW3_A_MINMAX");
+            return env && env[0] == '1';
+        }();
         const auto color_rewrite =
-            RewriteScaledMinMaxBlend(color_equation, target_format, BlendChannel::Color);
+            a_minmax ? BlendRewriteResult::Native
+                     : RewriteScaledMinMaxBlend(color_equation, target_format, BlendChannel::Color);
         const auto alpha_rewrite =
-            RewriteScaledMinMaxBlend(alpha_equation, target_format, BlendChannel::Alpha);
+            a_minmax ? BlendRewriteResult::Native
+                     : RewriteScaledMinMaxBlend(alpha_equation, target_format, BlendChannel::Alpha);
         const bool writes_color = bool(key.write_masks[i] & (vk::ColorComponentFlagBits::eR |
                                                              vk::ColorComponentFlagBits::eG |
                                                              vk::ColorComponentFlagBits::eB));

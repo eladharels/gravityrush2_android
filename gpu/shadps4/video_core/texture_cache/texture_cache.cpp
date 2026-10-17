@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <mutex>
+#include <unordered_set>
+#include <cstdio>
 #include <cstdlib>
 #include <chrono>
 #include <xxhash.h>
@@ -28,6 +31,65 @@
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
+
+// uc3: GOW3_WATCH_ADDR=<hex guest addr>: logs every image event touching that address (who
+// writes the cave torch's 256x8 table).
+static VAddr WatchAddr() {
+    static const VAddr addr = [] {
+        const char* env = std::getenv("GOW3_WATCH_ADDR");
+        return env ? VAddr(std::strtoull(env, nullptr, 16)) : VAddr(0);
+    }();
+    return addr;
+}
+
+// uc3: GOW3_SKIP_LOG=1: color targets of draws skipped while their shaders compiled; an image
+// sampled later without any successful write lost a one-shot draw (the cave torch table).
+static std::mutex skipped_targets_mutex;
+static std::unordered_set<VAddr> skipped_targets;
+static std::atomic<bool> any_skipped_targets{false};
+
+void NoteSkippedTarget(VAddr address) {
+    std::scoped_lock lk{skipped_targets_mutex};
+    if (skipped_targets.insert(address).second) {
+        any_skipped_targets.store(true, std::memory_order_relaxed);
+    }
+}
+
+static void CheckSkippedTarget(const Image& image, bool write) {
+    if (!any_skipped_targets.load(std::memory_order_relaxed)) {
+        return;
+    }
+    std::scoped_lock lk{skipped_targets_mutex};
+    const auto it = skipped_targets.find(image.info.guest_address);
+    if (it == skipped_targets.end()) {
+        return;
+    }
+    if (!write && False(image.flags & ImageFlagBits::GpuModified)) {
+        std::printf("ucndc: image %#llx %ux%u fmt %d sampled but never written (its draw was "
+                    "skipped while shaders compiled)\n",
+                    (unsigned long long)image.info.guest_address, image.info.size.width,
+                    image.info.size.height, int(image.info.pixel_format));
+        std::fflush(stdout);
+    }
+    skipped_targets.erase(it);
+}
+
+static void WatchLog(const char* what, const Image& image) {
+    const VAddr addr = WatchAddr();
+    if (!addr || !image.Overlaps(addr, 1)) {
+        return;
+    }
+    static std::atomic<int> count{0};
+    if (count.fetch_add(1) > 400) {
+        return;
+    }
+    std::printf("ucndc: watch %s image %#llx size %#x %ux%ux%u fmt %d bits %u tiled %d flags %#x uid %llu\n",
+                what, (unsigned long long)image.info.guest_address, image.info.guest_size,
+                image.info.size.width, image.info.size.height, image.info.size.depth,
+                int(image.info.pixel_format), image.info.num_bits, int(image.info.props.is_tiled),
+                unsigned(image.flags), (unsigned long long)image.image_uid);
+    std::fflush(stdout);
+}
 // uc3: GOW3_FLASH_TRACE time base: process start (the game window follows within seconds).
 static const auto uc3_flash_clock = std::chrono::steady_clock::now();
 
@@ -483,6 +545,7 @@ void TextureCache::InvalidateAlias(Image& image) {
 }
 
 void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
+    WatchLog("maybe cpu write", image);
     if (image.hash == 0) {
         // Initialize hash
         const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
@@ -501,6 +564,7 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
         const auto image_end = image.info.guest_address + image.info.guest_size;
         if (image.Overlaps(addr, size)) {
             // Modified region overlaps image, so the image was definitely accessed by this fault.
+            WatchLog("cpu write", image);
             // Untrack the image, so that the range is unprotected and the guest can write freely.
             InvalidateAlias(image);
             image.flags |= ImageFlagBits::CpuDirty;
@@ -530,6 +594,7 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
     std::scoped_lock lock{mutex};
     ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
         // Only consider images that match base address.
+        WatchLog("gpu buffer write", image);
         // TODO: Maybe also consider subresources
         if (image.info.guest_address != address) {
             return;
@@ -1050,6 +1115,7 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, ViewMemo* memo,
                                      bool refresh) {
     Image& image = slot_images[image_id];
+    CheckSkippedTarget(image, desc.type == BindingType::Storage);
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
@@ -1082,6 +1148,8 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
+    WatchLog("render target", image);
+    CheckSkippedTarget(image, true);
     image.flags |= ImageFlagBits::GpuModified;
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
@@ -1206,6 +1274,7 @@ void TextureCache::RefreshImage(Image& image) {
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
         return;
     }
+    WatchLog("refresh from guest memory", image);
     ResolveReadbacks(image.info.guest_address, image.info.guest_size, true,
                      ReadbackSource::ImageRefresh);
     Gow3Stats::Timer timer{Gow3Stats::t_refresh};
@@ -1328,6 +1397,7 @@ void TextureCache::RegisterImage(ImageId image_id) {
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
+    WatchLog("register", image);
     ++registry_generation;
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
@@ -1360,6 +1430,7 @@ void TextureCache::RegisterImage(ImageId image_id) {
 
 void TextureCache::UnregisterImage(ImageId image_id) {
     Image& image = slot_images[image_id];
+    WatchLog("unregister", image);
     ASSERT_MSG(True(image.flags & ImageFlagBits::Registered),
                "Trying to unregister an already unregistered image");
     image.flags &= ~ImageFlagBits::Registered;
@@ -1675,6 +1746,7 @@ void TextureCache::TouchImage(const Image& image) {
 
 void TextureCache::DeleteImage(ImageId image_id) {
     Image& image = slot_images[image_id];
+    WatchLog("delete", image);
     CancelReadbacks(image.info.guest_address, image.info.guest_size);
     ASSERT_MSG(!image.IsTracked(), "Image was not untracked");
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");

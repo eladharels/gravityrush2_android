@@ -1,5 +1,5 @@
-Uncharted: The Nathan Drake Collection para PC (ucndc_pc)
-=========================================================
+Uncharted: The Nathan Drake Collection para PC (ucndc_pc) v0.3.1
+================================================================
 [English below]
 
 Port não oficial. Nenhum arquivo do jogo vem neste pacote: você precisa do dump do seu
@@ -16,16 +16,18 @@ Como jogar
    clique em "Mais informações" e depois em "Executar assim mesmo": o programa não é assinado.
 3. Em "Pasta do jogo", escolha a pasta do dump (a que tem eboot.bin e big3-ps4_Shipping.elf).
    Se a atualização estiver ao lado (por exemplo CUSA02344-UPDATE), ela é encontrada sozinha.
+   Se você já fundiu a atualização dentro da pasta do jogo, o launcher reconhece e não pede mais nada.
 4. Clique em JOGAR no jogo que quiser. A primeira vez demora mais e pode engasgar um pouco
    enquanto os shaders são criados; depois fica liso.
 
 Situação
 - Uncharted 1: experimental.
 - Uncharted 2: jogável.
-- Uncharted 3: jogável, 60 FPS em 1080p, sem upscaling nem geração de quadros.
+- Uncharted 3: jogável, 60 FPS em 1080p, sem upscaling nem geração de quadros
+  (perto de 50 FPS em áreas com muita vegetação, como o Castelo).
 
 Durante o jogo
-- Insert no teclado, ou R3 + L2 no controle, abre o menu do port.
+- Insert no teclado, ou L2 + R2 + L3 + R3 no controle, abre o menu do port.
 - O botão "Opções" do launcher ajusta tela (janela, sem borda, tela cheia), VSync, limite de
   FPS e contador de FPS. Em "Avançado" dá para desligar otimizações; "Restaurar padrão" volta
   à configuração testada.
@@ -36,6 +38,9 @@ Dados
 - Configurações: ucndc.ini e launcher.json, nesta pasta.
 
 Problemas
+- UC2, prólogo do trem: talvez seja preciso pular antes do que no PS4. Se o vagão continuar
+  caindo, desligue UC_HLE_INORDER e UC_ACB_DISPATCH_PIPE em Opções > Avançado nessa parte.
+- UC3: travamento raro depois de sessões longas (timeout do driver de vídeo). Salve com frequência.
 - O jogo não abre ou fecha sozinho: clique em "Log" no launcher e, ao relatar, envie
   o arquivo user\last_run.log.
 
@@ -55,14 +60,19 @@ How to play
 1. Extract this folder anywhere (not inside the zip).
 2. Open "Uncharted Launcher.exe" (if SmartScreen appears: More info, Run anyway).
 3. Pick the game folder of your dump (the one with eboot.bin and big3-ps4_Shipping.elf); an
-   update folder next to it (such as CUSA02344-UPDATE) is found automatically.
+   update folder next to it (such as CUSA02344-UPDATE) is found automatically, and a game folder
+   with the update already merged in is recognized.
 4. Click PLAY on a game. The first start is slower and may stutter while shaders are built.
 
-Status: Uncharted 3 plays at 60 FPS in 1080p with no upscaling or frame generation;
+Status: Uncharted 3 plays at 60 FPS in 1080p with no upscaling or frame generation (around
+50 FPS in heavy vegetation such as the Chateau);
 Uncharted 2 is playable; Uncharted 1 is experimental.
 
 The launcher's Options button sets display mode, VSync, FPS limit and the FPS counter; Advanced
 lets you turn optimizations off ("Restore defaults" brings back the tested setup).
-In game, Insert (or R3 + L2) opens the port menu. Saves, shader cache and the log are in
+In game, Insert (or L2 + R2 + L3 + R3) opens the port menu. Saves, shader cache and the log are in
 user\. When reporting a problem, send user\last_run.log.
+UC2 train prologue: you may need to jump earlier than on PS4; if the carriage still falls, turn
+off UC_HLE_INORDER and UC_ACB_DISPATCH_PIPE in Options > Advanced for that part. UC3: rare
+driver timeout crash after long sessions, so save often.
 Source code and credits: https://github.com/zorde23/ucndc_pc

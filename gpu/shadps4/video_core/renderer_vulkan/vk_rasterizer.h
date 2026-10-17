@@ -70,7 +70,8 @@ public:
     void DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 size, u32 max_count,
                       VAddr count_address, u16 vertex_sgpr_offset, u16 instance_sgpr_offset);
 
-    void DispatchDirect();
+    /// `acb_undrained`: a compute queue packet that skipped its drain (GOW3_HLE_INORDER).
+    void DispatchDirect(bool acb_undrained = false);
     void DispatchIndirect(VAddr address, u32 offset, u32 size);
 
     void ScopeMarker(fmt::string_view fmt, fmt::format_args args, auto&& func) {
@@ -139,6 +140,11 @@ public:
     bool HlePendingWrite(VAddr address, u64 size) {
         return PendingWriteOverlaps(address, size);
     }
+    /// uc3 (GOW3_HLE_INORDER), stage A: a scalar copy handed to the recording thread; until it
+    /// runs, the SRT walker copies flattened dwords from there on the GPU (leaf copies).
+    void NoteHleInOrderWrite(VAddr address, u64 size);
+    /// Stage A only (false elsewhere): an in-order copy not run yet overlaps the range.
+    bool HleInOrderPending(VAddr address, u64 size);
     /// uc3: stage A is running an asynchronous compute queue, not the graphics ring.
     bool OnComputeQueue() const;
     /// R.9.12: waits for the constant ring copies queued so far (before a guest memory write).
@@ -552,6 +558,7 @@ private:
         u64 position;
     };
     std::vector<PendingWrite> pending_writes;
+    std::vector<PendingWrite> hle_inorder_writes; ///< uc3: GOW3_HLE_INORDER copies not run yet
     /// R.9.10: constant copies of this submission, by guest range (direct-mapped).
     struct DedupEntry {
         VAddr address;

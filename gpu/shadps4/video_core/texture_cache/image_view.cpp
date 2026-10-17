@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include "common/logging/log.h"
 #include "shader_recompiler/resource.h"
 #include "video_core/amdgpu/pixel_format.h"
@@ -93,6 +97,43 @@ ImageViewInfo::ImageViewInfo(const AmdGpu::DepthBuffer& depth_buffer, AmdGpu::De
 ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info_,
                      const Image& image)
     : info{info_} {
+    // ucndc: a T# can ask for more mips or layers than the cached image has (SuperMedo clamps
+    // these). Always reported (first 40); GOW3_VIEW_CLAMP=1 (off by default) clamps the range.
+    {
+        const u32 image_levels = std::max<u32>(image.info.resources.levels, 1u);
+        const u32 image_layers = std::max<u32>(image.info.resources.layers, 1u);
+        auto& range = info.range;
+        if (range.base.level >= image_levels ||
+            range.extent.levels > image_levels - range.base.level ||
+            range.base.layer >= image_layers ||
+            range.extent.layers > image_layers - range.base.layer || range.extent.levels == 0 ||
+            range.extent.layers == 0) {
+            static std::atomic<u32> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 40) {
+                std::fprintf(stderr,
+                             "ucndc: view out of image range: %#llx mips %u+%u layers %u+%u of "
+                             "%u/%u (type %d)\n",
+                             static_cast<unsigned long long>(image.info.guest_address),
+                             range.base.level, range.extent.levels, range.base.layer,
+                             range.extent.layers, image_levels, image_layers,
+                             static_cast<int>(info.type));
+            }
+            static const bool clamp = [] {
+                const char* env = std::getenv("GOW3_VIEW_CLAMP");
+                return env && env[0] == '1';
+            }();
+            if (clamp) {
+                const u32 level = std::min<u32>(range.base.level, image_levels - 1);
+                const u32 layer = std::min<u32>(range.base.layer, image_layers - 1);
+                range.base.level = static_cast<u16>(level);
+                range.extent.levels = static_cast<u16>(
+                    std::clamp<u32>(range.extent.levels, 1u, image_levels - level));
+                range.base.layer = static_cast<u16>(layer);
+                range.extent.layers = static_cast<u16>(
+                    std::clamp<u32>(range.extent.layers, 1u, image_layers - layer));
+            }
+        }
+    }
     vk::ImageViewUsageCreateInfo usage_ci{.usage = image.usage_flags};
     if (!info.is_storage) {
         usage_ci.usage &= ~vk::ImageUsageFlagBits::eStorage;

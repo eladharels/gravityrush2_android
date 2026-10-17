@@ -43,6 +43,9 @@ namespace VideoCore {
 class BufferCache;
 class PageManager;
 
+/// uc3 (GOW3_SKIP_LOG): a draw into this color target was skipped while its shaders compiled.
+void NoteSkippedTarget(VAddr address);
+
 class TextureCache {
     // Default values for garbage collection
     static constexpr s64 DEFAULT_PRESSURE_GC_MEMORY = 1_GB + 512_MB;

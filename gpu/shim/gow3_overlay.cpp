@@ -62,7 +62,16 @@ namespace {
 std::mutex imgui_mutex; // the ImGui context: window thread (input) and present thread
 bool initialized = false;
 std::atomic<bool> menu_open{false};
-bool r3_down = false, l2_down = false;
+// Pad shortcut for the menu: L2+R2+L3+R3 all held. R3+L2 alone was a weapon's scope zoom in
+// Uncharted, and L3+R3 is a game action in God of War III.
+bool l3_down = false, r3_down = false, l2_down = false, r2_down = false;
+
+// Opens or closes the menu when the press of `down` completes the combo.
+bool ComboCompleted(bool& state, bool down) {
+    const bool was = state;
+    state = down;
+    return down && !was && l3_down && r3_down && l2_down && r2_down;
+}
 std::atomic<bool> loading{false};
 std::atomic<u32> loading_done{0}, loading_total{0};
 std::atomic<u32> background_done{0}, background_total{0};
@@ -554,7 +563,7 @@ void Menu() {
     // gow3: the game's own title (param.sfo), not a fixed one.
     static const std::string heading = [] {
         const std::string_view title = Common::ElfInfo::Instance().Title();
-        return std::string(title.empty() ? "God of War III" : title) + "  (Insert / R3+L2)";
+        return std::string(title.empty() ? "God of War III" : title) + "  (Insert / L2+R2+L3+R3)";
     }();
     if (!ImGui::Begin(heading.c_str(), &keep_open, ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
@@ -893,7 +902,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     }
     overlay_instance = &instance;
     initialized = true;
-    std::printf("Overlay: menu ready (Insert or R3+L2)\n");
+    std::printf("Overlay: menu ready (Insert or L2+R2+L3+R3)\n");
 }
 
 void UpdateTextInput(SDL_Window* window) {
@@ -1023,10 +1032,9 @@ bool HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_GAMEPAD_BUTTON_UP: {
         const bool down = event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
         const u8 button = event.gbutton.button;
-        // R3+L2 opens the menu: L3+R3 is a game action in God of War III.
-        if (button == SDL_GAMEPAD_BUTTON_RIGHT_STICK) {
-            r3_down = down;
-            if (down && l2_down) {
+        if (button == SDL_GAMEPAD_BUTTON_RIGHT_STICK || button == SDL_GAMEPAD_BUTTON_LEFT_STICK) {
+            bool& state = button == SDL_GAMEPAD_BUTTON_RIGHT_STICK ? r3_down : l3_down;
+            if (ComboCompleted(state, down)) {
                 SetOpen(!is_open);
                 return true;
             }
@@ -1040,14 +1048,14 @@ bool HandleEvent(const SDL_Event& event) {
         return true;
     }
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
-        if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER) {
+        if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
+            event.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
             const bool down = event.gaxis.value > 16000;
-            if (down && !l2_down && r3_down) {
-                l2_down = true;
+            bool& state = event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? l2_down : r2_down;
+            if (ComboCompleted(state, down)) {
                 SetOpen(!is_open);
                 return true;
             }
-            l2_down = down;
         }
         return false;
     }

@@ -141,6 +141,7 @@ public:
     void CompleteLeafDownloads();
     /// uc3: only the gpu_modified_ranges part of IsGpuWritten (statistics).
     [[nodiscard]] bool IsGpuModifiedBytes(VAddr addr, u64 size) {
+        const auto ranges_lock = RangesLock();
         return gpu_modified_ranges.Intersects(addr, size);
     }
 
@@ -287,6 +288,7 @@ private:
         std::vector<std::pair<VAddr, u64>> keep; ///< label bytes not to overwrite (async_mutex)
         std::atomic<bool> done{};
         u32 side_slot{~0u};           ///< R.9.6: copied on the side queue, waits on this slot
+        u32 fast_slot{~0u};           ///< GOW3_READBACK_DONE_FAST: staging slot of its own
     };
     /// gow3 R.9.6: side-queue copies of windows whose last GPU write has finished.
     struct SideQueueSlot {
@@ -311,6 +313,21 @@ private:
     std::vector<Vulkan::StagingBufferRef> async_free;
     std::atomic<u32> async_count{};
     std::atomic<u32> async_free_count{};
+    /// uc3 (GOW3_READBACK_DONE_FAST=1): a read fault on windows whose last GPU write has
+    /// finished is copied on the side queue by the faulting thread itself, without queueing
+    /// behind the command processor (which drains the draw pipe first: ~0.7 ms per fault in the
+    /// castle vegetation). gpu_modified_ranges is then guarded by ranges_mutex (stage B adds
+    /// to it), and the copy lands in a staging slot of its own (the staging pool is not
+    /// thread safe).
+    bool FastDoneReadback(VAddr device_addr, u64 size, bool is_write);
+    [[nodiscard]] std::unique_lock<std::recursive_mutex> RangesLock();
+    std::recursive_mutex ranges_mutex;
+    static constexpr u64 FastSlotSize = 512_KB;
+    static constexpr u32 FastSlots = 16;
+    std::mutex fast_mutex;
+    std::vector<u32> fast_free_slots;       ///< guarded by fast_mutex
+    Vulkan::StagingBufferRef fast_staging{}; ///< allocated by the command processor thread
+    std::atomic<bool> fast_ready{};
     /// uc3 (Fable R.8.4): leaf downloads (QueueLeafDownload): slots of 4..16 bytes in one
     /// host-cached allocation.
     struct LeafDownload {

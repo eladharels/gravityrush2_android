@@ -46,7 +46,7 @@ Progress is tracked (in Portuguese) in [docs/gow3/ROADMAP.md](docs/gow3/ROADMAP.
 - **Launcher** in the game's colors, in English with partial translations: quick settings on the home page, display,
   performance, game folder and save backups, patches, mods (order, presets and conflicts),
   controls with PlayStation or Xbox button icons, updates and diagnostics.
-- **In-game menu** (Insert on the keyboard, R3+L2 on the controller), with four tabs:
+- **In-game menu** (Insert on the keyboard, L2+R2+L3+R3 on the controller), with four tabs:
   - **Game:** cheats (infinite health, magic, item meter, Rage of Sparta, max red orbs);
     multipliers from 0.1x to 100x for red, green (health), blue (magic) and gold (Rage of
     Sparta) orbs and for damage dealt and taken; an enemy health bar.
@@ -88,7 +88,7 @@ Patches and fixes are included and applied automatically: texture fix, skip vide
 120 FPS are on by default. Change the resolution and frame rate on **Home** or **Performance**.
 
 **While playing**
-- **Insert** on the keyboard, or **R3 + L2** on the controller, opens the port's menu: cheats,
+- **Insert** on the keyboard, or **L2 + R2 + L3 + R3** on the controller, opens the port's menu: cheats,
   multipliers, image, performance and the performance overlay.
 - Saved shaders load in the background. A small "Loading shader cache" note in the corner shows
   the progress.
@@ -221,7 +221,7 @@ Defaults; change them on the launcher's **Controls** page.
 | Enter | Options |
 | Tab | left touchpad click (photo mode) |
 | Backspace | right touchpad click (pause menu) |
-| Insert | the port's menu (R3+L2 on the controller) |
+| Insert | the port's menu (L2+R2+L3+R3 on the controller) |
 
 On a controller without a touchpad (Xbox and others), View opens the pause menu (the right
 touchpad click) and L1 + View opens photo mode (the left click). On a DualSense the touchpad

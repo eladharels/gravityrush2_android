@@ -34,7 +34,7 @@ USER_DIR = DATA_DIR / 'user'
 LOG_FILE = USER_DIR / 'last_run.log'
 APP_NAME = 'Uncharted Collection PC'
 EXE_NAME = 'Uncharted Launcher.exe'
-VERSION = '0.3'
+VERSION = '0.3.1'
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 TESTED_TITLE = 'CUSA02344'
 
@@ -51,9 +51,11 @@ GAMES = [
     ('uc1', "Uncharted: Drake's Fortune", 'eboot.bin', ('Experimental', 'Experimental'),
      {'GOW3_COMPUTE_PIPE': '1', 'GOW3_LOW_IMAGE': '1', 'GOW3_AJM_END_RULES': '1', 'GOW3_EOP_TICK_WAIT': '1'}),
     ('uc2', 'Uncharted 2: Among Thieves', 'big2-ps4_Shipping.elf', ('Jogável', 'Playable'),
-     {}),  # without GOW3_COMPUTE_PIPE: with it the train carriage in the prologue falls too early
+     # Without GOW3_COMPUTE_PIPE: with it the train carriage in the prologue falls too early. The two
+     # in-order options keep the rooftop at 60 FPS; the train jump is still timing-sensitive with them.
+     {'GOW3_HLE_INORDER': '1', 'GOW3_ACB_DISPATCH_PIPE': '1'}),
     ('uc3', "Uncharted 3: Drake's Deception", 'big3-ps4_Shipping.elf', ('Jogável · 60 FPS', 'Playable · 60 FPS'),
-     {'GOW3_COMPUTE_PIPE': '1'}),
+     {'GOW3_COMPUTE_PIPE': '1', 'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1'}),
 ]
 # ucndc.ini values the games were tested with, written when the file does not exist yet.
 # Only keys the Uncharted games use (render_resolution, engine_fps, fsr1, rcas and upscaler are GoW3 patches).
@@ -83,6 +85,14 @@ TOGGLE_HELP = {
     'GOW3_FRAME_STATS': ('Estatísticas de quadro no log', 'Frame statistics in the log'),
     'GOW3_EOP_TICK_WAIT': ('Evita o erro m_gfxEopTick (UC1)', 'Avoid the m_gfxEopTick assert (UC1)'),
     'GOW3_AJM_END_RULES': ('Regras de áudio do Ajm (UC1)', 'Ajm audio rules (UC1)'),
+    'GOW3_HLE_INORDER': ('Cópias nativas em ordem (UC2; desligue se o trem do prólogo falhar)',
+                         'Native copies in order (UC2; turn off if the prologue train fails)'),
+    'GOW3_ACB_DISPATCH_PIPE': ('Compute assíncrono em ordem (UC2; desligue se o trem do prólogo falhar)',
+                               'Async compute in order (UC2; turn off if the prologue train fails)'),
+    'GOW3_SYNC_SMALL_TARGETS': ('Compila na hora shaders de alvos pequenos (luz da tocha, UC3)',
+                                'Compile small-target shaders right away (torch light, UC3)'),
+    'GOW3_JOB_SPIN': ('Threads de jobs giram menos antes de dormir (menos CPU)', 'Job threads spin less before sleeping (less CPU)'),
+    'GOW3_JOB_SLEEP': ('Threads de jobs podem dormir no gameplay (menos CPU)', 'Job threads may sleep in gameplay (less CPU)'),
 }
 # The Uncharted engines run at 60 at most, so higher limits would do nothing.
 FPS_LIMITS = [('0', ('Sem limite (60)', 'No limit (60)')), ('30', ('30', '30')), ('60', ('60', '60'))]
@@ -138,6 +148,28 @@ def title_id(folder):
 
 def is_update(folder):
     return (Path(folder) / 'sce_discmap_patch.plt').is_file()
+
+
+def app_version(folder):
+    """APP_VER of a dump folder ("01.00" base, "01.02" updated), or None."""
+    try:
+        from patches import game_app_version
+        return game_app_version(folder)
+    except ImportError:
+        return None
+
+
+def has_update_merged(folder):
+    """The game folder already holds the update (merged dump): its param.sfo says 01.02 or later."""
+    version = app_version(folder) if folder else None
+    try:
+        return version is not None and tuple(int(n) for n in version.split('.')) >= (1, 2)
+    except ValueError:
+        return False
+
+
+def has_games(folder):
+    return any((Path(folder) / exe).is_file() for _k, _t, exe, _s, _e in GAMES)
 
 
 def guess_update(game_dir):
@@ -464,12 +496,17 @@ class Launcher:
             if tid and tid != TESTED_TITLE:
                 lines.append(_(f'Versão {tid}: só a {TESTED_TITLE} foi testada; pode não funcionar.',
                                f'Version {tid}: only {TESTED_TITLE} was tested; it may not work.'))
-            if not s['update_dir']:
+            merged = has_update_merged(s['game_dir'])
+            if merged and not s['update_dir']:
+                lines.append(_(f'Atualização {app_version(s["game_dir"])} já incluída na pasta do jogo. Tudo certo. Escolha um jogo.',
+                               f'Update {app_version(s["game_dir"])} already merged into the game folder. All set. Pick a game.'))
+            elif not s['update_dir']:
                 lines.append(_('Sem a atualização 01.02: o jogo roda, mas os testes foram feitos com ela.',
                                'Without the 01.02 update: the game runs, but it was tested with it.'))
+        updated = bool(s['update_dir']) or has_update_merged(s['game_dir'])
         if ok and not lines:
             lines.append(_('Tudo certo. Escolha um jogo.', 'All set. Pick a game.'))
-        self.dump_status.configure(text='\n'.join(lines), fg=OK if ok and len(lines) == 1 and s['update_dir'] else MUTED)
+        self.dump_status.configure(text='\n'.join(lines), fg=OK if ok and len(lines) == 1 and updated else MUTED)
         running = self.process is not None
         for key, _t, exe, _s, _e in GAMES:
             self.play_buttons[key].configure(state='normal' if available(s, exe) and not running else 'disabled')
@@ -487,15 +524,19 @@ class Launcher:
         folder = self.filedialog.askdirectory(title=_('Pasta do jogo (CUSA02344)', 'Game folder (CUSA02344)'))
         if not folder:
             return
-        if is_update(folder):  # the update was picked: use it as such and look for the game
+        base = guess_game(folder) if is_update(folder) else ''
+        if is_update(folder) and (base or not has_games(folder)):
+            # the update was picked: use it as such and look for the game
             self.settings['update_dir'] = folder
-            folder = guess_game(folder) or ''
+            folder = base
             if not folder:
                 self.messagebox.showinfo(APP_NAME, _('Essa é a pasta da atualização. Agora escolha a pasta do jogo base.',
                                                      'That is the update folder. Now choose the base game folder.'))
         if folder:
             self.settings['game_dir'] = folder
-            if not self.settings['update_dir']:
+            if is_update(folder) or has_update_merged(folder):
+                self.settings['update_dir'] = ''  # merged dump: the update is already inside
+            elif not self.settings['update_dir']:
                 self.settings['update_dir'] = guess_update(folder)
         self.game_var.set(self.settings['game_dir'])
         self.update_var.set(self.settings['update_dir'])
@@ -544,8 +585,8 @@ class Launcher:
         tk.Checkbutton(body, text=_('VSync (sem tearing; recomendado)', 'VSync (no tearing; recommended)'),
                        variable=vsync, **check).grid(row=3, column=0, columnspan=2, sticky='w')
         tk.Checkbutton(body, text=_('Mostrar FPS na tela', 'Show FPS on screen'), variable=fps, **check).grid(row=4, column=0, columnspan=2, sticky='w')
-        self.label(body, _('Os jogos rodam a no máximo 60 FPS. No jogo, Insert (ou R3+L2) abre o menu do port.',
-                           'The games run at 60 FPS at most. In game, Insert (or R3+L2) opens the port menu.'),
+        self.label(body, _('Os jogos rodam a no máximo 60 FPS. No jogo, Insert (ou L2+R2+L3+R3) abre o menu do port.',
+                           'The games run at 60 FPS at most. In game, Insert (or L2+R2+L3+R3) opens the port menu.'),
                    9, MUTED, wraplength=440, justify='left').grid(row=5, column=0, columnspan=2, sticky='w', pady=(4, 10))
 
         advanced = tk.Frame(body, bg=PANEL)
@@ -644,8 +685,8 @@ class Launcher:
                     continue
                 self.log_file.write(item)
                 if 'Entering original x86-64 code' in item:
-                    self.status.configure(text=_('Jogo rodando. Insert (ou R3+L2) abre o menu do port.',
-                                                 'Game running. Insert (or R3+L2) opens the port menu.'), fg=OK)
+                    self.status.configure(text=_('Jogo rodando. Insert (ou L2+R2+L3+R3) abre o menu do port.',
+                                                 'Game running. Insert (or L2+R2+L3+R3) opens the port menu.'), fg=OK)
                 self.append(item)
         except queue.Empty:
             pass

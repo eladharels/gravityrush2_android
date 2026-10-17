@@ -22,7 +22,7 @@ Patches and fixes are included and applied automatically: texture fix, skip vide
 120 FPS are on by default. Change the resolution and frame rate on Home or Performance.
 
 While playing
-- Insert on the keyboard, or R3 + L2 on the controller, opens the port's menu: cheats,
+- Insert on the keyboard, or L2 + R2 + L3 + R3 on the controller, opens the port's menu: cheats,
   multipliers, image, performance and the performance overlay.
 - Saved shaders load in the background; a small note in the corner shows the progress.
 - Keyboard: WASD move, arrows camera, Space Cross, Left Shift Circle, E Square, Q Triangle,

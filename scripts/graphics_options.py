@@ -38,7 +38,7 @@ def write_keys(path, updates):
     try:
         lines = path.read_text(encoding='utf-8').splitlines()
     except OSError:
-        lines = ['# gow3 settings (in-game menu: Insert / R3+L2)']
+        lines = ['# gow3 settings (in-game menu: Insert / L2+R2+L3+R3)']
     done, out = set(), []
     for line in lines:
         key = line.split('=', 1)[0].strip() if '=' in line and not line.lstrip().startswith('#') else None

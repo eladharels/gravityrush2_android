@@ -309,6 +309,10 @@ extern "C" unsigned gow3gpu_symbol_count(void) {
     return unsigned(g_symbols.size());
 }
 
+extern "C" unsigned long gow3gpu_cp_thread_id(void) {
+    return Gow3Stats::gpu_thread_id.load();
+}
+
 // Kernel service thread: runs boost::asio timers for equeue timer events.
 namespace Libraries::Kernel {
 boost::asio::io_context io_context;

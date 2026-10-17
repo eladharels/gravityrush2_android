@@ -15,7 +15,7 @@ Uncharted 2 is playable and Uncharted 1 runs (experimental).
 
 No install and no terminal needed:
 
-1. Download `ucndc_pc-v0.3-windows.zip` from [Releases](https://github.com/zorde23/ucndc_pc/releases) and extract it anywhere
+1. Download the latest `ucndc_pc-v…-windows.zip` from [Releases](https://github.com/zorde23/ucndc_pc/releases) and extract it anywhere
    (for example `C:\Games\ucndc_pc`). Don't run it from inside the zip.
 2. Open **`Uncharted Launcher.exe`**. If Windows SmartScreen warns about it, click
    *More info* → *Run anyway* (the launcher is not signed).
@@ -25,7 +25,7 @@ No install and no terminal needed:
 
 The **Options** button sets the display mode (window, borderless, fullscreen), VSync, the FPS
 limit and the FPS counter. Under *Advanced* you can turn off any of the optimizations; with all of
-them on you get the tested setup. In game, **Insert** (or R3+L2 on a controller) opens the port's
+them on you get the tested setup. In game, **Insert** (or L2+R2+L3+R3 on a controller) opens the port's
 menu. Saves are kept in the `user` folder next to the launcher, and the last session's log in
 `user\last_run.log`.
 
@@ -55,13 +55,13 @@ Uncharted 1 came later almost for free, and the goal is now the whole trilogy.
 
 ## Status
 
-Updated 2026-10-16.
+Updated 2026-10-17.
 
 | Game | Executable | Status |
 |---|---|---|
 | Uncharted 1 | `eboot.bin` | Runs at **60 FPS** with sound (gunshots included); lightly tested past the start |
 | Uncharted 2 | `big2-ps4_Shipping.elf` | Playable, 51–60 FPS, with its own saves |
-| Uncharted 3 | `big3-ps4_Shipping.elf` | Playable at a **locked 60 FPS in 1080p, with no upscaling or frame generation** (the Chateau, the Cartagena streets and the museum), no known visual bugs. **I'm finishing UC3 today**, playing it start to end on the port |
+| Uncharted 3 | `big3-ps4_Shipping.elf` | Playable at **60 FPS in 1080p, with no upscaling or frame generation** (the Cartagena streets and the museum); around 50 FPS in heavy vegetation (the Chateau). A few known issues, listed below. Being played start to end on the port |
 
 Fixed in UC3 over the last few days: young Drake's white hair (addr64 `BUFFER_LOAD`), swapped
 textures (bartender's vest, museum floor, bathroom door) and performance, which went from 18–24 FPS
@@ -72,11 +72,20 @@ longer shows God of War III-only items (cheats, orbs, upscaler, render resolutio
 games; and black screen on Intel GPUs fixed (from Supermedo's 0.3.3, untested here).
 
 Known issues:
-- **UC2:** in the train prologue, with `UC_COMPUTE_PIPE=1`, the carriage falls too early, so UC2
-  runs without that option. The investigation is paused.
-- **UC1 and UC2:** lightly tested. Please report missing sounds or visual bugs.
-- Internal resolution scaling (FSR/DLSS) does not work for Uncharted: the inherited hooks are
-  specific to God of War III.
+**Uncharted 3**
+- **Rare crash after long sessions (GPU driver timeout).** After about 30 minutes of play, the port can send a very large block of memory (~1.5 GB) to the GPU in one go. The frame stalls and Windows/AMD reports a driver timeout, closing the game. It is rare and has not been reproduced on demand yet. Save often.
+- **Some walls flash dark for an instant while turning the camera.** A layered (array) texture is rebuilt from scratch instead of reused, and it is blank for a frame while it is rebuilt. The same stretches also cause short dips in 1% low FPS (frames of 25-50 ms). Seen in The Citadel (chapter at 37%).
+- **Brief texture flicker the first time you enter a new area.** New shaders are compiled in the background, and objects using them are skipped for a few frames. Shaders are cached, so it does not repeat on later visits.
+- **Heavy vegetation areas (The Chateau) run around 50 FPS** instead of 60. The limit is the emulated GPU command processor on the CPU.
+- The game is locked to 60 FPS. Higher frame rates speed up the game logic.
+- Internal resolution scaling (FSR/DLSS) does not work for Uncharted: the inherited hooks are specific to God of War III.
+
+**Uncharted 2**
+- In the train prologue the carriage can fall too early, so you may need to jump sooner than on PS4. UC2 runs without `UC_COMPUTE_PIPE` for this reason. If the train still fails, turn off `UC_HLE_INORDER` and `UC_ACB_DISPATCH_PIPE` in the launcher (Options > Advanced) for that part; they keep the rooftop chase at 60 FPS.
+- Lightly tested. Please report missing sounds or visual bugs.
+
+**Uncharted 1**
+- Lightly tested. Please report missing sounds or visual bugs.
 
 The project log (in Portuguese), with what was done and why, is in
 [docs/uc3/DEVLOG.md](docs/uc3/DEVLOG.md).
@@ -125,7 +134,7 @@ Only needed to work on the port; to play, use the [download](#download-and-play)
 3. Edit `windows\config.bat` with the paths to MSYS2, the game and the update.
 4. Run `windows\compilar.bat` (or `bash build.sh` in the CLANG64 shell). The result is
    `out\ucndc.exe`.
-5. Optional: `packaging\windows\empacotar.bat` builds the player zip (`dist\ucndc_pc-v0.3-windows.zip`)
+5. Optional: `packaging\windows\empacotar.bat` builds the player zip (`dist\ucndc_pc-v<version>-windows.zip`)
    with the launcher. It needs Python for Windows installed (python.org or `winget install Python.Python.3.13`).
 
 ### Playing from source
@@ -142,7 +151,7 @@ Double-click the game's `.bat` in `windows\`:
 | `fechar_jogo.bat` | Closes the game if it hangs |
 
 Each session's log goes to `out\last-run.log` (the previous one to `out\previous-run.log`). Saves
-are kept in `user\`. In game, **Insert** (or R3+L2 on a controller) opens the port's menu.
+are kept in `user\`. In game, **Insert** (or L2+R2+L3+R3 on a controller) opens the port's menu.
 
 You can also call the script directly and pass options for that run only:
 
@@ -169,6 +178,9 @@ Every new optimization goes in **off by default** in the code; the launcher and 
 | `UC_LOW_IMAGE` | Loads the executable below 2 GB (needed for Uncharted 1) |
 | `UC_AJM_END_RULES` | Ajm (audio decoder) end-of-job rules, from SuperMedo (Uncharted 1) |
 | `UC_EOP_TICK_WAIT` | The `m_gfxEopTick` assert waits for the GPU instead of stopping the game |
+| `UC_SYNC_SMALL_TARGETS` | Shaders for small render targets compile right away, so a one-time lighting table drawn at boot is not skipped (fixes the dark cave torch in UC3) |
+| `UC_JOB_SPIN`, `UC_JOB_SLEEP` | `UC_JOB_SPIN=100` + `UC_JOB_SLEEP=1`: the game's six job threads spin less and sleep during gameplay; CPU use drops from about 66% to about 50% at the same frame rate (UC3) |
+| `UC_HLE_INORDER`, `UC_ACB_DISPATCH_PIPE` | Keep the UC2 rooftop chase at 60 FPS; turn them off if the train prologue fails |
 
 The full list, with measurements, is in the [DEVLOG](docs/uc3/DEVLOG.md).
 

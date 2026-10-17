@@ -46,6 +46,7 @@ typedef struct GuestThread {
     ThreadAttr attr;
     char name[32];
     int detached, finished, joined, host_owned;
+    uint32_t os_tid; /* ucndc: Windows thread id, for the RIP sampler (GOW3_RIP_SAMPLE) */
 #ifdef _WIN32
     gow3_jmp_buf exit_jump; /* no SEH unwinding through guest frames */
 #else
@@ -104,6 +105,23 @@ static void attach(GuestThread *t) {
     t->tls_block=block; t->tcb=tcb;
     set_gs(tcb);
     current=t;
+#ifdef _WIN32
+    t->os_tid=(uint32_t)GetCurrentThreadId();
+#endif
+}
+/* ucndc: ids and names of the running guest threads (GOW3_RIP_SAMPLE in probe.c). */
+int runtime_thread_snapshot(uint32_t *ids,char (*names)[32],int max) {
+    int n=0;
+    pthread_mutex_lock(&lock);
+    for (GuestThread *t=threads;t && n<max;t=t->next) {
+        if (!t->os_tid || t->finished) continue;
+        ids[n]=t->os_tid;
+        memcpy(names[n],t->name,32);
+        names[n][31]=0;
+        ++n;
+    }
+    pthread_mutex_unlock(&lock);
+    return n;
 }
 static GuestThread *new_thread(void) {
     GuestThread *t=calloc(1,sizeof(*t));
@@ -246,6 +264,20 @@ static void set_host_name(const char *name) {
     char host[16]={0};
     memcpy(host,name,strnlen(name,sizeof(host)-1));
     pthread_setname_np(pthread_self(),host);
+#ifdef _WIN32
+    /* ucndc: winpthreads keeps the name to itself; Windows tools (Task Manager, the CPU per
+     * thread script tools/uc_cpu_threads.ps1) read the thread description. Looked up at run
+     * time: Windows 10 1607+. */
+    typedef HRESULT (WINAPI *SetDescription)(HANDLE,PCWSTR);
+    static SetDescription set_description;
+    static int looked_up;
+    if (!looked_up) {
+        set_description=(SetDescription)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"),"SetThreadDescription");
+        looked_up=1;
+    }
+    wchar_t wide[64];
+    if (set_description && MultiByteToWideChar(CP_UTF8,0,name,-1,wide,64)>0) set_description(GetCurrentThread(),wide);
+#endif
 }
 #ifdef _WIN32
 #define exit_setjmp(t) gow3_setjmp((t)->exit_jump)

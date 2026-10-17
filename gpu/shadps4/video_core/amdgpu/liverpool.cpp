@@ -30,8 +30,86 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_shader_hle.h"
 
 namespace AmdGpu {
+
+bool FrameGateStats() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_FRAME_GATE");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+void NoteGateStage(GateStage stage) {
+    if (!FrameGateStats()) {
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    static std::mutex mutex;
+    static Clock::time_point submit_done{}, decoded{}, wait_begin{}, last_print{};
+    // Sums over the report window (ns) and frame count.
+    static u64 sd_to_decoded = 0, decoded_to_drained = 0, sd_to_idle = 0, blocked = 0,
+               blocked_waits = 0, frames = 0, guest_frame = 0;
+    static Clock::time_point prev_submit_done{};
+    const auto now = Clock::now();
+    const auto ns = [](Clock::time_point a, Clock::time_point b) -> u64 {
+        return a.time_since_epoch().count() && b > a
+                   ? std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count()
+                   : 0;
+    };
+    std::scoped_lock lk{mutex};
+    switch (stage) {
+    case GateStage::SubmitDone:
+        guest_frame += ns(prev_submit_done, now);
+        prev_submit_done = now;
+        submit_done = now;
+        decoded = {};
+        break;
+    case GateStage::Decoded:
+        if (submit_done.time_since_epoch().count() && !decoded.time_since_epoch().count()) {
+            decoded = now;
+            sd_to_decoded += ns(submit_done, now);
+        }
+        break;
+    case GateStage::Drained:
+        if (decoded.time_since_epoch().count() && submit_done.time_since_epoch().count()) {
+            decoded_to_drained += ns(decoded, now);
+            sd_to_idle += ns(submit_done, now);
+            ++frames;
+            submit_done = {};
+        }
+        break;
+    case GateStage::IdleWaitBegin:
+        wait_begin = now;
+        break;
+    case GateStage::IdleWaitEnd: {
+        const u64 waited = ns(wait_begin, now);
+        if (waited > 20000) {
+            blocked += waited;
+            ++blocked_waits;
+        }
+        break;
+    }
+    }
+    if (!last_print.time_since_epoch().count()) {
+        last_print = now;
+    }
+    if (now - last_print >= std::chrono::seconds(5) && frames) {
+        const double f = static_cast<double>(frames);
+        std::printf("uc3 frame gate (5 s, %llu frames): guest frame %.2f ms; SubmitDone -> "
+                    "decoded (stage A) %.2f ms, decoded -> drained (stage B + deferred fences) "
+                    "%.2f ms, SubmitDone -> GpuIdle %.2f ms; guest blocked in WaitGpuIdle %.2f "
+                    "ms/frame (%llu waits)\n",
+                    static_cast<unsigned long long>(frames), guest_frame / 1e6 / f,
+                    sd_to_decoded / 1e6 / f, decoded_to_drained / 1e6 / f, sd_to_idle / 1e6 / f,
+                    blocked / 1e6 / f, static_cast<unsigned long long>(blocked_waits));
+        sd_to_decoded = decoded_to_drained = sd_to_idle = blocked = blocked_waits = frames =
+            guest_frame = 0;
+        last_print = now;
+    }
+}
 
 void NoteLabelWriteHook(u64 address, u64 size) {
     VideoCore::BufferCache::NoteLabelWrite(address, size);
@@ -227,6 +305,7 @@ void Liverpool::Process(std::stop_token stoken) {
         }
 
         if (submit_done) {
+            NoteGateStage(GateStage::Decoded);
             VideoCore::EndCapture();
             if (rasterizer) {
                 rasterizer->OnSubmit();
@@ -246,6 +325,7 @@ void Liverpool::Process(std::stop_token stoken) {
             rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonSubmissionEnd);
             rasterizer->WaitDeferredSignals();
         }
+        NoteGateStage(GateStage::Drained);
         {
             std::scoped_lock lk{submit_mutex};
             if (num_submits == 0) {
@@ -319,6 +399,45 @@ bool ComputePipelinedOpcode(PM4ItOpcode opcode) {
     case PM4ItOpcode::DispatchDirect:
     case PM4ItOpcode::DispatchIndirect:
     case PM4ItOpcode::ReleaseMem: // runs in order on the recording thread (RunReleaseMem)
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// ucndc (GOW3_INDIRECT_IB_FIX=1, off by default): indirect indexed draws set max_index_size
+/// (the index buffer capacity) without marking it, so the draw recording thread kept the
+/// value of the last direct draw. Candidate for the UC3 cave torch light (GPU-culled draws).
+bool IndirectIbFix() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_INDIRECT_IB_FIX");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+
+void MarkIndirectIndexSize(AmdGpu::Regs& regs, AmdGpu::RegDirty& dirty) {
+    if (IndirectIbFix()) {
+        dirty.MarkField(regs, regs.max_index_size);
+    }
+}
+
+bool ComputeDrainLazy() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_COMPUTE_DRAIN_LAZY");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+
+/// Compute packets that touch no cache or guest memory (GOW3_COMPUTE_DRAIN_LAZY).
+bool ComputeRegisterOpcode(PM4ItOpcode opcode) {
+    switch (opcode) {
+    case PM4ItOpcode::Nop:
+    case PM4ItOpcode::SetShReg:
+    case PM4ItOpcode::SetQueueReg:
+    case PM4ItOpcode::IndirectBuffer:
+    case PM4ItOpcode::Rewind:
         return true;
     default:
         return false;
@@ -1255,6 +1374,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto offset = draw_index_indirect->data_offset;
                 const auto stride = sizeof(DrawIndexedIndirectArgs);
                 regs.max_index_size = index_buffer_num_indices;
+                MarkIndirectIndexSize(regs, pipe_dirty); // ucndc: GOW3_INDIRECT_IB_FIX
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -1275,6 +1395,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     reinterpret_cast<const PM4CmdDrawIndexIndirectMulti*>(header);
                 const auto offset = draw_index_indirect->data_offset;
                 regs.max_index_size = index_buffer_num_indices;
+                MarkIndirectIndexSize(regs, pipe_dirty); // ucndc: GOW3_INDIRECT_IB_FIX
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -1296,6 +1417,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     reinterpret_cast<const PM4CmdDrawIndexIndirectCountMulti*>(header);
                 const auto offset = draw_index_indirect->data_offset;
                 regs.max_index_size = index_buffer_num_indices;
+                MarkIndirectIndexSize(regs, pipe_dirty); // ucndc: GOW3_INDIRECT_IB_FIX
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -1682,11 +1804,44 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     size_t acb_size = acb.size_bytes();
     while (!acb.empty()) {
         ProcessCommands();
-        if (rasterizer && !ComputePipeOn()) {
-            rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute); // gow3: compute work uses the caches
-        }
-
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
+        // uc3 (GOW3_COMPUTE_DRAIN_LAZY=1, off by default): with GOW3_COMPUTE_PIPE off, packets
+        // that only set registers or chain buffers skip the wait for the recording thread; the
+        // dispatches and memory packets after them still wait. UC2 rooftop: ~55k waits/s here.
+        // uc3 (GOW3_HLE_INORDER=1, off by default): register packets, dispatches and fences
+        // skip it too; DispatchDirect drains unless the dispatch is a scalar copy it runs in
+        // order, and ReleaseMem runs in order (RunReleaseMem).
+        const bool inorder_skip = rasterizer && !ComputePipeOn() && Vulkan::HleInOrderEnabled() &&
+                                  queue.tmp_dwords == 0 && header->type == 3 &&
+                                  (ComputeRegisterOpcode(header->type3.opcode) ||
+                                   header->type3.opcode == PM4ItOpcode::DispatchDirect ||
+                                   header->type3.opcode == PM4ItOpcode::ReleaseMem);
+        if (rasterizer && !ComputePipeOn() && !inorder_skip &&
+            !(ComputeDrainLazy() && queue.tmp_dwords == 0 && header->type == 3 &&
+              ComputeRegisterOpcode(header->type3.opcode))) {
+            rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute); // gow3: compute work uses the caches
+            if (Vulkan::HleInOrderEnabled()) {
+                // uc3: which packets still drain with GOW3_HLE_INORDER.
+                static std::array<std::atomic<u32>, 256> drained_by{};
+                static std::atomic<u32> drained{0};
+                const u32 op = header->type == 3 ? static_cast<u32>(header->type3.opcode.Value()) & 0xff
+                                                 : 0;
+                drained_by[op].fetch_add(1, std::memory_order_relaxed);
+                if (((drained.fetch_add(1, std::memory_order_relaxed) + 1) & 131071) == 0) {
+                    std::string top;
+                    for (u32 i = 0; i < 256; ++i) {
+                        const u32 c = drained_by[i].load(std::memory_order_relaxed);
+                        if (c > 1000) {
+                            top += fmt::format(" {:#x}={}", i, c);
+                        }
+                    }
+                    std::printf("uc3: compute drains by opcode (type %u last, tmp %u):%s\n",
+                                u32(header->type), queue.tmp_dwords, top.c_str());
+                }
+            }
+        }
+        const bool acb_undrained = inorder_skip && header->type3.opcode == PM4ItOpcode::DispatchDirect;
+
         u32 next_dw_off = header->type3.NumWords() + 1;
 
         // If we have a buffered packet, use it.
@@ -1867,6 +2022,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (auto it = std::ranges::find(indirect_patches, header, &IndirectPatch::header);
                 it != indirect_patches.end()) {
                 const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);
+                if (acb_undrained) {
+                    rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute);
+                }
                 rasterizer->DispatchIndirect(it->indirect_addr, 0, size);
                 break;
             }
@@ -1885,7 +2043,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto cmd_address = reinterpret_cast<const void*>(header);
             rasterizer->ScopeMarker("asc[{}]:{}:DispatchDirect",
                                     fmt::make_format_args(vqid, cmd_address),
-                                    [&] { rasterizer->DispatchDirect(); });
+                                    [&] { rasterizer->DispatchDirect(acb_undrained); });
             break;
         }
         case PM4ItOpcode::DispatchIndirect: {
@@ -1964,7 +2122,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
         case PM4ItOpcode::ReleaseMem: {
-            if (rasterizer && ComputePipeOn()) {
+            // uc3 (GOW3_HLE_INORDER): the fence also runs in order instead of draining.
+            if (rasterizer && (ComputePipeOn() || inorder_skip)) {
                 const ReleaseMemTask task{*reinterpret_cast<const PM4CmdReleaseMem*>(header),
                                           static_cast<u32>(queue.pipe_id)};
                 const bool queued = rasterizer->RunInOrder(&RunReleaseMem, &task, sizeof(task));

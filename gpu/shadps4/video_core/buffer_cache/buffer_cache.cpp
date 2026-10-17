@@ -348,6 +348,49 @@ void BufferCache::NoteHotWindow(VAddr start, boost::container::small_vector<VAdd
     *slot = HotWindow{start, frame_index};
 }
 
+// uc3 (GOW3_FAULT_CATEGORY=1, diagnostic): time the faulting threads wait, per kind of fault
+// (the last GPU write to the window still open, in flight or done), and whether the faulted
+// pages themselves were written earlier than the 512 KiB window (a false dependency). Pages
+// are tracked only in windows that faulted before.
+namespace {
+bool FaultCategoryDiag() {
+    static const bool enabled = EmulatorSettingsImpl::Flag("GOW3_FAULT_CATEGORY", false);
+    return enabled;
+}
+constexpr u64 DiagPageShift = 12;
+std::array<std::atomic<u64>, 64> diag_fault_windows{}; // window index + 1
+std::atomic<u32> diag_fault_window_next{0};
+std::array<std::atomic<u64>, 65536> diag_page_key{};  // page index + 1
+std::array<std::atomic<u64>, 65536> diag_page_tick{};
+bool DiagWindowFaulted(VAddr window) {
+    for (const auto& slot : diag_fault_windows) {
+        if (slot.load(std::memory_order_relaxed) == window + 1) {
+            return true;
+        }
+    }
+    return false;
+}
+u64 DiagPageTick(VAddr page) {
+    const size_t slot = page % diag_page_key.size();
+    return diag_page_key[slot].load(std::memory_order_relaxed) == page + 1
+               ? diag_page_tick[slot].load(std::memory_order_relaxed)
+               : 0;
+}
+struct DiagTotals {
+    std::atomic<u64> count[4]{};
+    std::atomic<u64> ns[4]{};
+    std::atomic<u64> false_count{};
+    std::atomic<u64> false_ns{};
+    std::atomic<u64> page_unknown{};
+    std::atomic<u64> last_print_ns{};
+    // Per category: queued for the command processor, on the command processor, waiting for
+    // the copy to land (the rest of ns[] is marking/copying out).
+    std::atomic<u64> queue_ns[4]{};
+    std::atomic<u64> cp_ns[4]{};
+    std::atomic<u64> land_ns[4]{};
+} diag_totals;
+} // namespace
+
 void BufferCache::NoteGpuWrite(VAddr device_addr, u64 size) {
     const u64 tick = scheduler.CurrentTick();
     const VAddr first = device_addr >> WriteTickShift;
@@ -361,6 +404,15 @@ void BufferCache::NoteGpuWrite(VAddr device_addr, u64 size) {
         auto& slot = write_ticks[window % write_ticks.size()];
         slot.window.store(window, std::memory_order_relaxed);
         slot.tick.store(tick, std::memory_order_relaxed);
+        if (FaultCategoryDiag() && DiagWindowFaulted(window)) {
+            const VAddr begin = std::max<VAddr>(device_addr, window << WriteTickShift);
+            const VAddr end = std::min<VAddr>(device_addr + size, (window + 1) << WriteTickShift);
+            for (VAddr page = begin >> DiagPageShift; page <= (end - 1) >> DiagPageShift; ++page) {
+                const size_t index = page % diag_page_key.size();
+                diag_page_key[index].store(page + 1, std::memory_order_relaxed);
+                diag_page_tick[index].store(tick, std::memory_order_relaxed);
+            }
+        }
     }
 }
 
@@ -578,8 +630,223 @@ static bool ReadbackAsync() {
     return async;
 }
 
+static bool ReadbackDoneFast() {
+    static const bool fast =
+        ReadbackAsync() && EmulatorSettingsImpl::Flag("GOW3_READBACK_DONE_FAST", false);
+    return fast;
+}
+
+std::unique_lock<std::recursive_mutex> BufferCache::RangesLock() {
+    if (!ReadbackDoneFast()) {
+        return {};
+    }
+    return std::unique_lock{ranges_mutex};
+}
+
+bool BufferCache::FastDoneReadback(VAddr device_addr, u64 size, bool is_write) {
+    if (!fast_ready.load(std::memory_order_acquire) || !instance.GetSideQueue() ||
+        ReadbackAll() || ReadbackHot()) {
+        return false;
+    }
+    constexpr u64 WindowSize = 512_KB;
+    const u64 first_block = device_addr >> block_shift;
+    const u64 last_block = (device_addr + size - 1) >> block_shift;
+    const u64 first_page = first_block >> blocks_per_arena_page_shift;
+    const u64 last_page = last_block >> blocks_per_arena_page_shift;
+    const Buffer* arena = address_space[first_page];
+    if (!arena || address_space[last_page] != arena) {
+        return false;
+    }
+    const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
+    const VAddr window_start =
+        std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
+    const VAddr window_end = std::min<VAddr>(
+        std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
+    if (window_end - window_start > FastSlotSize) {
+        return false;
+    }
+    u32 slot;
+    {
+        std::scoped_lock lk{fast_mutex};
+        if (fast_free_slots.empty()) {
+            return false;
+        }
+        slot = fast_free_slots.back();
+        fast_free_slots.pop_back();
+    }
+    const auto give_back = [&] {
+        std::scoped_lock lk{fast_mutex};
+        fast_free_slots.push_back(slot);
+    };
+    auto readback = std::make_shared<AsyncReadback>();
+    readback->fast_slot = slot;
+    readback->download = fast_staging;
+    readback->download.offset = fast_staging.offset + u64{slot} * FastSlotSize;
+    readback->download.size = FastSlotSize;
+    readback->download.mapped = fast_staging.mapped + u64{slot} * FastSlotSize;
+    readback->windows.push_back({arena, window_start, window_end - window_start});
+    {
+        const auto ranges_lock = RangesLock();
+        // A window still landing from another readback: the usual path waits for it.
+        {
+            std::scoped_lock lk{async_mutex};
+            for (const auto& entry : async_pending) {
+                for (const auto& w : entry->windows) {
+                    if (w.start < window_end && window_start < w.start + w.size) {
+                        give_back();
+                        return false;
+                    }
+                }
+            }
+        }
+        boost::container::small_vector<vk::BufferCopy, 8> copies;
+        u64 total_size_bytes = 0;
+        const VAddr arena_base = arena->cpu_addr;
+        memory_tracker->ForEachDownloadRange<false>(
+            window_start, window_end - window_start, [&](u64 address, u64 range_size) {
+                gpu_modified_ranges.ForEachInRange(address, range_size, [&](VAddr start, VAddr end) {
+                    copies.push_back(vk::BufferCopy{
+                        .srcOffset = start - arena_base,
+                        .dstOffset = total_size_bytes,
+                        .size = end - start,
+                    });
+                    constexpr u64 align = 64ULL;
+                    total_size_bytes += (end - start + align - 1) & ~(align - 1);
+                });
+            });
+        if (total_size_bytes == 0 || total_size_bytes > FastSlotSize) {
+            give_back();
+            return false;
+        }
+        for (auto& copy : copies) {
+            readback->copies.push_back(
+                {arena_base + copy.srcOffset, copy.dstOffset, copy.size});
+            copy.dstOffset += readback->download.offset;
+        }
+        // Only windows whose last write (and the tick after it) has finished: checked under
+        // ranges_mutex, so stage B cannot bind a new write in between.
+        const std::pair<const Buffer*, std::span<const vk::BufferCopy>> work[] = {
+            {arena, std::span<const vk::BufferCopy>(copies.data(), copies.size())}};
+        if (!SideQueueCopy(*readback, work)) {
+            give_back();
+            return false;
+        }
+        ClassifyFault(Common::AlignDown(device_addr, WindowSize));
+        memory_tracker->ForEachDownloadRange<false>(
+            window_start, window_end - window_start,
+            [&](u64 address, u64 range_size) { gpu_modified_ranges.Subtract(address, range_size); });
+        readback->tick = scheduler.CurrentTick();
+        std::scoped_lock lk{async_mutex};
+        async_pending.push_back(readback);
+        async_count.fetch_add(1, std::memory_order_release);
+    }
+    Gow3Stats::uc3_rb_side.fetch_add(1, std::memory_order_relaxed);
+    Gow3Stats::uc3_rb_async.fetch_add(1, std::memory_order_relaxed);
+    static std::atomic<u32> fast_count{0};
+    const u32 n = fast_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 2 || (n & 4095) == 0) {
+        std::printf("uc3: done-window readbacks on the faulting thread: %u\n", n);
+    }
+    CompleteAsyncReadback(*readback, device_addr, size, is_write);
+    return true;
+}
+
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks,
                              bool from_fault) {
+    struct FaultDiag {
+        int category = -1; // 0 unknown, 1 open, 2 in flight, 3 done
+        bool false_dep = false;
+        std::chrono::steady_clock::time_point start;
+        std::chrono::steady_clock::time_point cp_start;
+        std::chrono::steady_clock::time_point cp_end;
+        std::chrono::steady_clock::time_point land_start;
+        std::chrono::steady_clock::time_point land_end;
+        ~FaultDiag() {
+            if (category < 0) {
+                return;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            const u64 ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count();
+            diag_totals.count[category].fetch_add(1, std::memory_order_relaxed);
+            diag_totals.ns[category].fetch_add(ns, std::memory_order_relaxed);
+            const auto span = [](auto a, auto b) -> u64 {
+                return a.time_since_epoch().count() && b > a
+                           ? std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count()
+                           : 0;
+            };
+            diag_totals.queue_ns[category].fetch_add(span(start, cp_start),
+                                                     std::memory_order_relaxed);
+            diag_totals.cp_ns[category].fetch_add(span(cp_start, cp_end), std::memory_order_relaxed);
+            diag_totals.land_ns[category].fetch_add(span(land_start, land_end),
+                                                    std::memory_order_relaxed);
+            if (false_dep) {
+                diag_totals.false_count.fetch_add(1, std::memory_order_relaxed);
+                diag_totals.false_ns.fetch_add(ns, std::memory_order_relaxed);
+            }
+            const u64 now_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+            u64 last = diag_totals.last_print_ns.load(std::memory_order_relaxed);
+            if (now_ns - last < 5000000000ULL ||
+                !diag_totals.last_print_ns.compare_exchange_strong(last, now_ns)) {
+                return;
+            }
+            u64 c[4], t[4], q[4], cp[4], l[4];
+            for (int i = 0; i < 4; ++i) {
+                c[i] = diag_totals.count[i].exchange(0, std::memory_order_relaxed);
+                t[i] = diag_totals.ns[i].exchange(0, std::memory_order_relaxed);
+                q[i] = diag_totals.queue_ns[i].exchange(0, std::memory_order_relaxed);
+                cp[i] = diag_totals.cp_ns[i].exchange(0, std::memory_order_relaxed);
+                l[i] = diag_totals.land_ns[i].exchange(0, std::memory_order_relaxed);
+            }
+            const u64 fc = diag_totals.false_count.exchange(0, std::memory_order_relaxed);
+            const u64 ft = diag_totals.false_ns.exchange(0, std::memory_order_relaxed);
+            const u64 pu = diag_totals.page_unknown.exchange(0, std::memory_order_relaxed);
+            const auto line = [&](int i) {
+                return fmt::format("{} faults {:.1f} ms (avg {:.2f} ms: queue {:.2f}, on CP {:.2f}, "
+                                   "copy landing {:.2f})",
+                                   c[i], t[i] / 1e6, c[i] ? t[i] / 1e6 / c[i] : 0.0,
+                                   c[i] ? q[i] / 1e6 / c[i] : 0.0, c[i] ? cp[i] / 1e6 / c[i] : 0.0,
+                                   c[i] ? l[i] / 1e6 / c[i] : 0.0);
+            };
+            std::printf("uc3 fault categories (5 s): open %s; in flight %s; done %s; unknown %s; "
+                        "false dependency (page written before the window's last write, page done) "
+                        "%llu faults %.1f ms; page tick unknown %llu\n",
+                        line(1).c_str(), line(2).c_str(), line(3).c_str(), line(0).c_str(),
+                        (unsigned long long)fc, ft / 1e6, (unsigned long long)pu);
+        }
+    } fault_diag;
+    if (from_fault && FaultCategoryDiag()) {
+        fault_diag.start = std::chrono::steady_clock::now();
+        const VAddr window = device_addr >> WriteTickShift;
+        if (!DiagWindowFaulted(window)) {
+            diag_fault_windows[diag_fault_window_next.fetch_add(1, std::memory_order_relaxed) %
+                               diag_fault_windows.size()]
+                .store(window + 1, std::memory_order_relaxed);
+        }
+        const auto& slot = write_ticks[window % write_ticks.size()];
+        const u64 window_tick = slot.window.load(std::memory_order_relaxed) == window
+                                    ? slot.tick.load(std::memory_order_relaxed)
+                                    : 0;
+        const u64 current = scheduler.CurrentTick();
+        const u64 gpu = scheduler.GetWorkSemaphore()->KnownGpuTick();
+        fault_diag.category = window_tick == 0         ? 0
+                              : window_tick >= current ? 1
+                              : window_tick > gpu      ? 2
+                                                       : 3;
+        u64 page_tick = 0;
+        bool unknown = false;
+        for (VAddr page = device_addr >> DiagPageShift;
+             page <= (device_addr + std::max<u64>(size, 1) - 1) >> DiagPageShift; ++page) {
+            const u64 tick = DiagPageTick(page);
+            unknown |= tick == 0;
+            page_tick = std::max(page_tick, tick);
+        }
+        if (unknown) {
+            diag_totals.page_unknown.fetch_add(1, std::memory_order_relaxed);
+        } else if (fault_diag.category == 1 || fault_diag.category == 2) {
+            fault_diag.false_dep = page_tick < window_tick && page_tick <= gpu;
+        }
+    }
     bool async = from_fault && !assume_locks && ReadbackAsync();
     if (async && ReadbackAcbSync()) {
         // uc3: windows an async compute dispatch writes take the synchronous path: the command
@@ -601,8 +868,44 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                       : Gow3Stats::uc3_rb_sync_other)
             .fetch_add(1, std::memory_order_relaxed);
     }
+    if (async && ReadbackDoneFast()) {
+        if (fault_diag.category >= 0) {
+            fault_diag.land_start = std::chrono::steady_clock::now();
+        }
+        if (FastDoneReadback(device_addr, size, is_write)) {
+            if (fault_diag.category >= 0) {
+                fault_diag.land_end = std::chrono::steady_clock::now();
+            }
+            return;
+        }
+        fault_diag.land_start = {};
+    }
     std::shared_ptr<AsyncReadback> pending;
-    const auto flush_request = [this, device_addr, size, is_write, async, &pending] {
+    const auto flush_request = [this, device_addr, size, is_write, async, &pending, &fault_diag] {
+        struct CpSpan {
+            decltype(fault_diag)& diag;
+            explicit CpSpan(decltype(fault_diag)& d) : diag{d} {
+                if (diag.category >= 0) {
+                    diag.cp_start = std::chrono::steady_clock::now();
+                }
+            }
+            ~CpSpan() {
+                if (diag.category >= 0) {
+                    diag.cp_end = std::chrono::steady_clock::now();
+                }
+            }
+        } cp_span{fault_diag};
+        if (ReadbackDoneFast() && !fast_ready.load(std::memory_order_relaxed)) {
+            fast_staging = staging_pool.Request(u64{FastSlotSize} * FastSlots,
+                                                VideoCore::MemoryType::HostCached, 0, true);
+            {
+                std::scoped_lock lk{fast_mutex};
+                for (u32 i = FastSlots; i-- > 0;) {
+                    fast_free_slots.push_back(i);
+                }
+            }
+            fast_ready.store(true, std::memory_order_release);
+        }
         // uc3 (GOW3_READBACK_ASYNC_DRAIN=1): the drain in Rasterizer::ReadMemory runs on the
         // faulting thread, where it does nothing. Work still queued for the recording thread
         // (GOW3_COMPUTE_PIPE: async compute dispatches) is recorded after this copy and its
@@ -686,7 +989,13 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         liverpool->SendCommand<true>(std::move(flush_request));
     }
     if (pending) {
+        if (fault_diag.category >= 0) {
+            fault_diag.land_start = std::chrono::steady_clock::now();
+        }
         CompleteAsyncReadback(*pending, device_addr, size, is_write);
+        if (fault_diag.category >= 0) {
+            fault_diag.land_end = std::chrono::steady_clock::now();
+        }
         // uc3 (GOW3_READBACK_DIRTY_RETRY=1): the GPU wrote the window after this copy was
         // recorded, so the bytes that landed are an older generation (UC2 train: Drake fell
         // behind with READBACK_ASYNC + COMPUTE_PIPE). Read it again, synchronously.
@@ -709,6 +1018,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 
 std::shared_ptr<BufferCache::AsyncReadback> BufferCache::DownloadWindowsAsync(
     std::span<const DownloadWindow> windows) {
+    const auto ranges_lock = RangesLock();
     struct WindowCopies {
         const DownloadWindow* window;
         boost::container::small_vector<vk::BufferCopy, 4> copies;
@@ -943,8 +1253,13 @@ void BufferCache::CompleteAsyncReadback(AsyncReadback& readback, VAddr device_ad
             Gow3Stats::uc3_rb_async_dirty.fetch_add(1, std::memory_order_relaxed);
         }
         std::erase_if(async_pending, [&](const auto& entry) { return entry.get() == &readback; });
-        async_free.push_back(download);
-        async_free_count.fetch_add(1, std::memory_order_release);
+        if (readback.fast_slot != ~0u) {
+            std::scoped_lock fast_lk{fast_mutex};
+            fast_free_slots.push_back(readback.fast_slot);
+        } else {
+            async_free.push_back(download);
+            async_free_count.fetch_add(1, std::memory_order_release);
+        }
         async_count.fetch_sub(1, std::memory_order_release);
     }
     readback.done.store(true, std::memory_order_release);
@@ -1031,6 +1346,7 @@ void BufferCache::CompleteLeafDownloads() {
     auto* semaphore = scheduler.GetWorkSemaphore();
     semaphore->Refresh();
     std::scoped_lock lk{leaf_mutex};
+    const auto ranges_lock = RangesLock();
     bool invalidated = false;
     std::erase_if(leaf_pending, [&](const LeafDownload& leaf) {
         if (!semaphore->IsFree(leaf.tick)) {
@@ -1062,8 +1378,11 @@ void BufferCache::CompleteLeafDownloads() {
 }
 
 bool BufferCache::IsGpuWritten(VAddr addr, u64 size) {
-    if (gpu_modified_ranges.Intersects(addr, size)) {
-        return true;
+    {
+        const auto ranges_lock = RangesLock();
+        if (gpu_modified_ranges.Intersects(addr, size)) {
+            return true;
+        }
     }
     if (async_count.load(std::memory_order_acquire) == 0) {
         return false;
@@ -1080,6 +1399,7 @@ bool BufferCache::IsGpuWritten(VAddr addr, u64 size) {
 }
 
 const char* BufferCache::DescribeGpuWritten(VAddr addr, u64 size) {
+    const auto ranges_lock = RangesLock();
     static thread_local char text[256];
     if (gpu_modified_ranges.Intersects(addr, size)) {
         // The GPU-written pieces of the whole page, to see what the load shares it with.
@@ -1111,6 +1431,7 @@ void BufferCache::NoteAsyncWrite(VAddr device_addr, u64 size) {
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
+    const auto ranges_lock = RangesLock();
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     const VAddr arena_base = arena->cpu_addr;
@@ -1159,6 +1480,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
 }
 
 void BufferCache::DownloadWindows(std::span<const DownloadWindow> windows) {
+    const auto ranges_lock = RangesLock();
     struct WindowCopies {
         const DownloadWindow* window;
         boost::container::small_vector<vk::BufferCopy, 4> copies;
@@ -1225,6 +1547,7 @@ void BufferCache::DownloadWindows(std::span<const DownloadWindow> windows) {
 }
 
 void BufferCache::DownloadAllGpuModified() {
+    const auto ranges_lock = RangesLock();
     struct ArenaCopies {
         const Buffer* arena;
         boost::container::small_vector<vk::BufferCopy, 16> copies;
@@ -1423,6 +1746,8 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
             Gow3Stats::buffer_upload_bytes.load(std::memory_order_relaxed) - uploaded_before;
     }
     if (is_written) {
+        // GOW3_READBACK_DONE_FAST: the range and its write tick change together.
+        const auto ranges_lock = RangesLock();
         gpu_modified_ranges.Add(device_addr, size);
         NoteGpuWrite(device_addr, size);
     }

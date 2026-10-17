@@ -37,6 +37,8 @@ int gow3gpu_choice_poll(void);
 int gow3gpu_overlay_captures_input(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned gow3gpu_symbol_count(void);
+/* Windows thread id of the GPU command processor thread (0 until it starts; diagnostics). */
+unsigned long gow3gpu_cp_thread_id(void);
 #ifdef __cplusplus
 }
 #endif

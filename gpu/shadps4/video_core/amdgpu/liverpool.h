@@ -33,6 +33,12 @@ struct VideoOutPort;
 
 namespace AmdGpu {
 
+/// uc3 (GOW3_FRAME_GATE=1, diagnostic): where a frame's time goes between the guest's
+/// sceGnmSubmitDone and the GpuIdle interrupt that lets its next submission through.
+enum class GateStage : int { SubmitDone, Decoded, Drained, IdleWaitBegin, IdleWaitEnd };
+void NoteGateStage(GateStage stage);
+bool FrameGateStats();
+
 struct PM4CmdWaitRegMem;
 
 union PM4Header;
