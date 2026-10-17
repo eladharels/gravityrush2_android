@@ -25,9 +25,17 @@ No install and no terminal needed:
 
 The **Options** button sets the display mode (window, borderless, fullscreen), VSync, the FPS
 limit and the FPS counter. Under *Advanced* you can turn off any of the optimizations; with all of
-them on you get the tested setup. In game, **Insert** (or L2+R2+L3+R3 on a controller) opens the port's
+them on you get the tested setup. In game, **Insert** or **F1** (or L2+R2+L3+R3 on a controller) opens the port's
 menu. Saves are kept in the `user` folder next to the launcher, and the last session's log in
 `user\last_run.log`.
+
+The **Controls** button sets up keyboard and mouse: turn on *Look around with the mouse*, set the
+sensitivity (and a separate multiplier while aiming), and change any key or controller button. The
+same options are in the in-game menu (*Controls* tab). With mouse look on, the mouse turns the
+camera directly in all three games, while walking, aiming and in cover; hold Left Alt to free the
+cursor. Default keys: WASD move, Space Cross, Left Ctrl or Q Circle, F Square, E Triangle, G L1,
+R R1, right mouse button L2 (aim), left mouse button R2 (shoot), V L3, middle mouse button R3,
+1/2/3/4 or the wheel the d-pad, Tab the touchpad, Esc or Enter Options.
 
 You need 64-bit Windows 10 (1903+) or 11 and a GPU with Vulkan 1.3. The port was developed on an
 AMD RX 6750 XT; Intel GPUs get a fix from Supermedo but are still untested.
@@ -67,6 +75,10 @@ Fixed in UC3 over the last few days: young Drake's white hair (addr64 `BUFFER_LO
 textures (bartender's vest, museum floor, bathroom door) and performance, which went from 18–24 FPS
 in the streets and the Chateau to 60.
 
+New in 0.3.2: keyboard and mouse controls with direct mouse camera in UC1, UC2 and UC3 (also on the
+1.00 game without the update), a Controls window in the launcher and a Controls tab in the in-game
+menu, F1 as a second key for the menu, and a notice in the launcher when a new version is out.
+
 Also new: the player package with the launcher and its Options screen; the port's in-game menu no
 longer shows God of War III-only items (cheats, orbs, upscaler, render resolution) in the Uncharted
 games; and black screen on Intel GPUs fixed (from Supermedo's 0.3.3, untested here).
@@ -103,8 +115,8 @@ The two were made in parallel, and this one took several of its fixes, always cr
 | Video core | shadPS4 0.19.0 with fixes from the 2026-10-12 nightly (memory tracker, texture cache) | shadPS4 from 2026-09-24 with recompiler backports |
 | GPU readbacks by the game | **Precise** mode (the scenery is drawn from the right data; this is what fixed the visual problems here), sped up to reach 60 FPS: async readbacks, side queue, early submits, ring copies on another thread | **Relaxed** mode by default, working around the problem with the scalar copy HLE |
 | How optimizations land | In the code, each one behind an option that is **off by default**, measured and logged in the [DEVLOG](docs/uc3/DEVLOG.md); the launcher turns on the tested set, and *Options → Advanced* turns them off one by one | On by default, with options to turn them off |
-| Other things this port has | Tight barriers on formatted buffers, full hash of small images, MP3 in Ajm, diagnostic tools (GPU profile, fault and write tracing) | — |
-| What it has that this one does not yet | — | Upscalers and frame generation, 120 FPS option, mouse in UC3, collection menu through `eboot.bin` |
+| Other things this port has | Tight barriers on formatted buffers, full hash of small images, MP3 in Ajm, diagnostic tools (GPU profile, fault and write tracing), mouse turning the camera directly in all three games (walking, aiming and cover) | — |
+| What it has that this one does not yet | — | Upscalers and frame generation, 120 FPS option, collection menu through `eboot.bin` |
 
 The two projects help each other: when something works there and not here (or the other way round),
 comparing them is worth it.
@@ -151,7 +163,7 @@ Double-click the game's `.bat` in `windows\`:
 | `fechar_jogo.bat` | Closes the game if it hangs |
 
 Each session's log goes to `out\last-run.log` (the previous one to `out\previous-run.log`). Saves
-are kept in `user\`. In game, **Insert** (or L2+R2+L3+R3 on a controller) opens the port's menu.
+are kept in `user\`. In game, **Insert** or **F1** (or L2+R2+L3+R3 on a controller) opens the port's menu.
 
 You can also call the script directly and pass options for that run only:
 

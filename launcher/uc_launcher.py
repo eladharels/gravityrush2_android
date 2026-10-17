@@ -19,6 +19,9 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+import urllib.request
+import webbrowser
 
 WINDOWS = sys.platform == 'win32'
 if WINDOWS:
@@ -32,9 +35,12 @@ INI_FILE = DATA_DIR / 'ucndc.ini'
 OLD_INI_FILE = DATA_DIR / 'gow3.ini'  # name before 0.3; copied once, left in place
 USER_DIR = DATA_DIR / 'user'
 LOG_FILE = USER_DIR / 'last_run.log'
+INPUT_FILE = DATA_DIR / 'input.ini'
 APP_NAME = 'Uncharted Collection PC'
 EXE_NAME = 'Uncharted Launcher.exe'
-VERSION = '0.3.1'
+VERSION = '0.3.2'
+RELEASES_API = 'https://api.github.com/repos/zorde23/ucndc_pc/releases/latest'
+RELEASES_PAGE = 'https://github.com/zorde23/ucndc_pc/releases/latest'
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 TESTED_TITLE = 'CUSA02344'
 
@@ -49,7 +55,8 @@ COMMON = {
 # key, title, executable, (status pt, status en), extra options
 GAMES = [
     ('uc1', "Uncharted: Drake's Fortune", 'eboot.bin', ('Experimental', 'Experimental'),
-     {'GOW3_COMPUTE_PIPE': '1', 'GOW3_LOW_IMAGE': '1', 'GOW3_AJM_END_RULES': '1', 'GOW3_EOP_TICK_WAIT': '1'}),
+     {'GOW3_COMPUTE_PIPE': '1', 'GOW3_LOW_IMAGE': '1', 'GOW3_AJM_END_RULES': '1', 'GOW3_EOP_TICK_WAIT': '1',
+      'GOW3_MOUSE_AIM_U1_ALL': '1'}),
     ('uc2', 'Uncharted 2: Among Thieves', 'big2-ps4_Shipping.elf', ('Jogável', 'Playable'),
      # Without GOW3_COMPUTE_PIPE: with it the train carriage in the prologue falls too early. The two
      # in-order options keep the rooftop at 60 FPS; the train jump is still timing-sensitive with them.
@@ -64,7 +71,8 @@ INI_DEFAULTS = {'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
                 'deferred_readback': '1', 'stale_readback': '0', 'show_fps': '1', 'overlay_fps': '1'}
 DISPLAY_MODES = [('windowed', ('Janela', 'Window')), ('borderless', ('Janela sem borda', 'Borderless')),
                  ('fullscreen', ('Tela cheia', 'Fullscreen'))]
-DEFAULTS = {'game_dir': '', 'update_dir': '', 'language': '', 'last_game': 'uc3', 'disabled': []}
+DEFAULTS = {'game_dir': '', 'update_dir': '', 'language': '', 'last_game': 'uc3', 'disabled': [],
+            'check_updates': True}
 # What each optimization does (Options > Advanced); the games turn them on by default.
 TOGGLE_HELP = {
     'GOW3_READBACK_ASYNC': ('Leituras da GPU sem parar a fila', 'GPU readbacks without draining the queue'),
@@ -85,6 +93,7 @@ TOGGLE_HELP = {
     'GOW3_FRAME_STATS': ('Estatísticas de quadro no log', 'Frame statistics in the log'),
     'GOW3_EOP_TICK_WAIT': ('Evita o erro m_gfxEopTick (UC1)', 'Avoid the m_gfxEopTick assert (UC1)'),
     'GOW3_AJM_END_RULES': ('Regras de áudio do Ajm (UC1)', 'Ajm audio rules (UC1)'),
+    'GOW3_MOUSE_AIM_U1_ALL': ('Mira com mouse estável (UC1)', 'Steady mouse aiming (UC1)'),
     'GOW3_HLE_INORDER': ('Cópias nativas em ordem (UC2; desligue se o trem do prólogo falhar)',
                          'Native copies in order (UC2; turn off if the prologue train fails)'),
     'GOW3_ACB_DISPATCH_PIPE': ('Compute assíncrono em ordem (UC2; desligue se o trem do prólogo falhar)',
@@ -100,6 +109,65 @@ FPS_LIMITS = [('0', ('Sem limite (60)', 'No limit (60)')), ('30', ('30', '30')),
 # keeps the scenery; FRAME_STATS is only a log aid; HLE_INVALIDATE follows SCALAR_COPY_HLE (texture swaps).
 FIXED = {'GOW3_READBACKS', 'GOW3_FRAME_STATS', 'GOW3_LOW_IMAGE', 'GOW3_AJM_END_RULES', 'GOW3_EOP_TICK_WAIT',
          'GOW3_HLE_INVALIDATE'}
+
+# Controls window (input.ini, read by the game: src/runtime_pad.c), ported from SuperMedo's launcher
+# (uncharted_pc, GPL). Actions with their PS4 names, the default keys ("A|B": two bindings) and the
+# default controller buttons (SDL names). Without a saved Controls window the game keeps its own.
+BUTTON_ACTIONS = [
+    ('cross', ('X', 'Cross ✕'), 'Space', 'a'), ('circle', ('Círculo ○', 'Circle ○'), 'Left Ctrl|Q', 'b'),
+    ('square', ('Quadrado □', 'Square □'), 'F', 'x'), ('triangle', ('Triângulo △', 'Triangle △'), 'E', 'y'),
+    ('l1', ('L1', 'L1'), 'G', 'leftshoulder'), ('r1', ('R1', 'R1'), 'R', 'rightshoulder'),
+    ('l2', ('L2 (mirar)', 'L2 (aim)'), 'Mouse Right', 'lefttrigger'),
+    ('r2', ('R2 (atirar)', 'R2 (fire)'), 'Mouse Left', 'righttrigger'),
+    ('l3', ('L3', 'L3'), 'V', 'leftstick'), ('r3', ('R3', 'R3'), 'Mouse Middle', 'rightstick'),
+    ('options', ('Options', 'Options'), 'Escape|Return', 'start'),
+    ('touchpad_left', ('Touchpad, lado esquerdo', 'Touchpad, left side'), 'Tab', 'none'),
+    ('touchpad_right', ('Touchpad, lado direito', 'Touchpad, right side'), 'Backspace', 'back'),
+    ('up', ('Direcional cima', 'D-pad up'), '4', 'dpup'), ('down', ('Direcional baixo', 'D-pad down'), '3', 'dpdown'),
+    ('left', ('Direcional esquerda', 'D-pad left'), '1|Wheel Up', 'dpleft'),
+    ('right', ('Direcional direita', 'D-pad right'), '2|Wheel Down', 'dpright'),
+]
+STICK_ACTIONS = [
+    ('ls_up', ('Andar para frente', 'Move forward'), 'W'), ('ls_down', ('Andar para trás', 'Move back'), 'S'),
+    ('ls_left', ('Andar para a esquerda', 'Move left'), 'A'), ('ls_right', ('Andar para a direita', 'Move right'), 'D'),
+    ('rs_up', ('Olhar para cima', 'Look up'), 'I'), ('rs_down', ('Olhar para baixo', 'Look down'), 'K'),
+    ('rs_left', ('Olhar para a esquerda', 'Look left'), 'J'), ('rs_right', ('Olhar para a direita', 'Look right'), 'L'),
+]
+DEFAULT_KEYS = {a: k for a, _t, k, _p in BUTTON_ACTIONS} | {a: k for a, _t, k in STICK_ACTIONS}
+DEFAULT_PAD = {a: p for a, _t, _k, p in BUTTON_ACTIONS}
+PAD_BUTTONS = [('a', ('A / X', 'A / Cross')), ('b', ('B / Círculo', 'B / Circle')),
+               ('x', ('X / Quadrado', 'X / Square')), ('y', ('Y / Triângulo', 'Y / Triangle')),
+               ('leftshoulder', ('LB / L1', 'LB / L1')), ('rightshoulder', ('RB / R1', 'RB / R1')),
+               ('lefttrigger', ('LT / L2', 'LT / L2')), ('righttrigger', ('RT / R2', 'RT / R2')),
+               ('leftstick', ('Clique do analógico esquerdo / L3', 'Left stick click / L3')),
+               ('rightstick', ('Clique do analógico direito / R3', 'Right stick click / R3')),
+               ('start', ('Start / Options', 'Start / Options')), ('back', ('Back / Share', 'Back / Share')),
+               ('touchpad', ('Clique do touchpad', 'Touchpad click')),
+               ('dpup', ('Direcional cima', 'D-pad up')), ('dpdown', ('Direcional baixo', 'D-pad down')),
+               ('dpleft', ('Direcional esquerda', 'D-pad left')), ('dpright', ('Direcional direita', 'D-pad right')),
+               ('misc1', ('Share / Mic (misc)', 'Share / Mic (misc)')), ('paddle1', ('Paddle 1', 'Paddle 1')),
+               ('paddle2', ('Paddle 2', 'Paddle 2')), ('paddle3', ('Paddle 3', 'Paddle 3')),
+               ('paddle4', ('Paddle 4', 'Paddle 4')), ('none', ('Nenhum', 'Not assigned'))]
+CONTROL_DEFAULTS = {'mouse_look': False, 'mouse_sensitivity': 1.0, 'mouse_aim_sensitivity': 1.0, 'mouse_invert_y': False,
+                    'pad_invert_y': False, 'keys': {}, 'pad': {}}
+# Tk key names -> SDL key names (letters and digits map to themselves, upper case).
+TK_KEYS = {'space': 'Space', 'Return': 'Return', 'Escape': 'Escape', 'Tab': 'Tab', 'BackSpace': 'Backspace',
+           'Shift_L': 'Left Shift', 'Shift_R': 'Right Shift', 'Control_L': 'Left Ctrl',
+           'Control_R': 'Right Ctrl', 'Alt_R': 'Right Alt', 'Caps_Lock': 'CapsLock', 'Up': 'Up',
+           'Down': 'Down', 'Left': 'Left', 'Right': 'Right', 'Delete': 'Delete', 'Home': 'Home',
+           'End': 'End', 'Prior': 'PageUp', 'Next': 'PageDown', 'minus': '-', 'equal': '=',
+           'bracketleft': '[', 'bracketright': ']', 'semicolon': ';', 'apostrophe': "'", 'comma': ',',
+           'period': '.', 'slash': '/', 'backslash': '\\', 'grave': '`', 'KP_Enter': 'Keypad Enter',
+           'KP_Add': 'Keypad +', 'KP_Subtract': 'Keypad -', 'KP_Multiply': 'Keypad *',
+           'KP_Divide': 'Keypad /', 'KP_Decimal': 'Keypad .', 'KP_Delete': 'Keypad .',
+           'KP_Insert': 'Keypad 0', 'KP_End': 'Keypad 1', 'KP_Down': 'Keypad 2', 'KP_Next': 'Keypad 3',
+           'KP_Left': 'Keypad 4', 'KP_Begin': 'Keypad 5', 'KP_Right': 'Keypad 6', 'KP_Home': 'Keypad 7',
+           'KP_Up': 'Keypad 8', 'KP_Prior': 'Keypad 9'}
+# Insert and F1 open the port menu; Left Alt frees the mouse cursor.
+RESERVED_KEYS = {'Insert': ('Insert abre o menu do port.', 'Insert opens the port menu.'),
+                 'F1': ('F1 abre o menu do port.', 'F1 opens the port menu.'),
+                 'Alt_L': ('Alt esquerdo solta o cursor do mouse enquanto segurado.',
+                           'Left Alt frees the mouse cursor while held.')}
 
 BG, PANEL, CARD, TEXT, MUTED, ACCENT, OK, BAD = ('#15130f', '#1f1b16', '#2a241c', '#efe6d4', '#a89c86',
                                                  '#d9a441', '#7fbf6a', '#d9674f')
@@ -239,6 +307,58 @@ def public_name(name):
     return 'UC_' + name[len('GOW3_'):] if name.startswith('GOW3_') else name
 
 
+def write_input_ini(controls):
+    """input.ini: the keyboard, mouse and controller bindings the game reads at start."""
+    keys = {**DEFAULT_KEYS, **(controls.get('keys') or {})}
+    pad = {**DEFAULT_PAD, **(controls.get('pad') or {})}
+    lines = ['# Uncharted controls (written by the launcher, Controls window)',
+             f"mouse_look={1 if controls.get('mouse_look') else 0}",
+             f"mouse_sensitivity={float(controls.get('mouse_sensitivity') or 1.0):.2f}",
+             f"mouse_aim_sensitivity={float(controls.get('mouse_aim_sensitivity') or 1.0):.2f}",
+             f"mouse_invert_y={1 if controls.get('mouse_invert_y') else 0}",
+             f"pad_invert_y={1 if controls.get('pad_invert_y') else 0}"]
+    lines += [f'key.{action}={keys[action]}' for action in DEFAULT_KEYS]
+    lines += [f'pad.{action}={pad[action]}' for action in DEFAULT_PAD]
+    INPUT_FILE.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    controls['written'] = dict(line.split('=', 1) for line in lines[1:])
+    return INPUT_FILE
+
+
+def adopt_menu_controls(settings):
+    """The port menu (Insert or F1 > Controls) changes input.ini while the game runs; the lines that differ
+    from what the launcher wrote last go into launcher.json. True when something changed."""
+    controls = settings.get('controls')
+    written = (controls or {}).get('written')
+    if not written:
+        return False
+    try:
+        text = INPUT_FILE.read_text(encoding='utf-8')
+    except OSError:
+        return False
+    changed = False
+    for line in text.splitlines():
+        key, sep, value = line.partition('=')
+        key, value = key.strip(), value.strip()
+        if not sep or key.startswith('#') or written.get(key) == value:
+            continue
+        if key.startswith('key.') and key[4:] in DEFAULT_KEYS:
+            controls.setdefault('keys', {})[key[4:]] = value
+        elif key.startswith('pad.') and key[4:] in DEFAULT_PAD:
+            controls.setdefault('pad', {})[key[4:]] = value
+        elif key in ('mouse_look', 'mouse_invert_y', 'pad_invert_y'):
+            controls[key] = value == '1'
+        elif key in ('mouse_sensitivity', 'mouse_aim_sensitivity'):
+            try:
+                controls[key] = round(float(value), 2)
+            except ValueError:
+                continue
+        else:
+            continue
+        written[key] = value
+        changed = True
+    return changed
+
+
 def game_environment(settings, key):
     _k, _title, executable, _status, extra = next(g for g in GAMES if g[0] == key)
     env = dict(os.environ)
@@ -257,6 +377,13 @@ def game_environment(settings, key):
     env['GOW3_EXECUTABLE'] = executable
     env['GOW3_DATA_DIR'] = str(DATA_DIR)
     env['GOW3_USER_DIR'] = str(USER_DIR)
+    if settings.get('controls'):  # saved in the Controls window; otherwise the game's own controls
+        try:
+            adopt_menu_controls(settings)
+            env['GOW3_INPUT_CONFIG'] = str(write_input_ini(settings['controls']))
+            save_settings(settings)
+        except OSError:
+            pass
     return env
 
 
@@ -363,6 +490,26 @@ def make_shortcut(key, title):
     return result.returncode == 0
 
 
+def version_tuple(text):
+    """'v0.3.1' / '0.3.1' -> (0, 3, 1); None when it is not a version."""
+    try:
+        return tuple(int(n) for n in text.strip().lstrip('vV').split('.'))
+    except (AttributeError, ValueError):
+        return None
+
+
+def latest_release():
+    """(tag, page URL) of the newest GitHub Release, or None (offline, rate limit, bad answer)."""
+    request = urllib.request.Request(RELEASES_API, headers={'Accept': 'application/vnd.github+json',
+                                                            'User-Agent': f'ucndc-launcher/{VERSION}'})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        return data['tag_name'], data.get('html_url') or RELEASES_PAGE
+    except Exception:  # noqa: BLE001 (any failure just means no notice)
+        return None
+
+
 def open_path(path):
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
@@ -383,6 +530,7 @@ class Launcher:
         self.process = self.job = None
         self.output = queue.Queue()
         self.log_visible = False
+        self.newer = None  # (tag, url) of a newer release, filled by check_updates()
         root.title(f'{APP_NAME} {VERSION}')
         root.configure(bg=BG)
         root.minsize(760, 560)
@@ -396,6 +544,40 @@ class Launcher:
         self.build()
         self.refresh()
         root.after(100, self.drain_output)
+        if self.settings.get('check_updates', True):
+            self.check_updates()
+
+    def check_updates(self):
+        """Ask GitHub for the latest release in the background; show a button when it is newer."""
+        result = []
+
+        def worker():
+            result.append(latest_release())
+
+        def poll(tries=0):
+            if not result and tries < 100:
+                self.root.after(100, poll, tries + 1)
+                return
+            found = result[0] if result else None
+            mine = os.environ.get('UC_PRETEND_VERSION') or VERSION  # test the notice: UC_PRETEND_VERSION=0.3.0
+            if found and (version_tuple(found[0]) or ()) > (version_tuple(mine) or ()):
+                self.newer = found
+                self.show_update()
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, poll)
+
+    def show_update(self):
+        bar = getattr(self, 'update_bar', None)
+        if not self.newer or bar is None:
+            return
+        tag, url = self.newer
+        for child in bar.winfo_children():
+            child.destroy()
+        mine = os.environ.get('UC_PRETEND_VERSION') or VERSION
+        self.label(bar, _(f'Saiu a versão {tag} do port (você tem a {mine}).',
+                          f'Port version {tag} is out (you have {mine}).'), 10, TEXT).pack(side='left', padx=12, pady=6)
+        self.button(bar, _('Baixar', 'Download'), lambda: webbrowser.open(url), primary=True).pack(side='right', padx=8, pady=4)
+        bar.pack(fill='x', padx=24, pady=(0, 4), after=self.top_bar)
 
     # -- layout -----------------------------------------------------------------------------
     def label(self, parent, text, size=10, color=TEXT, bold=False, **kw):
@@ -420,6 +602,8 @@ class Launcher:
         self.label(top, '  The Nathan Drake Collection · PC', 13, MUTED).pack(side='left', pady=(8, 0))
         lang = self.button(top, 'English' if LANG == 'pt' else 'Português', self.toggle_language)
         lang.pack(side='right')
+        self.top_bar = top
+        self.update_bar = tk.Frame(self.root, bg=CARD)
 
         # Folders
         box = tk.Frame(self.root, bg=PANEL)
@@ -461,6 +645,7 @@ class Launcher:
         bar = tk.Frame(self.root, bg=BG)
         bar.pack(fill='x', padx=24, pady=(12, 4))
         for text, command in ((_('Opções', 'Options'), self.options),
+                              (_('Controles', 'Controls'), self.controls),
                               (_('Pasta de saves', 'Saves folder'), lambda: open_path(USER_DIR)),
                               (_('Log', 'Log'), self.toggle_log),
                               (_('Atalho na área de trabalho', 'Desktop shortcut'), self.shortcut)):
@@ -479,6 +664,7 @@ class Launcher:
         footer = self.label(self.root, _('Port não oficial, sem relação com a Sony ou a Naughty Dog. Nenhum arquivo do jogo vem neste pacote: use o dump do seu próprio PS4.',
                                          'Unofficial port, not affiliated with Sony or Naughty Dog. No game files are included: use a dump of your own PS4.'), 8, MUTED)
         footer.pack(side='bottom', anchor='w', padx=24, pady=(0, 10))
+        self.show_update()
 
     # -- state ------------------------------------------------------------------------------
     def refresh(self):
@@ -585,9 +771,13 @@ class Launcher:
         tk.Checkbutton(body, text=_('VSync (sem tearing; recomendado)', 'VSync (no tearing; recommended)'),
                        variable=vsync, **check).grid(row=3, column=0, columnspan=2, sticky='w')
         tk.Checkbutton(body, text=_('Mostrar FPS na tela', 'Show FPS on screen'), variable=fps, **check).grid(row=4, column=0, columnspan=2, sticky='w')
-        self.label(body, _('Os jogos rodam a no máximo 60 FPS. No jogo, Insert (ou L2+R2+L3+R3) abre o menu do port.',
-                           'The games run at 60 FPS at most. In game, Insert (or L2+R2+L3+R3) opens the port menu.'),
-                   9, MUTED, wraplength=440, justify='left').grid(row=5, column=0, columnspan=2, sticky='w', pady=(4, 10))
+        updates = tk.BooleanVar(value=self.settings.get('check_updates', True))
+        tk.Checkbutton(body, text=_('Avisar quando sair versão nova do port (consulta o GitHub ao abrir)',
+                                    'Tell me when a new port version is out (asks GitHub at start)'),
+                       variable=updates, **check).grid(row=5, column=0, columnspan=2, sticky='w')
+        self.label(body, _('Os jogos rodam a no máximo 60 FPS. No jogo, Insert ou F1 (ou L2+R2+L3+R3) abre o menu do port.',
+                           'The games run at 60 FPS at most. In game, Insert or F1 (or L2+R2+L3+R3) opens the port menu.'),
+                   9, MUTED, wraplength=440, justify='left').grid(row=6, column=0, columnspan=2, sticky='w', pady=(4, 10))
 
         advanced = tk.Frame(body, bg=PANEL)
         disabled = set(self.settings.get('disabled', []))
@@ -605,11 +795,11 @@ class Launcher:
 
         def show_advanced():
             if shown.get():
-                advanced.grid(row=7, column=0, columnspan=2, sticky='w', pady=(6, 0))
+                advanced.grid(row=8, column=0, columnspan=2, sticky='w', pady=(6, 0))
             else:
                 advanced.grid_forget()
         tk.Checkbutton(body, text=_('Avançado: escolher otimizações', 'Advanced: choose optimizations'),
-                       variable=shown, command=show_advanced, **check).grid(row=6, column=0, columnspan=2, sticky='w')
+                       variable=shown, command=show_advanced, **check).grid(row=7, column=0, columnspan=2, sticky='w')
         show_advanced()
 
         def reset():
@@ -617,6 +807,7 @@ class Launcher:
                 var.set(True)
             vsync.set(True)
             fps.set(True)
+            updates.set(True)
             limit.set(pick(FPS_LIMITS)[0])
 
         def save():
@@ -625,6 +816,7 @@ class Launcher:
                         'fps_limit': FPS_LIMITS[pick(FPS_LIMITS).index(limit.get())][0],
                         'show_fps': '1' if fps.get() else '0', 'overlay_fps': '1' if fps.get() else '0'})
             self.settings['disabled'] = sorted(k for k, v in toggles.items() if not v.get())
+            self.settings['check_updates'] = updates.get()
             save_settings(self.settings)
             win.destroy()
         buttons = tk.Frame(win, bg=BG)
@@ -633,6 +825,252 @@ class Launcher:
         self.button(buttons, _('Cancelar', 'Cancel'), win.destroy).pack(side='right', padx=6)
         self.button(buttons, _('Restaurar padrão', 'Restore defaults'), reset).pack(side='left')
         win.grab_set()
+
+    def controls(self):
+        """Controls window: mouse look, keyboard and mouse keys, controller buttons (launcher.json
+        'controls', written to input.ini when a game starts). Until it is saved the game keeps its own
+        controls. Ported from SuperMedo's launcher (uncharted_pc, GPL)."""
+        tk, ttk = self.tk, self.ttk
+        win = tk.Toplevel(self.root, bg=BG)
+        win.title(_('Controles', 'Controls'))
+        win.transient(self.root)
+        win.geometry('660x640')
+        win.minsize(560, 400)
+        if adopt_menu_controls(self.settings):
+            save_settings(self.settings)
+        saved = self.settings.get('controls')
+        self.ctl = json.loads(json.dumps({**CONTROL_DEFAULTS, **(saved or {})}))
+        self.ctl_win, self.capturing, self.capture_armed, self.ignore_click = win, None, False, 0.0
+        self.key_buttons = {}
+
+        outer = tk.Frame(win, bg=PANEL)
+        outer.pack(fill='both', expand=True, padx=16, pady=(16, 8))
+        canvas = tk.Canvas(outer, bg=PANEL, highlightthickness=0)
+        scroll = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right', fill='y')
+        canvas.pack(side='left', fill='both', expand=True)
+        body = tk.Frame(canvas, bg=PANEL)
+        canvas.create_window((12, 12), window=body, anchor='nw')
+        body.bind('<Configure>', lambda _e: canvas.configure(scrollregion=(0, 0, body.winfo_reqwidth() + 24,
+                                                                               body.winfo_reqheight() + 24)))
+
+        def wheel(event):
+            if self.capturing:
+                return self.captured_wheel(event)
+            canvas.yview_scroll(-1 if event.delta > 0 else 1, 'units')
+            return 'break'
+        win.bind('<MouseWheel>', wheel)
+        check = dict(bg=PANEL, fg=TEXT, selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT,
+                     font=('Segoe UI', 10), anchor='w')
+        row = 0
+
+        def put(widget, top=0, **kw):
+            nonlocal row
+            widget.grid(row=row, column=0, columnspan=2, sticky='w', pady=(top, 0), **kw)
+            row += 1
+
+        put(self.label(body, _('Mouse', 'Mouse'), 11, TEXT, True))
+        look = tk.BooleanVar(value=bool(self.ctl['mouse_look']))
+        put(tk.Checkbutton(body, text=_('Olhar com o mouse', 'Look around with the mouse'), variable=look, **check), 4)
+        put(self.label(body, _('O cursor fica preso na janela do jogo; segure Alt esquerdo (ou troque de janela) '
+                               'para soltá-lo. Insert ou F1 abre o menu do port.',
+                               'The cursor stays in the game window; hold Left Alt (or switch windows) to free '
+                               'it. Insert or F1 opens the port menu.'), 9, MUTED, wraplength=560, justify='left'))
+        line = tk.Frame(body, bg=PANEL)
+        self.label(line, _('Sensibilidade', 'Sensitivity'), 10, MUTED, width=16, anchor='w').pack(side='left', padx=(0, 10))
+        sensitivity = tk.DoubleVar(value=float(self.ctl['mouse_sensitivity'] or 1.0))
+        tk.Scale(line, from_=0.1, to=5.0, resolution=0.05, orient='horizontal', length=300,
+                 variable=sensitivity, bg=PANEL, fg=TEXT, troughcolor=CARD, activebackground=ACCENT,
+                 highlightthickness=0, bd=0, font=('Segoe UI', 9)).pack(side='left')
+        put(line, 6)
+        line = tk.Frame(body, bg=PANEL)
+        self.label(line, _('Na mira (L2) ×', 'While aiming (L2) ×'), 10, MUTED, width=16, anchor='w').pack(side='left', padx=(0, 10))
+        aim_sensitivity = tk.DoubleVar(value=float(self.ctl.get('mouse_aim_sensitivity') or 1.0))
+        tk.Scale(line, from_=0.1, to=3.0, resolution=0.05, orient='horizontal', length=300,
+                 variable=aim_sensitivity, bg=PANEL, fg=TEXT, troughcolor=CARD, activebackground=ACCENT,
+                 highlightthickness=0, bd=0, font=('Segoe UI', 9)).pack(side='left')
+        put(line)
+        put(self.label(body, _('Multiplica a sensibilidade enquanto mira; 1 = igual à normal.',
+                               'Multiplies the sensitivity while aiming; 1 = same as normal.'), 9, MUTED))
+        invert = tk.BooleanVar(value=bool(self.ctl['mouse_invert_y']))
+        put(tk.Checkbutton(body, text=_('Inverter o mouse na vertical', 'Invert the mouse vertically'),
+                           variable=invert, **check))
+
+        put(self.label(body, _('Teclado e botões do mouse', 'Keyboard and mouse buttons'), 11, TEXT, True), 16)
+        put(self.label(body, _('Clique numa caixa e aperte uma tecla ou um botão do mouse (a rodinha também vale). '
+                               '✕ apaga. Cada ação pode ter duas.',
+                               'Click a box, then press a key or a mouse button (the wheel counts too). '
+                               '✕ removes a binding. Each action can have two.'), 9, MUTED, wraplength=560,
+                       justify='left'), 2)
+        table = tk.Frame(body, bg=PANEL)
+        rows = [(a, t) for a, t, _k, _p in BUTTON_ACTIONS] + [(a, t) for a, t, _k in STICK_ACTIONS]
+        for r, (action, title) in enumerate(rows):
+            self.label(table, _(*title), 10, TEXT).grid(row=r, column=0, sticky='w', padx=(0, 18), pady=2)
+            for slot in (0, 1):
+                button = tk.Button(table, width=14, relief='flat', bg=CARD, fg=TEXT, activebackground='#3a3226',
+                                   activeforeground=TEXT, font=('Segoe UI', 10), cursor='hand2', bd=0, padx=6,
+                                   pady=3, takefocus=0, command=lambda a=action, i=slot: self.capture_key(a, i))
+                button.grid(row=r, column=1 + slot * 2, sticky='w', pady=2)
+                clear = tk.Label(table, text='✕', bg=PANEL, fg=MUTED, font=('Segoe UI', 10), cursor='hand2', padx=6)
+                clear.grid(row=r, column=2 + slot * 2, sticky='w', padx=(2, 8))
+                clear.bind('<Button-1>', lambda _e, a=action, i=slot: self.set_key(a, i, ''))
+                self.key_buttons[(action, slot)] = button
+        put(table, 8)
+        self.show_keys()
+        put(self.button(body, _('Teclas padrão', 'Default keys'), self.reset_keys), 8)
+
+        put(self.label(body, _('Controle', 'Controller'), 11, TEXT, True), 16)
+        put(self.label(body, _('Que botão do controle faz cada botão do PS4 (nomes de Xbox / PlayStation).',
+                               'Which controller button gives each PS4 button (Xbox / PlayStation names).'),
+                       9, MUTED, wraplength=560, justify='left'), 2)
+        pads = tk.Frame(body, bg=PANEL)
+        values = [v for v, _t in PAD_BUTTONS]
+        names = [_(*t) for _v, t in PAD_BUTTONS]
+        pad_boxes = {}
+        for r, (action, title, _k, default) in enumerate(BUTTON_ACTIONS):
+            self.label(pads, _(*title), 10, TEXT).grid(row=r, column=0, sticky='w', padx=(0, 18), pady=2)
+            box = ttk.Combobox(pads, values=names, state='readonly', width=30)
+            value = self.ctl['pad'].get(action, default)
+            box.current(values.index(value) if value in values else values.index('none'))
+            box.bind('<MouseWheel>', wheel)  # scroll the window, not the choice
+            box.grid(row=r, column=1, sticky='w', pady=2)
+            pad_boxes[action] = box
+        put(pads, 8)
+        pad_invert = tk.BooleanVar(value=bool(self.ctl['pad_invert_y']))
+        put(tk.Checkbutton(body, text=_('Inverter o analógico direito na vertical', 'Invert the right stick vertically'),
+                           variable=pad_invert, **check), 6)
+
+        def reset_pad():
+            for action, box in pad_boxes.items():
+                box.current(values.index(DEFAULT_PAD[action]))
+        put(self.button(body, _('Botões padrão', 'Default buttons'), reset_pad), 8)
+
+        self.ctl_note = self.label(win, '', 9, ACCENT, wraplength=620, justify='left')
+        self.ctl_note.pack(anchor='w', padx=16)
+
+        def close():
+            self.release_capture()
+            self.capturing = None
+            win.destroy()
+
+        def save():
+            self.ctl.update(mouse_look=look.get(), mouse_sensitivity=round(sensitivity.get(), 2),
+                            mouse_aim_sensitivity=round(aim_sensitivity.get(), 2),
+                            mouse_invert_y=invert.get(), pad_invert_y=pad_invert.get())
+            self.ctl['keys'] = {a: v for a, v in self.ctl['keys'].items() if v != DEFAULT_KEYS[a]}
+            self.ctl['pad'] = {a: values[b.current()] for a, b in pad_boxes.items()
+                               if values[b.current()] != DEFAULT_PAD[a]}
+            self.settings['controls'] = self.ctl
+            save_settings(self.settings)
+            close()
+
+        def built_in():
+            self.settings.pop('controls', None)
+            save_settings(self.settings)
+            close()
+        buttons = tk.Frame(win, bg=BG)
+        buttons.pack(fill='x', padx=16, pady=(4, 16))
+        self.button(buttons, _('Salvar', 'Save'), save, primary=True).pack(side='right')
+        self.button(buttons, _('Cancelar', 'Cancel'), close).pack(side='right', padx=6)
+        if saved:
+            self.button(buttons, _('Usar os controles originais do port', "Use the port's built-in controls"),
+                        built_in).pack(side='left')
+        win.protocol('WM_DELETE_WINDOW', close)
+        win.grab_set()
+
+    def key_list(self, action):
+        value = self.ctl['keys'].get(action, DEFAULT_KEYS[action])
+        return [p.strip() for p in (value.split('|') + ['', ''])[:2]]
+
+    def show_keys(self):
+        for (action, slot), button in self.key_buttons.items():
+            if self.capturing == (action, slot):
+                button.configure(text=_('Aperte uma tecla…', 'Press a key…'), bg=ACCENT, fg='#1a1408')
+            else:
+                name = self.key_list(action)[slot]
+                button.configure(text=name or '—', bg=CARD, fg=TEXT if name else MUTED)
+
+    def set_key(self, action, slot, name):
+        keys = self.key_list(action)
+        keys[slot] = name
+        if name and keys[1 - slot] == name:
+            keys[1 - slot] = ''
+        bindings = self.ctl['keys']
+        if name:  # one binding per key: taken from the action that had it
+            for other in DEFAULT_KEYS:
+                others = self.key_list(other)
+                if other != action and name in others:
+                    bindings[other] = '|'.join(k for k in others if k and k != name)
+        bindings[action] = '|'.join(k for k in keys if k)
+        self.capturing = None
+        self.release_capture()
+        self.show_keys()
+
+    def capture_key(self, action, slot):
+        if time.monotonic() < self.ignore_click:
+            return  # the click that was just taken as a binding
+        self.release_capture()
+        self.capturing = (action, slot)
+        self.ctl_note.configure(text='')
+        self.show_keys()
+        self.ctl_win.focus_set()  # keys go to the window, not to a button or a list
+        # The click that opened the capture must not be taken as the binding.
+        self.root.after(200, self.arm_capture)
+
+    def arm_capture(self):
+        if not self.capturing or not self.ctl_win.winfo_exists():
+            return
+        self.capture_armed = True
+        self.ctl_win.bind('<KeyPress>', self.captured_key)
+        self.ctl_win.bind('<ButtonPress>', self.captured_button)
+
+    def release_capture(self):
+        self.capture_armed = False
+        if self.ctl_win.winfo_exists():
+            for sequence in ('<KeyPress>', '<ButtonPress>'):
+                self.ctl_win.unbind(sequence)
+
+    def captured_key(self, event):
+        if not self.capturing:
+            return None
+        sym = event.keysym
+        if sym in RESERVED_KEYS:
+            self.ctl_note.configure(text=_(*RESERVED_KEYS[sym]))
+            return 'break'
+        name = TK_KEYS.get(sym)
+        if not name and len(sym) == 1 and sym.isalnum():
+            name = sym.upper()
+        if not name and sym.startswith('F') and sym[1:].isdigit():
+            name = sym
+        if not name and sym.startswith('KP_') and sym[3:].isdigit():
+            name = f'Keypad {sym[3:]}'
+        if name:
+            self.set_key(*self.capturing, name)
+        return 'break'
+
+    def captured_button(self, event):
+        if not self.capturing:
+            return None
+        widget = next((k for k, b in self.key_buttons.items() if b is event.widget), None)
+        if event.num == 1 and widget and widget != self.capturing:
+            return None  # another box: its own click moves the capture there
+        name = {1: 'Mouse Left', 2: 'Mouse Middle', 3: 'Mouse Right', 4: 'Mouse 4', 5: 'Mouse 5'}.get(event.num)
+        if name:
+            self.set_key(*self.capturing, name)
+            self.ignore_click = time.monotonic() + 0.5
+        return 'break'
+
+    def captured_wheel(self, event):
+        if self.capture_armed:
+            self.set_key(*self.capturing, 'Wheel Up' if event.delta > 0 else 'Wheel Down')
+        return 'break'
+
+    def reset_keys(self):
+        self.ctl['keys'] = {}
+        self.capturing = None
+        self.release_capture()
+        self.show_keys()
 
     def toggle_log(self):
         self.log_visible = not self.log_visible
@@ -685,8 +1123,8 @@ class Launcher:
                     continue
                 self.log_file.write(item)
                 if 'Entering original x86-64 code' in item:
-                    self.status.configure(text=_('Jogo rodando. Insert (ou L2+R2+L3+R3) abre o menu do port.',
-                                                 'Game running. Insert (or L2+R2+L3+R3) opens the port menu.'), fg=OK)
+                    self.status.configure(text=_('Jogo rodando. Insert ou F1 (ou L2+R2+L3+R3) abre o menu do port.',
+                                                 'Game running. Insert or F1 (or L2+R2+L3+R3) opens the port menu.'), fg=OK)
                 self.append(item)
         except queue.Empty:
             pass

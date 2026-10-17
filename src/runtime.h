@@ -116,4 +116,28 @@ void runtime_savedata_report(void);
 int runtime_savedata_param(int32_t user, const char *dir, void *param);
 int runtime_savedata_icon(int32_t user, const char *dir, char *out, size_t size);
 void runtime_thread_attach_host(const char *name);
+/* Host functions the loader runs at the start of guest functions found by their code (probe.c,
+ * mouse camera; ported from SuperMedo's uncharted_pc, GPL). `pattern` is hex bytes with ?? for
+ * any byte; it must match exactly once in the executable code (and `require` at match+require_at,
+ * when given). `moved` bytes of whole position-independent instructions move to the thunk. The
+ * callback gets the guest's rdi, rsi and r14 there and the image base. */
+typedef struct {
+    const char *name, *pattern;
+    size_t moved;
+    void (__attribute__((ms_abi)) *callback)(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14);
+    const char *require;
+    int64_t require_at;
+} RuntimeGuestCallback;
+const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
+/* 1 when input.ini turns mouse look on and GOW3_MOUSE_CAMERA is not 0: the loader installs the
+ * mouse camera callbacks. */
+int runtime_pad_mouse_camera(void);
+/* Controls for the port menu (gow3_overlay.cpp declares these again): the actions with their
+ * default keys and controller buttons (pad NULL: keyboard only), and input.ini lines read and
+ * changed by key ("key.cross", "mouse_sensitivity"); a change is saved and applies at once. */
+typedef struct { const char *name, *label, *key, *pad; } RuntimeInputAction;
+const RuntimeInputAction *runtime_input_actions(size_t *count);
+int runtime_input_get(const char *key, char *value, size_t size);
+int runtime_input_set(const char *key, const char *value);
+int runtime_input_available(void);
 #endif

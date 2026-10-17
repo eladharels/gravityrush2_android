@@ -1,4 +1,4 @@
-Uncharted: The Nathan Drake Collection para PC (ucndc_pc) v0.3.1
+Uncharted: The Nathan Drake Collection para PC (ucndc_pc) v0.3.2
 ================================================================
 [English below]
 
@@ -27,11 +27,15 @@ Situação
   (perto de 50 FPS em áreas com muita vegetação, como o Castelo).
 
 Durante o jogo
-- Insert no teclado, ou L2 + R2 + L3 + R3 no controle, abre o menu do port.
+- Insert ou F1 no teclado, ou L2 + R2 + L3 + R3 no controle, abre o menu do port.
+- Teclado e mouse: no launcher, botão "Controles" (ou no menu do jogo, aba Controls), ligue
+  "Olhar com o mouse". O mouse gira a câmera nos três jogos; segure Alt esquerdo para soltar
+  o cursor. Lá também dá para trocar teclas e ajustar a sensibilidade.
 - O botão "Opções" do launcher ajusta tela (janela, sem borda, tela cheia), VSync, limite de
   FPS e contador de FPS. Em "Avançado" dá para desligar otimizações; "Restaurar padrão" volta
   à configuração testada.
 - "Atalho na área de trabalho" cria um atalho que abre direto o último jogo escolhido.
+- O launcher avisa quando sai uma versão nova (dá para desligar em Opções).
 
 Dados
 - Saves, cache de shaders e o log ficam em user\ (guarde essa pasta ao atualizar).
@@ -70,7 +74,11 @@ Uncharted 2 is playable; Uncharted 1 is experimental.
 
 The launcher's Options button sets display mode, VSync, FPS limit and the FPS counter; Advanced
 lets you turn optimizations off ("Restore defaults" brings back the tested setup).
-In game, Insert (or L2 + R2 + L3 + R3) opens the port menu. Saves, shader cache and the log are in
+The launcher tells you when a new version is out (can be turned off in Options).
+Keyboard and mouse: the launcher's Controls button (or the Controls tab in the in-game menu);
+turn on mouse look to turn the camera with the mouse in all three games (hold Left Alt to free
+the cursor), and change keys and sensitivity there.
+In game, Insert or F1 (or L2 + R2 + L3 + R3) opens the port menu. Saves, shader cache and the log are in
 user\. When reporting a problem, send user\last_run.log.
 UC2 train prologue: you may need to jump earlier than on PS4; if the carriage still falls, turn
 off UC_HLE_INORDER and UC_ACB_DISPATCH_PIPE in Options > Advanced for that part. UC3: rare

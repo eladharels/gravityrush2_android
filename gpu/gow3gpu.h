@@ -35,6 +35,12 @@ int gow3gpu_choice_begin(const char *title, const char *const *items, const char
 int gow3gpu_choice_poll(void);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int gow3gpu_overlay_captures_input(void);
+/* Keyboard and mouse controls (runtime_pad.c). configure: 1 holds the cursor in the window
+ * (relative mode) for mouse look while the game has the focus. sample takes the motion (pixels)
+ * and wheel steps since the last call and the held buttons (bit 0 left, 1 right, 2 middle,
+ * 3-4 side); returns 1 while the cursor is held. */
+void gow3gpu_mouse_configure(int look);
+int gow3gpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned gow3gpu_symbol_count(void);
 /* Windows thread id of the GPU command processor thread (0 until it starts; diagnostics). */

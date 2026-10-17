@@ -274,6 +274,128 @@ static void patch_job_spin(uint64_t image_size, const char *value, int sleep) {
     printf("Job spin: job workers spin %ld times before they sleep (was 1000)%s, at %#" PRIx64 "\n", n,
            sleep ? ", and may sleep in gameplay too" : "", found);
 }
+/* Mouse camera callbacks (runtime_guest_callbacks in runtime_pad.c; from SuperMedo's uncharted_pc,
+ * GPL): a guest function found by its code calls a host function first, with rdi, rsi, the image
+ * base and r14 (Microsoft x64 convention on every host). The thunk keeps the guest's registers and
+ * flags, so it also works inside a function. ucndc: the code is searched for in the whole
+ * executable (one pattern per game version, 1.00 and 1.02) instead of at fixed offsets, and a
+ * pattern found other than exactly once is left alone. */
+typedef struct { unsigned char bytes[64], mask[64]; size_t size; } CodePattern;
+static int parse_code_pattern(const char *text, CodePattern *p) {
+    p->size=0;
+    while (*text) {
+        if (*text==' ') { ++text; continue; }
+        if (p->size==sizeof(p->bytes) || !text[1]) return 0;
+        if (text[0]=='?' && text[1]=='?') { p->bytes[p->size]=0; p->mask[p->size]=0; }
+        else {
+            char hex[3]={text[0],text[1],0}, *end=NULL;
+            p->bytes[p->size]=(unsigned char)strtoul(hex,&end,16);
+            if (*end) return 0;
+            p->mask[p->size]=0xff;
+        }
+        ++p->size;
+        text+=2;
+    }
+    return p->size>0;
+}
+static int code_matches(const unsigned char *at, const CodePattern *p) {
+    for (size_t i=0;i<p->size;++i) if ((at[i]&p->mask[i])!=p->bytes[i]) return 0;
+    return 1;
+}
+static int in_code(const Segment *segments, uint64_t ns, uint64_t address, uint64_t bytes) {
+    for (uint64_t s=0;s<ns;++s)
+        if ((segments[s].flags&1) && address>=segments[s].address && address+bytes<=segments[s].address+segments[s].size) return 1;
+    return 0;
+}
+static unsigned char *near_image_memory(uint64_t image_size, size_t size) {
+    unsigned char *memory=NULL;
+#ifdef _WIN32
+    /* rel32 jumps: within 2 GiB of the image. */
+    uint64_t base=((uint64_t)(uintptr_t)image+round_page(image_size)+(32u<<20)+0xffff)&~(uint64_t)0xffff;
+    for (uint64_t step=0;!memory && step<(1900ull<<20);step+=1u<<16) {
+        memory=VirtualAlloc((void *)(uintptr_t)(base+step),size,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+        if (!memory && (uint64_t)(uintptr_t)image>step+(2u<<20))
+            memory=VirtualAlloc((void *)(uintptr_t)(((uint64_t)(uintptr_t)image-step-(2u<<20))&~(uint64_t)0xffff),
+                                size,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+    }
+#else
+    (void)image_size; (void)size;
+#endif
+    return memory;
+}
+static void install_game_callbacks(const Segment *segments, uint64_t ns, uint64_t image_size) {
+    size_t count=0;
+    const RuntimeGuestCallback *callbacks=runtime_guest_callbacks(&count);
+    unsigned char *thunks=NULL;
+    size_t used=0;
+    int installed=0;
+    for (size_t i=0;i<count;++i) {
+        const RuntimeGuestCallback *c=&callbacks[i];
+        CodePattern p, need;
+        if (!parse_code_pattern(c->pattern,&p) || (c->require && !parse_code_pattern(c->require,&need)) ||
+            c->moved<5 || c->moved>p.size) {
+            printf("Callbacks: %s: bad pattern\n",c->name);
+            continue;
+        }
+        uint64_t found=0, matches=0;
+        for (uint64_t s=0;s<ns;++s) {
+            if (!(segments[s].flags&1)) continue;
+            const uint64_t start=segments[s].address, end=start+segments[s].size;
+            for (uint64_t at=start;at+p.size<=end;++at) {
+                if (image[at]!=p.bytes[0] || !code_matches(image+at,&p)) continue;
+                if (c->require) {
+                    const uint64_t r=at+(uint64_t)c->require_at;
+                    if (!in_code(segments,ns,r,need.size) || !code_matches(image+r,&need)) continue;
+                }
+                found=at;
+                ++matches;
+            }
+        }
+        if (matches!=1) {
+            if (matches) printf("Callbacks: %s: found %" PRIu64 " times, left alone\n",c->name,matches);
+            continue;
+        }
+        if (!thunks && !(thunks=near_image_memory(image_size,4096))) { printf("Callbacks: no thunk memory, mouse uses the stick\n"); return; }
+        if (used+256>4096) break;
+        unsigned char *t=thunks+used, *f=image+found;
+        size_t k=0;
+        /* pushfq; push rax rcx rdx r8-r11 rbx; mov rbx, rsp; and rsp, -16; sub rsp, 0xa0 (works at
+         * a function's start and inside it) */
+        static const unsigned char save[]={0x9c,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53,0x53,
+                                           0x48,0x89,0xe3,0x48,0x83,0xe4,0xf0,0x48,0x81,0xec,0xa0,0x00,0x00,0x00};
+        memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
+        for (int x=0;x<8;++x) {                                     /* movdqu [rsp+0x20+16x], xmmx */
+            const uint32_t disp=0x20u+16u*(uint32_t)x;
+            t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x7f; t[k++]=(unsigned char)(0x84|x<<3); t[k++]=0x24;
+            memcpy(t+k,&disp,4); k+=4;
+        }
+        t[k++]=0x48; t[k++]=0x89; t[k++]=0xf9;                      /* mov rcx, rdi */
+        t[k++]=0x48; t[k++]=0x89; t[k++]=0xf2;                      /* mov rdx, rsi */
+        const uintptr_t base=(uintptr_t)image, host=(uintptr_t)c->callback;
+        t[k++]=0x49; t[k++]=0xb8; memcpy(t+k,&base,8); k+=8;        /* movabs r8, image */
+        t[k++]=0x4d; t[k++]=0x89; t[k++]=0xf1;                      /* mov r9, r14 */
+        t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;        /* movabs rax, callback */
+        t[k++]=0xff; t[k++]=0xd0;                                   /* call rax */
+        for (int x=0;x<8;++x) {                                     /* movdqu xmmx, [rsp+0x20+16x] */
+            const uint32_t disp=0x20u+16u*(uint32_t)x;
+            t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x6f; t[k++]=(unsigned char)(0x84|x<<3); t[k++]=0x24;
+            memcpy(t+k,&disp,4); k+=4;
+        }
+        /* mov rsp, rbx; pop rbx r11-r8 rdx rcx rax; popfq */
+        static const unsigned char restore[]={0x48,0x89,0xdc,0x5b,0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,
+                                              0x5a,0x59,0x58,0x9d};
+        memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
+        memcpy(t+k,f,c->moved); k+=c->moved;                       /* the moved instructions */
+        int32_t back=(int32_t)((int64_t)(uintptr_t)(f+c->moved)-(int64_t)(uintptr_t)(t+k+5));
+        t[k++]=0xe9; memcpy(t+k,&back,4); k+=4;
+        int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(f+5));
+        f[0]=0xe9; memcpy(f+1,&to,4); memset(f+5,0x90,c->moved-5);
+        used+=(k+15)&~(size_t)15;
+        ++installed;
+        printf("Callbacks: %s at %#" PRIx64 "\n",c->name,found);
+    }
+    if (!installed) printf("Callbacks: no mouse camera code found, mouse uses the stick\n");
+}
 /* GOW3_SCREAM_LOG=1 (UC1 1.02 diagnostics): the game's sound engine (SCEA Scream) logs through
  * one function (0x3c0750) that drops messages above a verbosity kept in .bss (0) and hands the
  * rest to four optional callbacks, all NULL in the shipped game. The verbosity test is removed
@@ -1261,6 +1383,8 @@ int main(int argc, char **argv) {
     if ((getenv("GOW3_JOB_SPIN") && getenv("GOW3_JOB_SPIN")[0]) || (getenv("GOW3_JOB_SLEEP") && getenv("GOW3_JOB_SLEEP")[0] == '1'))
         patch_job_spin(size, getenv("GOW3_JOB_SPIN") && getenv("GOW3_JOB_SPIN")[0] ? getenv("GOW3_JOB_SPIN") : NULL,
                        getenv("GOW3_JOB_SLEEP") && getenv("GOW3_JOB_SLEEP")[0] == '1');
+    /* ucndc: mouse camera (input.ini with mouse_look=1; GOW3_MOUSE_CAMERA=0 keeps the mouse a stick) */
+    if (gpu_enabled && runtime_pad_mouse_camera()) install_game_callbacks(segments, ns, size);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif

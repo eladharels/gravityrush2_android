@@ -25,8 +25,16 @@ Sem instalar nada e sem terminal:
 
 O botão **Opções** ajusta o modo de tela (janela, sem borda, tela cheia), o VSync, o limite de FPS e
 o contador de FPS. Em *Avançado* dá para desligar qualquer otimização; com todas ligadas fica a
-configuração testada. No jogo, **Insert** (ou L2+R2+L3+R3 no controle) abre o menu do port. Os saves ficam
+configuração testada. No jogo, **Insert** ou **F1** (ou L2+R2+L3+R3 no controle) abre o menu do port. Os saves ficam
 na pasta `user`, ao lado do launcher, e o log da última sessão em `user\last_run.log`.
+
+O botão **Controles** configura teclado e mouse: ligue *Olhar com o mouse*, ajuste a sensibilidade
+(e um multiplicador separado ao mirar) e troque qualquer tecla ou botão do controle. As mesmas
+opções estão no menu do jogo (aba *Controls*). Com o mouse ligado, ele gira a câmera direto nos três
+jogos, andando, mirando e em cobertura; segure Alt esquerdo para soltar o cursor. Teclas padrão:
+WASD anda, Espaço X, Ctrl esquerdo ou Q Círculo, F Quadrado, E Triângulo, G L1, R R1, botão direito
+do mouse L2 (mirar), botão esquerdo R2 (atirar), V L3, botão do meio R3, 1/2/3/4 ou a roda o
+direcional, Tab o touchpad, Esc ou Enter Options.
 
 Precisa de Windows 10 (1903+) ou 11, 64 bits, e placa de vídeo com Vulkan 1.3. O port foi feito numa
 AMD RX 6750 XT; placas Intel têm uma correção do Supermedo, mas ainda não foram testadas.
@@ -66,6 +74,10 @@ O que foi resolvido no UC3 nos últimos dias: cabelo branco do Drake jovem (`BUF
 texturas trocadas (colete do barman, piso do museu, porta do banheiro) e o desempenho, que saiu de
 18–24 FPS nas ruas e no castelo para 60.
 
+Novo na 0.3.2: controles de teclado e mouse, com o mouse girando a câmera direto no UC1, UC2 e UC3
+(também no jogo 1.00, sem a atualização), janela Controles no launcher e aba Controls no menu do
+jogo, F1 como segunda tecla do menu e aviso no launcher quando sai versão nova.
+
 Também novo: o pacote para jogadores, com o launcher e a tela de Opções; o menu do port no jogo não
 mostra mais nos Uncharted o que é só do God of War III (trapaças, orbes, upscaler, resolução de
 render); e a tela preta em placas Intel corrigida (da versão 0.3.3 do Supermedo, não testada aqui).
@@ -102,8 +114,8 @@ foram feitos em paralelo, e este aqui aproveitou várias correções dele, sempr
 | Núcleo de vídeo | shadPS4 0.19.0 com correções da nightly de 12/10 (rastreador de memória, cache de texturas) | shadPS4 de 24/09 com backports do recompilador |
 | Leituras da GPU pelo jogo | Modo **preciso** (o cenário é desenhado com os dados certos; foi isso que resolveu os problemas visuais aqui), acelerado para chegar a 60 FPS: leituras assíncronas, fila lateral, envio adiantado, cópias do ring em outra thread | Modo **relaxado** por padrão, contornando o problema com a HLE da cópia escalar |
 | Como as otimizações entram | No código, cada uma atrás de uma opção **desligada por padrão**, medida e registrada no [DEVLOG](docs/uc3/DEVLOG.md); o launcher liga o conjunto testado, e *Opções → Avançado* desliga uma a uma | Ligadas por padrão, com opções para desligar |
-| Outras diferenças nossas | Barreiras justas em buffers formatados, hash completo de imagens pequenas, MP3 no Ajm, ferramentas de diagnóstico (perfil de GPU, rastreio de faltas e escritas) | — |
-| O que ele tem e este ainda não | — | Upscalers e geração de quadros, opção de 120 FPS, mouse no UC3, menu da coletânea pelo `eboot.bin` |
+| Outras diferenças nossas | Barreiras justas em buffers formatados, hash completo de imagens pequenas, MP3 no Ajm, ferramentas de diagnóstico (perfil de GPU, rastreio de faltas e escritas), mouse girando a câmera direto nos três jogos (andando, mirando e em cobertura) | — |
+| O que ele tem e este ainda não | — | Upscalers e geração de quadros, opção de 120 FPS, menu da coletânea pelo `eboot.bin` |
 
 Os dois projetos se ajudam: se algo funciona lá e não aqui (ou o contrário), vale comparar.
 
@@ -149,7 +161,7 @@ Dê dois cliques no `.bat` do jogo, dentro de `windows\`:
 | `fechar_jogo.bat` | Fecha o jogo se ele travar |
 
 O log de cada sessão fica em `out\last-run.log` (o anterior em `out\previous-run.log`). Os saves
-ficam em `user\`. No jogo, **Insert** (ou L2+R2+L3+R3 no controle) abre o menu do port.
+ficam em `user\`. No jogo, **Insert** ou **F1** (ou L2+R2+L3+R3 no controle) abre o menu do port.
 
 Também dá para chamar o script direto, passando opções só para aquela execução:
 

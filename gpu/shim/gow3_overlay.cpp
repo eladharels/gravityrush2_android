@@ -2,6 +2,7 @@
 #include "gow3_overlay.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cfloat>
 #include <chrono>
@@ -10,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -22,6 +24,14 @@
 
 extern Gow3ActorSlot gow3_actor_slots[2];
 extern "C" void runtime_restart(void); // src/probe.c: starts run.py again, ends this process
+// src/runtime_pad.c: the controls in input.ini (the launcher's Controls window), as in src/runtime.h.
+struct RuntimeInputAction {
+    const char *name, *label, *key, *pad;
+};
+extern "C" const RuntimeInputAction* runtime_input_actions(size_t* count);
+extern "C" int runtime_input_get(const char* key, char* value, size_t size);
+extern "C" int runtime_input_set(const char* key, const char* value);
+extern "C" int runtime_input_available(void);
 #include "common/elf_info.h"
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture (save pictures)
@@ -378,6 +388,226 @@ void GameTab() {
     }
 }
 
+// Controls tab (Uncharted): the launcher's Controls window in the menu. Every change is written to
+// input.ini at once and the game reads it again; the launcher keeps what the menu changed.
+// A key box waits for the next key, mouse button or wheel step (HandleCaptureEvent).
+const char* capture_action = nullptr; // the action whose key box waits, or none
+int capture_slot = 0;
+std::chrono::steady_clock::time_point capture_since{};
+char captured_name[64] = {};
+
+std::string InputValue(const std::string& key, const char* fallback) {
+    char value[128];
+    return runtime_input_get(key.c_str(), value, sizeof(value)) ? std::string(value) : std::string(fallback);
+}
+
+void InputSet(const std::string& key, const std::string& value) {
+    runtime_input_set(key.c_str(), value.c_str());
+}
+
+// The two keys of an action ("A|B").
+std::array<std::string, 2> KeyPair(const RuntimeInputAction& action) {
+    const std::string value = InputValue(std::string("key.") + action.name, action.key);
+    const size_t bar = value.find('|');
+    std::array<std::string, 2> keys{value.substr(0, bar), bar == std::string::npos ? "" : value.substr(bar + 1)};
+    for (auto& k : keys) {
+        k.erase(0, k.find_first_not_of(' '));
+        k.erase(k.find_last_not_of(' ') + 1);
+    }
+    return keys;
+}
+
+void SetKeyPair(const RuntimeInputAction& action, std::array<std::string, 2> keys) {
+    if (keys[0].empty()) {
+        std::swap(keys[0], keys[1]);
+    }
+    InputSet(std::string("key.") + action.name, keys[1].empty() ? keys[0] : keys[0] + "|" + keys[1]);
+}
+
+// Gives `name` to one slot of `action`; a key belongs to one action, so others lose it.
+void BindKey(const RuntimeInputAction* actions, size_t count, const RuntimeInputAction& action, int slot,
+             const std::string& name) {
+    for (size_t i = 0; i < count && !name.empty(); ++i) {
+        if (&actions[i] == &action) {
+            continue;
+        }
+        auto keys = KeyPair(actions[i]);
+        if (keys[0] == name || keys[1] == name) {
+            for (auto& k : keys) {
+                if (k == name) k.clear();
+            }
+            SetKeyPair(actions[i], keys);
+        }
+    }
+    auto keys = KeyPair(action);
+    keys[slot] = name;
+    if (!name.empty() && keys[1 - slot] == name) {
+        keys[1 - slot].clear();
+    }
+    SetKeyPair(action, keys);
+}
+
+bool InputCheckRow(const char* label, const char* key, const char* help) {
+    Row(label);
+    bool on = InputValue(key, "0") == "1";
+    if (ImGui::Checkbox("##value", &on)) {
+        InputSet(key, on ? "1" : "0");
+    }
+    Help(help);
+    ImGui::PopID();
+    return on;
+}
+
+void InputSliderRow(const char* label, const char* key, float lo, float hi, const char* format, const char* help) {
+    Row(label);
+    static float editing[2];
+    static const char* edited = nullptr;
+    float v = edited == key ? editing[0] : std::strtof(InputValue(key, "1.0").c_str(), nullptr);
+    if (v <= 0.0f) v = 1.0f;
+    if (ImGui::SliderFloat("##value", &v, lo, hi, format, ImGuiSliderFlags_AlwaysClamp)) {
+        edited = key;
+        editing[0] = v;
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "%.2f", v);
+        InputSet(key, text);
+        edited = nullptr;
+    }
+    Help(help);
+    ImGui::PopID();
+}
+
+void ControlsTab() {
+    if (!runtime_input_available()) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("The game uses the port's built-in controls. To change them here, open the launcher's "
+                            "Controls window once and press Save, then start the game from the launcher.");
+        ImGui::PopTextWrapPos();
+        return;
+    }
+    size_t count = 0;
+    const RuntimeInputAction* actions = runtime_input_actions(&count);
+    if (capture_action && captured_name[0]) {
+        for (size_t i = 0; i < count; ++i) {
+            if (actions[i].name == capture_action) {
+                BindKey(actions, count, actions[i], capture_slot, captured_name);
+            }
+        }
+        capture_action = nullptr;
+        captured_name[0] = 0;
+    }
+    if (capture_action && std::chrono::steady_clock::now() - capture_since > std::chrono::seconds(6)) {
+        capture_action = nullptr; // nothing pressed
+    }
+
+    ImGui::SeparatorText("Mouse");
+    static const std::string look_at_start = InputValue("mouse_look", "0"); // the game set the mouse up with this
+    bool look_changed = false;
+    if (BeginRows("##mouse")) {
+        look_changed = InputCheckRow("Look with the mouse", "mouse_look",
+                                     "The mouse turns the camera; hold Left Alt to free the cursor. Turning it on "
+                                     "or off takes effect after restarting the game.") != (look_at_start == "1");
+        InputSliderRow("Sensitivity", "mouse_sensitivity", 0.1f, 5.0f, "%.2f",
+                       "How far the camera turns for a mouse movement; 1.00 is the default.");
+        InputSliderRow("While aiming (L2)", "mouse_aim_sensitivity", 0.1f, 3.0f, "%.2fx",
+                       "Multiplies the sensitivity while L2 is held; 1x is the same as normal.");
+        InputCheckRow("Invert the mouse vertically", "mouse_invert_y", nullptr);
+        ImGui::EndTable();
+    }
+    if (look_changed) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.45f, 1.0f),
+                           "Restart the game for the mouse look change to work (unsaved progress is lost).");
+        ImGui::PopTextWrapPos();
+    }
+
+    ImGui::SeparatorText("Keyboard and mouse buttons");
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("Click a box, then press a key, a mouse button or the wheel (B on the controller "
+                        "cancels). x removes a binding. Insert, F1 and Left Alt are reserved.");
+    ImGui::PopTextWrapPos();
+    if (ImGui::BeginTable("##keys", 3, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("action", ImGuiTableColumnFlags_WidthStretch, 0.4f);
+        ImGui::TableSetupColumn("first", ImGuiTableColumnFlags_WidthStretch, 0.3f);
+        ImGui::TableSetupColumn("second", ImGuiTableColumnFlags_WidthStretch, 0.3f);
+        for (size_t i = 0; i < count; ++i) {
+            const RuntimeInputAction& action = actions[i];
+            const auto keys = KeyPair(action);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(action.label);
+            for (int slot = 0; slot < 2; ++slot) {
+                ImGui::TableNextColumn();
+                ImGui::PushID(int(i * 2 + slot));
+                const bool waiting = capture_action == action.name && capture_slot == slot;
+                const std::string text = waiting ? "Press a key..." : keys[slot].empty() ? "-" : keys[slot];
+                const float clear = ImGui::CalcTextSize("x").x + ImGui::GetStyle().FramePadding.x * 2 +
+                                    ImGui::GetStyle().ItemSpacing.x;
+                if (ImGui::Button(text.c_str(), ImVec2(ImGui::GetContentRegionAvail().x - clear, 0))) {
+                    capture_action = action.name;
+                    capture_slot = slot;
+                    capture_since = std::chrono::steady_clock::now();
+                    captured_name[0] = 0;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("x")) {
+                    BindKey(actions, count, action, slot, "");
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Default keys")) {
+        for (size_t i = 0; i < count; ++i) {
+            InputSet(std::string("key.") + actions[i].name, actions[i].key);
+        }
+    }
+
+    ImGui::SeparatorText("Controller");
+    static const char* const pad_values[] = {"a", "b", "x", "y", "leftshoulder", "rightshoulder", "lefttrigger",
+                                             "righttrigger", "leftstick", "rightstick", "start", "back",
+                                             "touchpad", "dpup", "dpdown", "dpleft", "dpright", "misc1",
+                                             "paddle1", "paddle2", "paddle3", "paddle4", "none"};
+    static const char* const pad_labels[] = {"A / Cross", "B / Circle", "X / Square", "Y / Triangle", "LB / L1",
+                                             "RB / R1", "LT / L2", "RT / R2", "Left stick click / L3",
+                                             "Right stick click / R3", "Start / Options", "Back / Share",
+                                             "Touchpad click", "D-pad up", "D-pad down", "D-pad left",
+                                             "D-pad right", "Share / Mic (misc)", "Paddle 1", "Paddle 2",
+                                             "Paddle 3", "Paddle 4", "Not assigned"};
+    constexpr int pad_count = int(sizeof(pad_values) / sizeof(*pad_values));
+    if (BeginRows("##pad")) {
+        for (size_t i = 0; i < count; ++i) {
+            const RuntimeInputAction& action = actions[i];
+            if (!action.pad) {
+                continue; // a stick direction: the controller's sticks are its own
+            }
+            const std::string key = std::string("pad.") + action.name;
+            const std::string value = InputValue(key, action.pad);
+            int current = pad_count - 1;
+            for (int p = 0; p < pad_count; ++p) {
+                if (value == pad_values[p]) current = p;
+            }
+            Row(action.label);
+            if (ImGui::Combo("##value", &current, pad_labels, pad_count)) {
+                InputSet(key, pad_values[current]);
+            }
+            ImGui::PopID();
+        }
+        InputCheckRow("Invert the right stick vertically", "pad_invert_y", nullptr);
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Default buttons")) {
+        for (size_t i = 0; i < count; ++i) {
+            if (actions[i].pad) {
+                InputSet(std::string("pad.") + actions[i].name, actions[i].pad);
+            }
+        }
+    }
+}
+
 void ImageTab() {
     namespace G = Gow3Graphics;
     auto& s = Gow3Settings::Get();
@@ -563,7 +793,7 @@ void Menu() {
     // gow3: the game's own title (param.sfo), not a fixed one.
     static const std::string heading = [] {
         const std::string_view title = Common::ElfInfo::Instance().Title();
-        return std::string(title.empty() ? "God of War III" : title) + "  (Insert / L2+R2+L3+R3)";
+        return std::string(title.empty() ? "God of War III" : title) + "  (Insert or F1 / L2+R2+L3+R3)";
     }();
     if (!ImGui::Begin(heading.c_str(), &keep_open, ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
@@ -572,7 +802,7 @@ void Menu() {
     footer_help = nullptr;
     constexpr int TabCount = 4;
     // Tab 0 (Game) only exists for God of War III; menu_tab keeps the tab's id either way.
-    const int first_tab = GodOfWar() ? 0 : 1;
+    const int first_tab = 0; // Game (God of War) or Controls (Uncharted)
     if (s.menu_tab < first_tab) {
         s.menu_tab = first_tab;
     }
@@ -592,7 +822,7 @@ void Menu() {
     }
     const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f + ImGui::GetTextLineHeightWithSpacing() * 2.0f;
     if (ImGui::BeginTabBar("##tabs")) {
-        static const char* const tabs[TabCount] = {"Game", "Image", "Performance", "Overlay"};
+        const char* const tabs[TabCount] = {GodOfWar() ? "Game" : "Controls", "Image", "Performance", "Overlay"};
         for (int tab = first_tab; tab < TabCount; ++tab) {
             const ImGuiTabItemFlags flags = requested_tab == tab ? ImGuiTabItemFlags_SetSelected : 0;
             if (!ImGui::BeginTabItem(tabs[tab], nullptr, flags)) {
@@ -604,7 +834,7 @@ void Menu() {
             }
             if (ImGui::BeginChild("##body", ImVec2(0, -footer))) {
                 switch (tab) {
-                case 0: GameTab(); break;
+                case 0: GodOfWar() ? GameTab() : ControlsTab(); break;
                 case 1: ImageTab(); break;
                 case 2: PerformanceTab(); break;
                 default: OverlayTab(); break;
@@ -902,7 +1132,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     }
     overlay_instance = &instance;
     initialized = true;
-    std::printf("Overlay: menu ready (Insert or L2+R2+L3+R3)\n");
+    std::printf("Overlay: menu ready (Insert, F1 or L2+R2+L3+R3)\n");
 }
 
 void UpdateTextInput(SDL_Window* window) {
@@ -961,6 +1191,42 @@ void UpdateChoiceTextures() {
     choice_retiring = !choice_retired.empty();
 }
 
+// A key box in the Controls tab takes the next key, mouse button or wheel step; B cancels.
+bool HandleCaptureEvent(const SDL_Event& event) {
+    if (std::chrono::steady_clock::now() - capture_since < std::chrono::milliseconds(150)) {
+        return false; // the click or key that opened the box
+    }
+    const char* name = nullptr;
+    switch (event.type) {
+    case SDL_EVENT_KEY_DOWN:
+        if (event.key.repeat || event.key.key == SDLK_INSERT || event.key.key == SDLK_F1 ||
+            event.key.scancode == SDL_SCANCODE_LALT) {
+            return true; // Insert and F1 open the menu, Left Alt frees the cursor
+        }
+        name = SDL_GetScancodeName(event.key.scancode);
+        break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+        static const char* const buttons[] = {nullptr, "Mouse Left", "Mouse Middle", "Mouse Right", "Mouse 4", "Mouse 5"};
+        name = event.button.button < 6 ? buttons[event.button.button] : nullptr;
+        break;
+    }
+    case SDL_EVENT_MOUSE_WHEEL:
+        name = event.wheel.y > 0 ? "Wheel Up" : event.wheel.y < 0 ? "Wheel Down" : nullptr;
+        break;
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        if (event.gbutton.button == SDL_GAMEPAD_BUTTON_EAST) {
+            capture_action = nullptr;
+        }
+        return true;
+    default:
+        return false; // releases too: the menu must see them
+    }
+    if (name && *name) {
+        std::snprintf(captured_name, sizeof(captured_name), "%s", name);
+    }
+    return true;
+}
+
 // The save list takes the keys and buttons that move and confirm; the rest stays with the game
 // (held neutral by CapturesInput).
 bool HandleChoiceEvent(const SDL_Event& event) {
@@ -1000,6 +1266,9 @@ bool HandleEvent(const SDL_Event& event) {
     }
     ImGuiIO& io = ImGui::GetIO();
     const bool is_open = menu_open;
+    if (is_open && capture_action && !captured_name[0] && HandleCaptureEvent(event)) {
+        return true;
+    }
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
@@ -1013,8 +1282,9 @@ bool HandleEvent(const SDL_Event& event) {
             return true;
         }
         if (down && !event.key.repeat &&
-            (event.key.key == SDLK_INSERT || (is_open && event.key.key == SDLK_ESCAPE))) {
-            SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
+            (event.key.key == SDLK_INSERT || event.key.key == SDLK_F1 ||
+             (is_open && event.key.key == SDLK_ESCAPE))) {
+            SetOpen(event.key.key == SDLK_ESCAPE ? false : !is_open);
             return true;
         }
         if (!is_open) {
