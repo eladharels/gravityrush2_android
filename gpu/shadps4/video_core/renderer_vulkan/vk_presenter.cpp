@@ -494,8 +494,16 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
+    // ucndc test (GOW3_PRESENT_GAMMA_FIX=1, off): a plain A2R10G10B10 buffer is taken as already
+    // encoded too (the PS4 scans it out as is), so the pass does not apply the sRGB curve twice.
+    static const bool present_gamma_fix = [] {
+        const char* env = std::getenv("GOW3_PRESENT_GAMMA_FIX");
+        return env && env[0] == '1';
+    }();
     pp_settings.srgb_input =
-        attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
+        attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb ||
+        (present_gamma_fix &&
+         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10);
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
     if (frame_dump) {
         // The presented image as the swapchain blit reads it (General after the pass).

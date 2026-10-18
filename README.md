@@ -15,7 +15,7 @@ Uncharted 2 is playable and Uncharted 1 runs (experimental).
 
 No install and no terminal needed:
 
-1. Download the latest `ucndc_pc-v…-windows.zip` from [Releases](https://github.com/zorde23/ucndc_pc/releases) and extract it anywhere
+1. Download the latest `ucndc_pc-v…-windows.zip` from [Releases](https://github.com/zorde23/Uncharted_Collection_PC/releases) and extract it anywhere
    (for example `C:\Games\ucndc_pc`). Don't run it from inside the zip.
 2. Open **`Uncharted Launcher.exe`**. If Windows SmartScreen warns about it, click
    *More info* → *Run anyway* (the launcher is not signed).
@@ -140,7 +140,7 @@ Only needed to work on the port; to play, use the [download](#download-and-play)
 2. Clone with submodules:
 
    ```bash
-   git clone --recursive https://github.com/zorde23/ucndc_pc.git
+   git clone --recursive https://github.com/zorde23/Uncharted_Collection_PC.git
    ```
 
 3. Edit `windows\config.bat` with the paths to MSYS2, the game and the update.
@@ -192,6 +192,9 @@ Every new optimization goes in **off by default** in the code; the launcher and 
 | `UC_EOP_TICK_WAIT` | The `m_gfxEopTick` assert waits for the GPU instead of stopping the game |
 | `UC_SYNC_SMALL_TARGETS` | Shaders for small render targets compile right away, so a one-time lighting table drawn at boot is not skipped (fixes the dark cave torch in UC3) |
 | `UC_JOB_SPIN`, `UC_JOB_SLEEP` | `UC_JOB_SPIN=100` + `UC_JOB_SLEEP=1`: the game's six job threads spin less and sleep during gameplay; CPU use drops from about 66% to about 50% at the same frame rate (UC3) |
+| `UC_MIP_FIX` | The texture cache accepts render targets drawn into one mip of a larger image, so bloom and distortion are not lost (fixes the washed-out, greyish image in UC3) |
+| `UC_MOUSE_EDGE_AIM` | The mouse turns the camera while aiming from a ledge or a climb, and at the hanging spots where the aim used to turn slowly (UC3) |
+| `UC_PREP_TRUST_A1` | Experimental, off in the launcher: draw preparation reuses work it can prove is still valid (about +5 FPS in the UC3 desert ruins) |
 | `UC_HLE_INORDER`, `UC_ACB_DISPATCH_PIPE` | Keep the UC2 rooftop chase at 60 FPS; turn them off if the train prologue fails |
 
 The full list, with measurements, is in the [DEVLOG](docs/uc3/DEVLOG.md).

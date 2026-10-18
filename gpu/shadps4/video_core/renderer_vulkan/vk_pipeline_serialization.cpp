@@ -963,6 +963,7 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
         for (auto& [key, pipeline] : warmup_graphics) {
             graphics_pipelines[key] = std::move(pipeline);
         }
+        last_trusted_pipe = nullptr; // R.10 A1 v8: entries replaced or erased below
         for (auto& [key, pipeline] : warmup_compute) {
             compute_pipelines[key] = std::move(pipeline);
         }

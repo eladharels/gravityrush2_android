@@ -53,6 +53,10 @@ struct ImageInfo {
         return Extent2D{pitch >> dim, size.height >> dim};
     }
 
+    // ucndc: GOW3_MIP_FIX=1: a render target placed exactly at one mip of a larger image is
+    // taken as that mip even when its pitch is the larger one (UC3 bloom and distortion chains).
+    static bool MipFixEnabled();
+
     s32 MipOf(const ImageInfo& info) const;
     s32 SliceOf(const ImageInfo& info, s32 mip) const;
 

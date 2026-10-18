@@ -245,7 +245,9 @@ int VideoOutDriver::RegisterBuffers(VideoOutPort* port, s32 startIndex, void* co
         presenter->RegisterVideoOutSurface(group, address);
         LOG_INFO(Lib_VideoOut, "buffers[{}] = {:#x}", i + startIndex, address);
     }
-    std::printf("VideoOut: %d display buffers registered from index %d\n", bufferNum, startIndex);
+    std::printf("VideoOut: %d display buffers registered from index %d (%s, %ux%u, tiling %u)\n",
+                bufferNum, startIndex, GetPixelFormatString(attribute->pixel_format).data(),
+                attribute->width, attribute->height, static_cast<u32>(attribute->tiling_mode));
 
     return group_index;
 }

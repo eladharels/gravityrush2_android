@@ -82,25 +82,49 @@ void RunSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat, size_t 
 /// uc3 R.21: while set on a thread, RunSrtWalker adds the guest pages it reads (table pointers
 /// and flattened leaves, 4 KiB pages) to this list (unsorted, may repeat).
 inline thread_local std::vector<u64>* t_srt_read_pages = nullptr;
+/// R.10 A1 v8 (diagnostics): with t_srt_read_pages, the pages of the table pointers alone.
+inline thread_local std::vector<u64>* t_srt_ptr_pages = nullptr;
 /// uc3 R.22: with t_srt_read_pages, also the value of every guest location the walk read (table
 /// pointers: 8 bytes, flattened leaves: 4), at the host address that reads it unprotected. Equal
 /// values later mean the walk would produce the same flat.
+/// R.10 A1 (Fable): contiguous reads are one run, compared with a copy of the bytes read.
 struct SrtCheck {
     u64 host;
-    u64 value;
-    u32 size;
-    u32 pad;
+    u32 raw_off; ///< offset of the bytes read in the draw's raw copy
+    u32 size;    ///< bytes; SrtCheckSameAsPrev: same range and bytes in the previous draw
 };
+inline constexpr u32 SrtCheckSameAsPrev = 1u << 31;
+/// R.10 A1 v9 (Fable): the guest ranges the walk read (contiguous reads merged), for telling a
+/// page write that misses them from one that hits them.
+struct SrtGuestRun {
+    u64 guest;
+    u32 size;
+};
+inline thread_local std::vector<SrtGuestRun>* t_srt_guest_runs = nullptr; ///< set with t_srt_checks
 inline thread_local std::vector<SrtCheck>* t_srt_checks = nullptr;
-/// True when every check still holds.
-inline bool SrtChecksHold(const SrtCheck* checks, u32 count) noexcept {
+inline thread_local std::vector<u8>* t_srt_check_bytes = nullptr; ///< set with t_srt_checks
+/// True when every check still holds. `skip_same`: the previous draw's checks held in the
+/// same wait epoch, so the runs marked SrtCheckSameAsPrev are not compared again.
+inline bool SrtChecksHold(const SrtCheck* checks, u32 count, const u8* raw, bool skip_same,
+                          u32* compared_bytes = nullptr) noexcept {
+    u32 bytes = 0;
     for (u32 i = 0; i < count; ++i) {
         const auto& check = checks[i];
-        u64 value = 0;
-        __builtin_memcpy(&value, reinterpret_cast<const void*>(check.host), check.size == 8 ? 8 : 4);
-        if (value != check.value) {
+        if (skip_same && (check.size & SrtCheckSameAsPrev)) {
+            continue;
+        }
+        const u32 size = check.size & ~SrtCheckSameAsPrev;
+        bytes += size;
+        if (__builtin_memcmp(reinterpret_cast<const void*>(check.host), raw + check.raw_off,
+                             size) != 0) {
+            if (compared_bytes) {
+                *compared_bytes = bytes;
+            }
             return false;
         }
+    }
+    if (compared_bytes) {
+        *compared_bytes = bytes;
     }
     return true;
 }

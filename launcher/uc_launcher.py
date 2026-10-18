@@ -38,9 +38,9 @@ LOG_FILE = USER_DIR / 'last_run.log'
 INPUT_FILE = DATA_DIR / 'input.ini'
 APP_NAME = 'Uncharted Collection PC'
 EXE_NAME = 'Uncharted Launcher.exe'
-VERSION = '0.3.2'
-RELEASES_API = 'https://api.github.com/repos/zorde23/ucndc_pc/releases/latest'
-RELEASES_PAGE = 'https://github.com/zorde23/ucndc_pc/releases/latest'
+VERSION = '0.3.3'
+RELEASES_API = 'https://api.github.com/repos/zorde23/Uncharted_Collection_PC/releases/latest'
+RELEASES_PAGE = 'https://github.com/zorde23/Uncharted_Collection_PC/releases/latest'
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 TESTED_TITLE = 'CUSA02344'
 
@@ -62,8 +62,11 @@ GAMES = [
      # in-order options keep the rooftop at 60 FPS; the train jump is still timing-sensitive with them.
      {'GOW3_HLE_INORDER': '1', 'GOW3_ACB_DISPATCH_PIPE': '1'}),
     ('uc3', "Uncharted 3: Drake's Deception", 'big3-ps4_Shipping.elf', ('Jogável · 60 FPS', 'Playable · 60 FPS'),
-     {'GOW3_COMPUTE_PIPE': '1', 'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1'}),
+     {'GOW3_COMPUTE_PIPE': '1', 'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1',
+      'GOW3_MIP_FIX': '1', 'GOW3_MOUSE_EDGE_AIM': '1'}),
 ]
+# Off unless chosen in Options > Advanced (launcher.json 'experimental'): (games, value).
+EXPERIMENTAL = {'GOW3_PREP_TRUST_A1': (('uc3',), '1')}
 # ucndc.ini values the games were tested with, written when the file does not exist yet.
 # Only keys the Uncharted games use (render_resolution, engine_fps, fsr1, rcas and upscaler are GoW3 patches).
 INI_DEFAULTS = {'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
@@ -71,7 +74,7 @@ INI_DEFAULTS = {'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
                 'deferred_readback': '1', 'stale_readback': '0', 'show_fps': '1', 'overlay_fps': '1'}
 DISPLAY_MODES = [('windowed', ('Janela', 'Window')), ('borderless', ('Janela sem borda', 'Borderless')),
                  ('fullscreen', ('Tela cheia', 'Fullscreen'))]
-DEFAULTS = {'game_dir': '', 'update_dir': '', 'language': '', 'last_game': 'uc3', 'disabled': [],
+DEFAULTS = {'game_dir': '', 'update_dir': '', 'language': '', 'last_game': 'uc3', 'disabled': [], 'experimental': [],
             'check_updates': True}
 # What each optimization does (Options > Advanced); the games turn them on by default.
 TOGGLE_HELP = {
@@ -101,6 +104,9 @@ TOGGLE_HELP = {
     'GOW3_SYNC_SMALL_TARGETS': ('Compila na hora shaders de alvos pequenos (luz da tocha, UC3)',
                                 'Compile small-target shaders right away (torch light, UC3)'),
     'GOW3_JOB_SPIN': ('Threads de jobs giram menos antes de dormir (menos CPU)', 'Job threads spin less before sleeping (less CPU)'),
+    'GOW3_MIP_FIX': ('Bloom e distorção corretos (imagem não fica lavada, UC3)', 'Correct bloom and distortion (no washed-out image, UC3)'),
+    'GOW3_MOUSE_EDGE_AIM': ('Mouse na mira pendurado e escalando (UC3)', 'Mouse aiming while hanging and climbing (UC3)'),
+    'GOW3_PREP_TRUST_A1': ('Experimental: preparo de desenhos mais rápido (+FPS, UC3)', 'Experimental: faster draw preparation (+FPS, UC3)'),
     'GOW3_JOB_SLEEP': ('Threads de jobs podem dormir no gameplay (menos CPU)', 'Job threads may sleep in gameplay (less CPU)'),
 }
 # The Uncharted engines run at 60 at most, so higher limits would do nothing.
@@ -240,6 +246,11 @@ def has_games(folder):
     return any((Path(folder) / exe).is_file() for _k, _t, exe, _s, _e in GAMES)
 
 
+def has_base_data(folder):
+    """The base game's shared data (an update folder brings only what changed)."""
+    return (Path(folder) / 'shareddata').is_dir()
+
+
 def guess_update(game_dir):
     """The update folder next to the game: CUSA02344-UPDATE, CUSA02344-patch, ...patch."""
     game = Path(game_dir)
@@ -369,6 +380,9 @@ def game_environment(settings, key):
     for name in settings.get('disabled', []):
         if name not in FIXED:
             env.pop(name, None)  # turned off in Options > Advanced
+    for name in settings.get('experimental', []):
+        if name in EXPERIMENTAL and key in EXPERIMENTAL[name][0]:
+            env[name] = EXPERIMENTAL[name][1]  # turned on in Options > Advanced
     if 'GOW3_SCALAR_COPY_HLE' not in env:
         env.pop('GOW3_HLE_INVALIDATE', None)
     env['GOW3_GAME_DIR'] = settings['game_dir']
@@ -711,7 +725,7 @@ class Launcher:
         if not folder:
             return
         base = guess_game(folder) if is_update(folder) else ''
-        if is_update(folder) and (base or not has_games(folder)):
+        if is_update(folder) and (base or not has_games(folder) or not has_base_data(folder)):
             # the update was picked: use it as such and look for the game
             self.settings['update_dir'] = folder
             folder = base
@@ -791,7 +805,13 @@ class Launcher:
             toggles[name] = tk.BooleanVar(value=name not in disabled)
             help_text = TOGGLE_HELP.get(name, ('', ''))[0 if LANG == 'pt' else 1]
             tk.Checkbutton(advanced, text=f'{help_text}  ({public_name(name)})', variable=toggles[name], **check).pack(anchor='w')
-        shown = tk.BooleanVar(value=bool(disabled))
+        chosen = set(self.settings.get('experimental', []))
+        trials = {}
+        for name in EXPERIMENTAL:
+            trials[name] = tk.BooleanVar(value=name in chosen)
+            help_text = TOGGLE_HELP.get(name, ('', ''))[0 if LANG == 'pt' else 1]
+            tk.Checkbutton(advanced, text=f'{help_text}  ({public_name(name)})', variable=trials[name], **check).pack(anchor='w')
+        shown = tk.BooleanVar(value=bool(disabled) or bool(chosen))
 
         def show_advanced():
             if shown.get():
@@ -805,6 +825,8 @@ class Launcher:
         def reset():
             for var in toggles.values():
                 var.set(True)
+            for var in trials.values():
+                var.set(False)
             vsync.set(True)
             fps.set(True)
             updates.set(True)
@@ -816,6 +838,7 @@ class Launcher:
                         'fps_limit': FPS_LIMITS[pick(FPS_LIMITS).index(limit.get())][0],
                         'show_fps': '1' if fps.get() else '0', 'overlay_fps': '1' if fps.get() else '0'})
             self.settings['disabled'] = sorted(k for k, v in toggles.items() if not v.get())
+            self.settings['experimental'] = sorted(k for k, v in trials.items() if v.get())
             self.settings['check_updates'] = updates.get()
             save_settings(self.settings)
             win.destroy()

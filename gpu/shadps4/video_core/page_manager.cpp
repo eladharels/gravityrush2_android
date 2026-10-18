@@ -188,6 +188,27 @@ struct PageManager::Impl {
         if (!(SrtMode() & 4)) {
             return;
         }
+        // uc3 R.10 A1: off the GPU-side threads (the prep worker) a GPU-written dword is not read
+        // back nor patched; it is flagged so the prepared draw is not trusted.
+        if (leaves && Vulkan::SrtA1() && !rasterizer->IsGpuSideThread()) {
+            u64 page = ~0ULL;
+            bool page_tracked = false;
+            for (size_t i = 0; i < count && !Vulkan::g_srt_walk_gpu_leaf; ++i) {
+                const VAddr addr = src[i];
+                if (addr == 0) {
+                    continue;
+                }
+                if ((addr >> PM_PAGE_BITS) != page) {
+                    page = addr >> PM_PAGE_BITS;
+                    page_tracked = SrtPagesReadTracked(addr, sizeof(u32));
+                }
+                const bool inorder = Vulkan::HleInOrderEnabled() &&
+                                     rasterizer->HleInOrderPending(addr, sizeof(u32));
+                if (inorder || (page_tracked && rasterizer->IsGpuWritten(addr, sizeof(u32)))) {
+                    Vulkan::g_srt_walk_gpu_leaf = true;
+                }
+            }
+        }
         const bool copy = leaves && LeafCopy() && rasterizer->IsGpuSideThread();
         const bool sync = Shader::SrtWalkerSyncAllowed();
         if (!copy && !sync) {

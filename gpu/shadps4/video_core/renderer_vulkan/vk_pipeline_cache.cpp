@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -436,8 +437,9 @@ std::atomic<u64> g_gow3_capture_ns, g_gow3_async_ns, g_gow3_compile_wait_ns;
 std::atomic<u64> g_gow3_snapshot_ns, g_gow3_guest_wait_ns;
 // uc3: GOW3_STAGEB_PROFILE splits stage A's "A:gfx pipeline" step: [0] publish/pump cycles,
 // [1] prepared-pipeline check cycles, [2] calls; inside the check: [3] GetParams, [4] SRT walk
-// (RefreshFlatBuf), [5] flat compare cycles.
-std::atomic<u64> g_gow3_gfx_pipe_split[6];
+// (RefreshFlatBuf), [5] flat compare cycles; prep trust (R.10 A1): [6] changed-since, [7] value
+// compare, [8] trusted apply cycles, of them [9] program check + flat copy, [10] pipeline find.
+std::atomic<u64> g_gow3_gfx_pipe_split[11];
 static bool GfxPipeSplit() {
     static const bool on = std::getenv("GOW3_STAGEB_PROFILE") != nullptr;
     return on;
@@ -603,6 +605,7 @@ void PipelineCache::PublishShaders(bool wait) {
                 // user_data is refreshed on the next lookup; no pointer into a completed job survives.
                 program->info.user_data = {};
                 program->info_template = std::make_unique<Shader::Info>(program->info);
+                program->info_template->trusted_flat = nullptr; // R.10 A1 v8
             }
             build->spec.info = &program->info;
             RegisterShaderMeta(program->info, Shader::Gcn::ToOptional(build->spec.fetch_shader_data), build->spec,
@@ -738,12 +741,74 @@ void PipelineCache::ReportPrepTrust() {
     }
     using ull = unsigned long long;
     std::printf("uc3 R.22 prep trust: %llu trusted (%llu by value), %llu not (GPU leaves %llu, values changed %llu, "
-                "big write %llu, page write %llu, too many pages %llu), %llu divergences (total); "
-                "stamps: waits %llu, page writes %llu, big writes %llu, unnoted packets %llu\n",
+                "big write %llu, page write %llu, too many pages %llu, after a wait %llu, too many waits %llu), %llu divergences (total); "
+                "stamps: waits %llu, page writes %llu, big writes %llu, unnoted packets %llu; "
+                "A1 waits not met %llu (GPU-GPU %llu); after a CPU wait trusted by value %llu, values changed %llu; wait label page written %llu (wait no longer met %llu); value compares %llu (%.1f runs, %.0f bytes each, %llu deduped from the previous draw); "
+                "waits before draws: CPU %llu, semaphore %llu, rewind %llu; "
+                "trusted by value after global/big/page write %llu/%llu/%llu, "
+                "values changed after a CPU wait/global/big/page write %llu/%llu/%llu/%llu; "
+                "trusted pipeline reused from the previous draw %llu (why 2/3 never go by value)\n",
                 (ull)prep_trust_hits, (ull)prep_trust_validated, (ull)prep_trust_misses, (ull)prep_trust_why[0],
                 (ull)prep_trust_why[1], (ull)prep_trust_why[2], (ull)prep_trust_why[3],
-                (ull)prep_trust_why[4], (ull)prep_trust_divergences, (ull)bumps[0],
-                (ull)bumps[1], (ull)bumps[2], (ull)bumps[3]);
+                (ull)prep_trust_why[4], (ull)prep_trust_why[5], (ull)prep_trust_why[6],
+                (ull)prep_trust_divergences, (ull)bumps[0],
+                (ull)bumps[1], (ull)bumps[2], (ull)bumps[3],
+                (ull)g_srt_waits_unmet.exchange(0, std::memory_order_relaxed),
+                (ull)g_srt_waits_gpu.exchange(0, std::memory_order_relaxed),
+                (ull)prep_trust_wait_validated, (ull)prep_trust_wait_changed,
+                (ull)prep_trust_label_page, (ull)prep_trust_label_unmet, (ull)prep_trust_check_calls,
+                prep_trust_check_calls ? double(prep_trust_checks) / prep_trust_check_calls : 0.0,
+                prep_trust_check_calls ? double(prep_trust_check_bytes) / prep_trust_check_calls : 0.0,
+                (ull)prep_trust_check_skips,
+                (ull)g_srt_wait_kinds[0].exchange(0, std::memory_order_relaxed),
+                (ull)g_srt_wait_kinds[1].exchange(0, std::memory_order_relaxed),
+                (ull)g_srt_wait_kinds[2].exchange(0, std::memory_order_relaxed),
+                (ull)prep_trust_stamp_validated[1], (ull)prep_trust_stamp_validated[2],
+                (ull)prep_trust_stamp_validated[3], (ull)prep_trust_stamp_changed[0],
+                (ull)prep_trust_stamp_changed[1], (ull)prep_trust_stamp_changed[2],
+                (ull)prep_trust_stamp_changed[3], (ull)prep_trust_pipe_reused);
+    prep_trust_pipe_reused = 0;
+    {
+        static constexpr const char* names[] = {"other",   "packet",  "guest write", "pending gpu",
+                                                "landing", "binding", "rewrite"};
+        std::printf("uc3 R.10 page write misses (why 3) %llu, by stamp origin (misses: flat "
+                    "same/different): ",
+                    (ull)prep_trust_why[3]);
+        for (u32 i = 0; i < SrtNumOrigins; ++i) {
+            std::printf("%s %llu: %llu/%llu (ranges missed/hit/unknown %llu/%llu/%llu); ",
+                        names[i], (ull)prep_trust_pw_origin[i], (ull)prep_trust_pw_needless[i],
+                        (ull)prep_trust_pw_real[i], (ull)prep_trust_pw_missed[i],
+                        (ull)prep_trust_pw_hit[i], (ull)prep_trust_pw_unknown[i]);
+            prep_trust_pw_origin[i] = prep_trust_pw_needless[i] = prep_trust_pw_real[i] = 0;
+            prep_trust_pw_missed[i] = prep_trust_pw_hit[i] = prep_trust_pw_unknown[i] = 0;
+        }
+        std::printf("stamped page held a table pointer %llu, leaves only %llu\n",
+                    (ull)prep_trust_pw_ptr, (ull)prep_trust_pw_leaf);
+        prep_trust_pw_ptr = prep_trust_pw_leaf = 0;
+    }
+    for (u32 i = 0; i < 4; ++i) {
+        prep_trust_stamp_validated[i] = prep_trust_stamp_changed[i] = 0;
+    }
+    {
+        std::scoped_lock lk{g_srt_wait_sites_mutex};
+        if (g_srt_num_wait_sites != 0) {
+            auto& sites = g_srt_wait_sites;
+            std::sort(sites.begin(), sites.begin() + g_srt_num_wait_sites,
+                      [](const SrtWaitSite& a, const SrtWaitSite& b) { return a.count > b.count; });
+            std::printf("  A1 CPU wait sites (label, function, last ref: count; %u sites, %llu lost):",
+                        g_srt_num_wait_sites, (ull)g_srt_wait_sites_lost);
+            for (u32 i = 0; i < std::min<u32>(g_srt_num_wait_sites, 8); ++i) {
+                std::printf(" %#llx f%u %#x: %llu;", (ull)sites[i].address, sites[i].function,
+                            sites[i].ref, (ull)sites[i].count);
+            }
+            std::printf("\n");
+            g_srt_num_wait_sites = 0;
+            g_srt_wait_sites_lost = 0;
+        }
+    }
+    prep_trust_wait_validated = prep_trust_wait_changed = prep_trust_label_page = 0;
+    prep_trust_label_unmet = prep_trust_check_calls = prep_trust_checks = 0;
+    prep_trust_check_bytes = prep_trust_check_skips = 0;
     prep_trust_hits = prep_trust_misses = prep_trust_validated = 0;
     for (auto& why : prep_trust_why) {
         why = 0;
@@ -751,6 +816,9 @@ void PipelineCache::ReportPrepTrust() {
 }
 
 const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& prepared) {
+    // R.10 A1: only the immediately preceding call's draw can lend its value compare.
+    const PreparedDraw* prev_value_ok = last_value_ok;
+    last_value_ok = nullptr;
     if (prepared.state.load(std::memory_order_acquire) != PreparedDraw::Ready ||
         prepared.reg_checksum != liverpool->gfx_reg_checksum) {
         return nullptr;
@@ -769,23 +837,119 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         return env ? std::atoi(env) : 0;
     }();
     bool trusted = false;
+    static_assert(SrtNumOrigins <= 8);
+    u32 pw_origin = ~0u; ///< R.10 A1 v8: origin of the page write that missed this draw
     if (trust_mode != 0) {
         u32 why;
         if (!prepared.no_gpu_leaves) {
             why = 0;
+        } else if (prepared.after_wait && prepared.wait_kind != 1) {
+            why = 5;
         } else if (prepared.num_read_pages > prepared.read_pages.size()) {
             why = 4;
         } else {
+            const bool split = GfxPipeSplit();
+            const u64 c0 = split ? __rdtsc() : 0;
             why = SrtChangedSince(prepared.srt_snap, prepared.read_pages.data(),
                                   prepared.num_read_pages);
+            const u64 c1 = split ? __rdtsc() : 0;
+            if (why == 3) {
+                const u32 index = SrtChangedPage(prepared.srt_snap, prepared.read_pages.data(),
+                                                 prepared.num_read_pages);
+                u32 origin = SrtOriginOther;
+                if (index < prepared.num_read_pages) {
+                    origin = g_srt_page_origin[prepared.read_pages[index] % SrtPageSlots].load(
+                        std::memory_order_relaxed);
+                    origin = origin < SrtNumOrigins ? origin : SrtOriginOther;
+                    ++((prepared.ptr_page_mask >> index) & 1 ? prep_trust_pw_ptr
+                                                             : prep_trust_pw_leaf);
+                }
+                // R.10 A1 v9 (Fable): a page write that missed every range the walks read
+                // leaves the flat as it was. Such a draw is trusted as why 0 (by value only
+                // after a wait, as any why 0).
+                if (SrtA1()) {
+                    u32 page_hits = 2;
+                    why = SrtChangedSinceRanges(prepared.srt_snap, prepared.read_pages.data(),
+                                                prepared.num_read_pages, prepared.guest_runs,
+                                                prepared.num_guest_runs, page_hits);
+                    u64* const resolved = page_hits == 0   ? prep_trust_pw_missed
+                                          : page_hits == 1 ? prep_trust_pw_hit
+                                                           : prep_trust_pw_unknown;
+                    ++resolved[origin];
+                }
+                if (why == 3) {
+                    pw_origin = origin;
+                    ++prep_trust_pw_origin[origin];
+                }
+            }
+            // R.10 A1 (Fable): the label pages are not in the read set: labels share pages
+            // densely, so a write to one of them only matters when a met wait no longer holds.
+            // Only the waits whose label page was written are re-tested.
+            bool label_unmet = false;
+            if (why < 2) {
+                for (u32 i = 0; i < prepared.num_wait_pages; ++i) {
+                    if (SrtChangedSince(prepared.srt_snap, &prepared.wait_pages[i], 1) < 2) {
+                        continue;
+                    }
+                    ++prep_trust_label_page;
+                    if (!SrtMetWaitsHold(prepared, prepared.wait_pages[i])) {
+                        ++prep_trust_label_unmet;
+                        label_unmet = true;
+                        why = 3;
+                        break;
+                    }
+                }
+            }
             // uc3 R.22: after a wait or an unnoted write, the values the walk read decide: equal
             // values give the same flat (GPU writes still pending are on the page stamps).
             // =3 trusts without the value check (the shadow runs never saw a value change after
             // a wait; measurement only).
-            if (why == 1 && (trust_mode == 3 ||
-                             Shader::SrtChecksHold(prepared.checks, prepared.num_checks))) {
+            // R.10 A1 (Fable): after a CPU wait (met by now) the CPU writes it released are
+            // visible but not stamped: the values the walk read decide as well.
+            // R.10 A1: a big or page write since the snapshot stays a miss. Deciding it by the
+            // values (v7) diverged in the shadow run: the A's walk syncs GPU writes still pending
+            // (SrtReadDword / fixup) while the compare reads memory before they land.
+            const bool wait_check = prepared.after_wait;
+            const u32 origin = why == 0 ? 0 : why;
+            const bool by_value = !label_unmet && (why == 1 || (why == 0 && wait_check));
+            bool values_hold = false;
+            if (by_value) {
+                // R.10 A1 (Fable): runs equal in the previous draw, which held in the same wait
+                // epoch, are not compared again; only when no stamp moved since the snapshot
+                // (a stamped write between the two draws may be in a deduped run).
+                const bool skip_same = why == 0 && prepared.dedup_prev != nullptr &&
+                                       prepared.dedup_prev == prev_value_ok;
+                u32 bytes = 0;
+                values_hold = trust_mode == 3 ||
+                              Shader::SrtChecksHold(prepared.checks, prepared.num_checks,
+                                                    prepared.check_bytes, skip_same, &bytes);
+                ++prep_trust_check_calls;
+                prep_trust_checks += prepared.num_checks;
+                prep_trust_check_bytes += bytes;
+                prep_trust_check_skips += skip_same;
+                if (values_hold && trust_mode != 3) {
+                    last_value_ok = &prepared;
+                }
+            }
+            if (by_value && values_hold) {
                 why = 0;
                 ++prep_trust_validated;
+                ++prep_trust_stamp_validated[origin];
+                if (wait_check) {
+                    ++prep_trust_wait_validated;
+                }
+            } else if (by_value) {
+                ++prep_trust_stamp_changed[origin];
+                if (why == 0) {
+                    why = 1;
+                }
+                if (wait_check) {
+                    ++prep_trust_wait_changed;
+                }
+            }
+            if (split) {
+                g_gow3_gfx_pipe_split[6].fetch_add(c1 - c0, std::memory_order_relaxed);
+                g_gow3_gfx_pipe_split[7].fetch_add(__rdtsc() - c1, std::memory_order_relaxed);
             }
         }
         trusted = prepared.no_gpu_leaves && why == 0;
@@ -797,6 +961,8 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         }
     }
     if (trusted && (trust_mode == 1 || trust_mode == 3)) {
+        const bool split = GfxPipeSplit();
+        const u64 c0 = split ? __rdtsc() : 0;
         for (u32 i = 0; i < prepared.num_stages; ++i) {
             const auto& stage = prepared.stages[i];
             const auto* pgm = regs.ProgramForStage(static_cast<u32>(stage.hw_stage));
@@ -810,11 +976,42 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             auto& info = const_cast<Program*>(stage.program)->info;
             info.pgm_base = stage.pgm_base;
             info.user_data = std::span<const u32, Shader::ShaderParams::NumShaderUserData>{pgm->user_data};
-            info.flattened_ud_buf.assign(stage.flat, stage.flat + stage.flat_size);
+            // R.10 A1 v8 (Fable 2): the flat stays in the arena; the packet points at it.
+            info.trusted_flat = stage.flat;
+            info.trusted_flat_size = stage.flat_size;
             info.gpu_leaves.clear();
         }
-        const auto it = graphics_pipelines.find(prepared.key);
-        return it != graphics_pipelines.end() ? it->second.get() : nullptr;
+        const u64 c1 = split ? __rdtsc() : 0;
+        // R.10 A1 v8 (Fable 1a/1b): consecutive draws mostly share the key; the previous
+        // trusted pipeline is reused when the key is the same (its own copy, compared here),
+        // otherwise the worker's hash saves hashing the key again.
+        const GraphicsPipeline* pipeline = nullptr;
+        if (last_trusted_pipe && prepared.key_hash == last_trusted_hash &&
+            prepared.key == last_trusted_key) {
+            pipeline = last_trusted_pipe;
+            ++prep_trust_pipe_reused;
+        } else {
+            const auto it = graphics_pipelines.find(prepared.key, prepared.key_hash);
+            if (it != graphics_pipelines.end() && it->second) {
+                pipeline = it->second.get();
+                last_trusted_pipe = pipeline;
+                last_trusted_hash = prepared.key_hash;
+                last_trusted_key = prepared.key;
+            }
+        }
+        if (!pipeline) {
+            // The regular path refreshes the flats; until then nothing reads the arena ones.
+            for (u32 i = 0; i < prepared.num_stages; ++i) {
+                const_cast<Program*>(prepared.stages[i].program)->info.trusted_flat = nullptr;
+            }
+        }
+        if (split) {
+            const u64 c2 = __rdtsc();
+            g_gow3_gfx_pipe_split[8].fetch_add(c2 - c0, std::memory_order_relaxed);
+            g_gow3_gfx_pipe_split[9].fetch_add(c1 - c0, std::memory_order_relaxed);
+            g_gow3_gfx_pipe_split[10].fetch_add(c2 - c1, std::memory_order_relaxed);
+        }
+        return pipeline;
     }
     for (u32 i = 0; i < prepared.num_stages; ++i) {
         const auto& stage = prepared.stages[i];
@@ -849,11 +1046,17 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             if (trusted) {
                 NotePrepTrustDivergence("flat", stage.hash, info.pgm_base);
             }
+            if (pw_origin < SrtNumOrigins) {
+                ++prep_trust_pw_real[pw_origin];
+            }
             return nullptr;
         }
         if (trusted && !info.gpu_leaves.empty()) {
             NotePrepTrustDivergence("gpu leaves", stage.hash, info.pgm_base);
         }
+    }
+    if (pw_origin < SrtNumOrigins) {
+        ++prep_trust_pw_needless[pw_origin];
     }
     const auto it = graphics_pipelines.find(prepared.key);
     return it != graphics_pipelines.end() ? it->second.get() : nullptr;
@@ -1383,16 +1586,25 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         sigjmp_buf recover;
         if (sigsetjmp(recover, 0)) {
             Shader::t_srt_read_pages = nullptr;
+            Shader::t_srt_ptr_pages = nullptr;
+            Shader::t_srt_guest_runs = nullptr;
             Shader::t_srt_checks = nullptr;
+            Shader::t_srt_check_bytes = nullptr;
             worker.failed = true;
             return {};
         }
         runtime_fault_recover = &recover;
         Shader::t_srt_read_pages = &worker.read_pages;
+        Shader::t_srt_ptr_pages = &worker.ptr_pages;
+        Shader::t_srt_guest_runs = &worker.guest_runs;
         Shader::t_srt_checks = &worker.checks;
+        Shader::t_srt_check_bytes = &worker.check_bytes;
         info.RefreshFlatBuf();
         Shader::t_srt_read_pages = nullptr;
+        Shader::t_srt_ptr_pages = nullptr;
+        Shader::t_srt_guest_runs = nullptr;
         Shader::t_srt_checks = nullptr;
+        Shader::t_srt_check_bytes = nullptr;
         auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
         runtime_fault_recover = nullptr;
         const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
@@ -1465,6 +1677,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         // Programs loaded by the pipeline cache warm-up get their template on first use.
         std::unique_lock lk{programs_mutex};
         program->info_template = std::make_unique<Shader::Info>(program->info);
+        program->info_template->trusted_flat = nullptr; // R.10 A1 v8: arena flats stay on A
     }
     auto& info = program->info;
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
@@ -1534,6 +1747,7 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
             if (std::holds_alternative<GraphicsPipelineKey>(key)) {
                 auto& graphics_key = std::get<GraphicsPipelineKey>(key);
                 graphics_pipelines.erase(graphics_key);
+                last_trusted_pipe = nullptr;
             } else if (std::holds_alternative<ComputePipelineKey>(key)) {
                 auto& compute_key = std::get<ComputePipelineKey>(key);
                 compute_pipelines.erase(compute_key);

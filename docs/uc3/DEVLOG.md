@@ -4,6 +4,19 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-18 — v0.3.3: imagem lavada corrigida, mouse ao escalar e pendurado, A1 experimental, correções da revisão do Fable
+
+- **Imagem lavada (UC3)** (`GOW3_MIP_FIX`, `texture_cache.cpp`, `image_info.cpp`). O cache de texturas rejeitava render targets desenhados num mip de uma imagem maior (pitch diferente e checagem de tamanho), então os mips do bloom e da distorção ficavam zerados, e bloom zero soma uma névoa cinza no tonemap. Desligado no código, **ligado pelo launcher no UC3**.
+- **Mouse depois de escalar.** As checagens dos campos da câmera desligavam o mouse para a sessão inteira quando a direção inclinava. Agora o mouse só vira analógico enquanto os campos estão estranhos e volta quando ficam certos. Follow e cobertura aceitam direção inclinada (|v|≈1 e x²+z² ≥ 0,49).
+- **Mira escalando e pendurado** (`GOW3_MOUSE_EDGE_AIM`, `runtime_pad.c`). Hook na CameraEdgeAim (big3 1.02, arquivo 0x4dbf00): o up vem do quaternion do Locator anterior (rdx), o giro é limitado a 90° do início e o pitch a ±60°. Nos pontos pendurado onde a mira ficava lenta, só o UpdateLocation da Zoom (+0x150, arquivo 0x51f3e0) rodava. Um hook nele gira +0x11e0 quando a mira normal está parada há mais de 100 ms, e não roda com o jogo pausado. Corrigida a queda do mouse ao trocar de mão. Desligado no código, **ligado pelo launcher no UC3**.
+- **Hooks:** `RuntimeGuestCallback.rdx` (0 = r14, 1 = rdx, 2 = endereço de retorno em r9), e o thunk guarda o endereço de retorno e o rbp do guest. A memória dos thunks passou para 16 KB.
+- **Censo de câmeras** (`GOW3_MOUSE_CAMERA_LOG=1`). Hook no despacho da árvore de blend (arquivo 0x102498b) que loga cada UpdateLocation nova e se ela tem mouse. Numa sessão longa todas as câmeras de jogador tinham mouse, e as outras são roteirizadas (Manual, Animated, Spline, Fixed, ExplosionDeath). Lista em `cameras-mouse.md` (pasta do projeto).
+- **A1 do Fable** (`GOW3_PREP_TRUST_A1`). Confiança no preparo dos desenhos com carimbos de página e região e tabela de labels da GPU: 0 divergências em sombra (ruínas e sessão longa), uns +5 FPS nas ruínas. Desligado no código; no launcher aparece como **Experimental** em Opções > Avançado (`launcher.json` 'experimental').
+- **Revisão do Fable (2026-10-17).** Corrida no RING_DEDUP: o stage B mexia na lista de dedup do stage A sem sincronização, e agora só o A mexe. `stale_readback` passou a vir 0 também no default do ini e nos .bats.
+- **Controle:** L2/R2 continuam segurados enquanto L3+R3 abre o menu.
+- **Launcher 0.3.3:** aviso de versão por conteúdo, links para `zorde23/Uncharted_Collection_PC`.
+- Diagnósticos novos, desligados: `GOW3_PRESENT_GAMMA_FIX`, logs de formato do VideoOut e de gamma.
+
 ## 2026-10-17 — v0.3.2: teclado e mouse nos três jogos, câmera direta pelo mouse, janela e aba Controles, F1 abre o menu
 
 - **Entrada de teclado e mouse** (`src/runtime_pad.c`, `gpu/shim/window.cpp`, portado do uncharted_pc do SuperMedo, GPL). `input.ini` (via `GOW3_INPUT_CONFIG`) mapeia teclas, botões do mouse e roda para os botões do PS4 e os analógicos. Com o olhar pelo mouse ligado, o cursor fica preso na janela (modo relativo); Alt esquerdo, o menu do port ou a perda de foco o soltam.

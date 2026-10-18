@@ -493,7 +493,8 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
     const auto src_dim = src->info.props.is_block ? 2 : 0;
     ASSERT(mip_block_w == (src->info.size.width >> src_dim));
     ASSERT(mip_block_h == (src->info.size.height >> src_dim));
-    ASSERT(mip_block_p == (src->info.pitch >> src_dim));
+    ASSERT(mip_block_p == (src->info.pitch >> src_dim) ||
+           (VideoCore::ImageInfo::MipFixEnabled() && (src->info.pitch >> src_dim) >= mip_block_p));
 
     const auto [src_layers, dst_layers] =
         SanitizeCopyLayers(src->info, dst->info, src->info.size.depth);

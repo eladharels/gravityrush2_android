@@ -120,15 +120,21 @@ void runtime_thread_attach_host(const char *name);
  * mouse camera; ported from SuperMedo's uncharted_pc, GPL). `pattern` is hex bytes with ?? for
  * any byte; it must match exactly once in the executable code (and `require` at match+require_at,
  * when given). `moved` bytes of whole position-independent instructions move to the thunk. The
- * callback gets the guest's rdi, rsi and r14 there and the image base. */
+ * callback gets the guest's rdi, rsi and r14 there (instead of r14: rdx when `rdx` is 1, the return
+ * address when it is 2) and the image base. */
 typedef struct {
     const char *name, *pattern;
     size_t moved;
     void (__attribute__((ms_abi)) *callback)(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14);
     const char *require;
     int64_t require_at;
+    int rdx;
 } RuntimeGuestCallback;
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
+/* The guest's rbp at the last call of a callback whose `rdx` is 2 (diagnostics: its frame chain). */
+extern volatile uint64_t runtime_guest_rbp;
+/* The return address at the last call of any callback (diagnostics; threads may race). */
+extern volatile uint64_t runtime_guest_ret;
 /* 1 when input.ini turns mouse look on and GOW3_MOUSE_CAMERA is not 0: the loader installs the
  * mouse camera callbacks. */
 int runtime_pad_mouse_camera(void);

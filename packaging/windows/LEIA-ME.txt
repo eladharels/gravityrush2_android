@@ -1,4 +1,4 @@
-Uncharted: The Nathan Drake Collection para PC (ucndc_pc) v0.3.2
+Uncharted: The Nathan Drake Collection para PC (ucndc_pc) v0.3.3
 ================================================================
 [English below]
 
@@ -50,7 +50,7 @@ Problemas
 
 Uncharted é marca registrada da Sony Interactive Entertainment. Este projeto não tem
 relação com a Sony, a Naughty Dog ou a Bluepoint Games. Licença: GPL v2 ou posterior
-(LICENSE). Código-fonte e créditos: https://github.com/zorde23/ucndc_pc
+(LICENSE). Código-fonte e créditos: https://github.com/zorde23/Uncharted_Collection_PC
 
 ---------------------------------------------------------------------------------------------
 
@@ -83,4 +83,4 @@ user\. When reporting a problem, send user\last_run.log.
 UC2 train prologue: you may need to jump earlier than on PS4; if the carriage still falls, turn
 off UC_HLE_INORDER and UC_ACB_DISPATCH_PIPE in Options > Advanced for that part. UC3: rare
 driver timeout crash after long sessions, so save often.
-Source code and credits: https://github.com/zorde23/ucndc_pc
+Source code and credits: https://github.com/zorde23/Uncharted_Collection_PC

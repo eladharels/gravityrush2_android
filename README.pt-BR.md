@@ -15,7 +15,7 @@ Bluepoint, 2015). O foco é o **Uncharted 3: Drake's Deception**, que roda a 60 
 
 Sem instalar nada e sem terminal:
 
-1. Baixe o `ucndc_pc-v…-windows.zip` mais recente em [Releases](https://github.com/zorde23/ucndc_pc/releases) e extraia em qualquer lugar
+1. Baixe o `ucndc_pc-v…-windows.zip` mais recente em [Releases](https://github.com/zorde23/Uncharted_Collection_PC/releases) e extraia em qualquer lugar
    (por exemplo `C:\Jogos\ucndc_pc`). Não rode de dentro do zip.
 2. Abra o **`Uncharted Launcher.exe`**. Se o SmartScreen do Windows avisar, clique em
    *Mais informações* → *Executar assim mesmo* (o launcher não é assinado).
@@ -138,7 +138,7 @@ Só é preciso para mexer no port; para jogar, use o [download](#baixar-e-jogar)
 2. Clone com os submódulos:
 
    ```bash
-   git clone --recursive https://github.com/zorde23/ucndc_pc.git
+   git clone --recursive https://github.com/zorde23/Uncharted_Collection_PC.git
    ```
 
 3. Edite `windows\config.bat` com os caminhos do MSYS2, do jogo e da atualização.
@@ -190,6 +190,9 @@ ligam o conjunto testado. Todas também valem com o prefixo antigo `GOW3_`
 | `UC_EOP_TICK_WAIT` | O assert `m_gfxEopTick` espera a GPU em vez de parar o jogo |
 | `UC_SYNC_SMALL_TARGETS` | Shaders de render targets pequenos compilam na hora, então uma tabela de iluminação desenhada uma vez no início não é pulada (corrige a tocha escura da caverna no UC3) |
 | `UC_JOB_SPIN`, `UC_JOB_SLEEP` | `UC_JOB_SPIN=100` + `UC_JOB_SLEEP=1`: as seis threads de jobs do jogo giram menos e dormem durante o jogo; o uso de CPU cai de uns 66% para uns 50% com o mesmo FPS (UC3) |
+| `UC_MIP_FIX` | O cache de texturas aceita render targets desenhados num mip de uma imagem maior, então o bloom e a distorção não se perdem (corrige a imagem lavada e acinzentada no UC3) |
+| `UC_MOUSE_EDGE_AIM` | O mouse gira a câmera ao mirar pendurado num beiral ou escalando, e nos pontos pendurado onde a mira girava devagar (UC3) |
+| `UC_PREP_TRUST_A1` | Experimental, desligado no launcher: o preparo dos desenhos reaproveita o trabalho que consegue provar que continua válido (uns +5 FPS nas ruínas do deserto no UC3) |
 | `UC_HLE_INORDER`, `UC_ACB_DISPATCH_PIPE` | Deixam a perseguição nos telhados do UC2 a 60 FPS; desligue se o prólogo do trem falhar |
 
 A lista completa, com medições, está no [DEVLOG](docs/uc3/DEVLOG.md).

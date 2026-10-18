@@ -2,6 +2,7 @@
 // gow3: speculative draw preparation on worker threads (see vk_draw_prep.h).
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +11,7 @@
 #include "gow3_threads.h"
 #include "gow3_toggles.h"
 #include "common/thread.h"
+#include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
@@ -437,9 +439,125 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
         u64 checksum = target->start_checksum;
         u32 ordinal = 0;
         arena = FlatArena{};
+        bool after_wait = false;
+        // R.10 A1: 1 after a CPU WaitRegMem only (the values the walk read decide), 2 after a
+        // MemSemaphore or Rewind (not trusted).
+        u8 wait_kind = 0;
+        // Waits found met and the pages of their labels, copied to the arena for the draws
+        // after them when they changed: when a page was written since the snapshot (taken
+        // before the label is read), the draw re-tests the waits on it.
+        thread_local std::vector<u64> wait_pages;
+        thread_local std::vector<SrtMetWait> met_waits;
+        wait_pages.clear();
+        met_waits.clear();
+        bool waits_changed = false;
+        const u64* arena_wait_pages = nullptr;
+        const SrtMetWait* arena_met_waits = nullptr;
+        u64 wait_snap = ~0ULL;
+        // R.10 A1 (Fable): consecutive prepared draws with no CPU wait between them, whose
+        // equal runs need comparing once. Draw k held by value at t_k, so a run of k+1 with
+        // k's bytes matched memory then; after t_k packet writes and landings are on the page
+        // stamps (why 2/3 first), and the CPU only writes across a wait not yet met here,
+        // which clears prev_draw. A wait met here was signalled before both walks.
+        const PreparedDraw* prev_draw = nullptr;
+        const auto met_wait = [&](const SrtMetWait& wait, u64 snap) {
+            wait_snap = std::min(wait_snap, snap);
+            bool known = false;
+            for (const auto& other : met_waits) {
+                known |= other.address == wait.address && other.ref == wait.ref &&
+                         other.mask == wait.mask && other.function == wait.function &&
+                         other.semaphore == wait.semaphore;
+            }
+            if (!known) {
+                met_waits.push_back(wait);
+                waits_changed = true;
+            }
+            const u64 page = wait.address >> 12;
+            if (std::find(wait_pages.begin(), wait_pages.end(), page) == wait_pages.end()) {
+                wait_pages.push_back(page);
+                waits_changed = true;
+            }
+        };
         ForEachPacket(target->commands, [&](const AmdGpu::PM4Header* header) {
             AmdGpu::Liverpool::ApplyGraphicsRegisterPacket(*regs, header, checksum);
             if (!IsDirectDraw(header->type3.opcode)) {
+                // uc3 R.10 A1: a wait on memory the CPU has not released yet may release data
+                // written after this walk: the draws after it in this submission are not
+                // trusted. A wait already met released its data before (no race on PS4).
+                // R.10 A1 (a): labels this submission writes, for the waits after them.
+                if (SrtA1()) {
+                    AmdGpu::Liverpool::SrtNoteGpuLabelPacket(header, target->seq);
+                }
+                if (SrtA1() && wait_kind < 2) {
+                    using AmdGpu::PM4ItOpcode;
+                    const auto opcode = header->type3.opcode;
+                    if (opcode == PM4ItOpcode::WaitRegMem) {
+                        const auto* wait = reinterpret_cast<const AmdGpu::PM4CmdWaitRegMem*>(header);
+                        if (wait->mem_space.Value() ==
+                            AmdGpu::PM4CmdWaitRegMem::MemSpace::Memory) {
+                            const u64 snap = g_srt_write_seq.load(std::memory_order_acquire);
+                            u32 value = 0;
+                            Core::Memory::Instance()->CopySparseMemoryBacking(
+                                wait->Address<VAddr>(), reinterpret_cast<u8*>(&value),
+                                sizeof(value));
+                            if (wait->TestValue(value)) {
+                                met_wait({.address = wait->Address<VAddr>(),
+                                          .ref = wait->ref,
+                                          .mask = wait->mask,
+                                          .function = static_cast<u8>(wait->function.Value()),
+                                          .semaphore = 0},
+                                         snap);
+                            } else {
+                                bool cpu_wait = true;
+                                // R.10 A1 (a): met by a value a label write of this submission,
+                                // or of one the GPU thread has not started, writes: GPU-GPU, it
+                                // releases no CPU write.
+                                g_srt_waits_unmet.fetch_add(1, std::memory_order_relaxed);
+                                u64 label = 0, label_seq = 0;
+                                if (SrtGpuLabelValue(wait->Address<VAddr>(), label, label_seq) &&
+                                    (label_seq == target->seq ||
+                                     (label_seq < target->seq &&
+                                      label_seq > gpu_seq.load(std::memory_order_acquire))) &&
+                                    wait->TestValue(static_cast<u32>(label))) {
+                                    cpu_wait = false;
+                                    g_srt_waits_gpu.fetch_add(1, std::memory_order_relaxed);
+                                }
+                                if (cpu_wait) {
+                                    after_wait = true;
+                                    prev_draw = nullptr;
+                                    wait_kind = std::max<u8>(wait_kind, 1);
+                                    g_srt_wait_kinds[0].fetch_add(1, std::memory_order_relaxed);
+                                    SrtNoteCpuWait(wait->Address<VAddr>(),
+                                                   static_cast<u32>(wait->function.Value()),
+                                                   wait->ref);
+                                }
+                            }
+                        }
+                    } else if (opcode == PM4ItOpcode::MemSemaphore) {
+                        const auto* sem = reinterpret_cast<const AmdGpu::PM4CmdMemSemaphore*>(header);
+                        if (!sem->IsSignaling()) {
+                            const u64 snap = g_srt_write_seq.load(std::memory_order_acquire);
+                            u64 value = 0;
+                            Core::Memory::Instance()->CopySparseMemoryBacking(
+                                sem->Address<VAddr>(), reinterpret_cast<u8*>(&value),
+                                sizeof(value));
+                            if (value != 0) {
+                                met_wait({.address = sem->Address<VAddr>(), .semaphore = 1},
+                                         snap);
+                            } else {
+                                after_wait = true;
+                                wait_kind = 2;
+                                prev_draw = nullptr;
+                                g_srt_waits_unmet.fetch_add(1, std::memory_order_relaxed);
+                                g_srt_wait_kinds[1].fetch_add(1, std::memory_order_relaxed);
+                            }
+                        }
+                    } else if (opcode == PM4ItOpcode::Rewind) {
+                        after_wait = true;
+                        wait_kind = 2;
+                        g_srt_wait_kinds[2].fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
                 return;
             }
             // Past the GPU thread the draws are no longer worth preparing.
@@ -450,12 +568,27 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 prep_worker.failed = false;
                 sel.draw_indirect_params = {};
                 prep_worker.read_pages.clear();
+                prep_worker.ptr_pages.clear();
+                prep_worker.guest_runs.clear();
                 prep_worker.checks.clear();
+                prep_worker.check_bytes.clear();
                 const u64 srt_snap = g_srt_write_seq.load(std::memory_order_acquire);
+                g_srt_walk_gpu_leaf = false;
                 if (pipeline_cache.PrepareGraphicsPipeline(sel)) {
                     draw.reg_checksum = checksum;
-                    draw.srt_snap = srt_snap;
-                    draw.no_gpu_leaves = true;
+                    draw.srt_snap = std::min(srt_snap, wait_snap);
+                    draw.no_gpu_leaves = !(SrtA1() && g_srt_walk_gpu_leaf);
+                    draw.after_wait = after_wait;
+                    draw.wait_kind = wait_kind;
+                    if (waits_changed) {
+                        arena_wait_pages = arena.AppendArray(wait_pages.data(), wait_pages.size());
+                        arena_met_waits = arena.AppendArray(met_waits.data(), met_waits.size());
+                        waits_changed = false;
+                    }
+                    draw.num_wait_pages = static_cast<u32>(wait_pages.size());
+                    draw.wait_pages = arena_wait_pages;
+                    draw.num_met_waits = static_cast<u32>(met_waits.size());
+                    draw.met_waits = arena_met_waits;
                     auto& pages = prep_worker.read_pages;
                     std::sort(pages.begin(), pages.end());
                     pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
@@ -465,9 +598,43 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                         draw.num_read_pages = static_cast<u32>(pages.size());
                         std::copy(pages.begin(), pages.end(), draw.read_pages.begin());
                     }
-                    draw.checks = arena.AppendArray(prep_worker.checks.data(), prep_worker.checks.size());
-                    draw.num_checks = static_cast<u32>(prep_worker.checks.size());
+                    draw.ptr_page_mask = 0;
+                    if (draw.num_read_pages <= draw.read_pages.size()) {
+                        for (const u64 page : prep_worker.ptr_pages) {
+                            const auto it = std::lower_bound(pages.begin(), pages.end(), page);
+                            if (it != pages.end() && *it == page) {
+                                draw.ptr_page_mask |= 1u << u32(it - pages.begin());
+                            }
+                        }
+                    }
+                    // R.10 A1 (Fable): runs with the same range and bytes as in the previous
+                    // draw of the same wait epoch.
+                    auto& checks = prep_worker.checks;
+                    const auto& bytes = prep_worker.check_bytes;
+                    draw.dedup_prev = nullptr;
+                    if (prev_draw) {
+                        for (auto& check : checks) {
+                            for (u32 j = 0; j < prev_draw->num_checks; ++j) {
+                                const auto& other = prev_draw->checks[j];
+                                if (other.host == check.host &&
+                                    (other.size & ~Shader::SrtCheckSameAsPrev) == check.size &&
+                                    std::memcmp(prev_draw->check_bytes + other.raw_off,
+                                                bytes.data() + check.raw_off, check.size) == 0) {
+                                    check.size |= Shader::SrtCheckSameAsPrev;
+                                    draw.dedup_prev = prev_draw;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    draw.checks = arena.AppendArray(checks.data(), checks.size());
+                    draw.num_checks = static_cast<u32>(checks.size());
+                    draw.check_bytes = arena.AppendArray(bytes.data(), bytes.size());
+                    draw.guest_runs = arena.AppendArray(prep_worker.guest_runs.data(),
+                                                        prep_worker.guest_runs.size());
+                    draw.num_guest_runs = static_cast<u32>(prep_worker.guest_runs.size());
                     draw.key = sel.graphics_key;
+                    draw.key_hash = std::hash<GraphicsPipelineKey>{}(draw.key);
                     draw.num_stages = static_cast<u32>(prep_worker.stages.size());
                     for (u32 i = 0; i < draw.num_stages; ++i) {
                         const auto& stage = prep_worker.stages[i];
@@ -489,9 +656,13 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                         PrepareVertexInputs(*vs, *sel.fetch_shader, *regs, draw.vertex, arena);
                     }
                     draw.state.store(PreparedDraw::Ready, std::memory_order_release);
+                    prev_draw = &draw;
                 } else {
                     draw.state.store(PreparedDraw::Unavailable, std::memory_order_release);
+                    prev_draw = nullptr;
                 }
+            } else {
+                prev_draw = nullptr;
             }
             ++ordinal;
         });
@@ -519,6 +690,60 @@ void DrawPreparation::Count(bool was_used) {
                 static_cast<unsigned long long>(used), static_cast<unsigned long long>(unused),
                 worker_count, static_cast<unsigned long long>(rebases));
     used = unused = 0;
+}
+
+bool SrtMetWaitsHold(const PreparedDraw& draw, u64 page) {
+    for (u32 i = 0; i < draw.num_met_waits; ++i) {
+        const auto& wait = draw.met_waits[i];
+        if ((wait.address >> 12) != page) {
+            continue;
+        }
+        if (wait.semaphore) {
+            u64 value = 0;
+            Core::Memory::Instance()->CopySparseMemoryBacking(
+                wait.address, reinterpret_cast<u8*>(&value), sizeof(value));
+            if (value == 0) {
+                return false;
+            }
+            continue;
+        }
+        u32 value = 0;
+        Core::Memory::Instance()->CopySparseMemoryBacking(
+            wait.address, reinterpret_cast<u8*>(&value), sizeof(value));
+        using Function = AmdGpu::PM4CmdWaitRegMem::Function;
+        const u32 masked = value & wait.mask;
+        bool holds;
+        switch (static_cast<Function>(wait.function)) {
+        case Function::Always:
+            holds = true;
+            break;
+        case Function::LessThan:
+            holds = masked < wait.ref;
+            break;
+        case Function::LessThanEqual:
+            holds = masked <= wait.ref;
+            break;
+        case Function::Equal:
+            holds = masked == wait.ref;
+            break;
+        case Function::NotEqual:
+            holds = masked != wait.ref;
+            break;
+        case Function::GreaterThanEqual:
+            holds = masked >= wait.ref;
+            break;
+        case Function::GreaterThan:
+            holds = masked > wait.ref;
+            break;
+        default:
+            holds = false;
+            break;
+        }
+        if (!holds) {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace Vulkan

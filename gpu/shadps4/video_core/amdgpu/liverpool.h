@@ -104,6 +104,9 @@ struct Liverpool {
     /// `dirty` (draw-preparation scanner) records the register blocks written.
     static void ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header, u64& checksum,
                                             RegDirty* dirty = nullptr);
+    /// uc3 R.10 A1 (a): notes the label value a packet writes (EOP/EOS/ReleaseMem/WriteData of
+    /// one or two dwords) in the GPU label table, for graphics submission `seq`.
+    static void SrtNoteGpuLabelPacket(const PM4Header* header, u64 seq);
 
 public:
     explicit Liverpool();

@@ -283,6 +283,7 @@ private:
         u32 max_count;
     };
     /// Everything of an indirect draw after the pipeline selection (GPU thread or stage B).
+    void DumpOnDraw(const GraphicsPipeline* pipeline);
     void DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_indexed,
                             const IndirectDraw& indirect);
     /// Everything of an indirect dispatch after the pipeline selection.
@@ -578,6 +579,10 @@ private:
     std::vector<DedupWrite> dedup_writes; ///< merged NotePendingGpuWrite ranges since the clear
     u32 dedup_epoch = 1;
     u64 dedup_wver = 0;
+    /// Guest writes noted off stage A (stage B runs DMA and HLE copies): A must not touch
+    /// dedup_writes from there, so it counts them and forgets the dedup state on its next look.
+    std::atomic<u32> dedup_offthread{0};
+    u32 dedup_offthread_seen = 0;
     u64 dedup_hits = 0, dedup_misses = 0, dedup_stale = 0;
     VAddr pending_min = ~VAddr{0}, pending_max = 0; ///< bounds of pending_writes
     u32 pending_checks = 0;

@@ -323,6 +323,7 @@ static unsigned char *near_image_memory(uint64_t image_size, size_t size) {
 #endif
     return memory;
 }
+volatile uint64_t runtime_guest_rbp, runtime_guest_ret;
 static void install_game_callbacks(const Segment *segments, uint64_t ns, uint64_t image_size) {
     size_t count=0;
     const RuntimeGuestCallback *callbacks=runtime_guest_callbacks(&count);
@@ -355,8 +356,8 @@ static void install_game_callbacks(const Segment *segments, uint64_t ns, uint64_
             if (matches) printf("Callbacks: %s: found %" PRIu64 " times, left alone\n",c->name,matches);
             continue;
         }
-        if (!thunks && !(thunks=near_image_memory(image_size,4096))) { printf("Callbacks: no thunk memory, mouse uses the stick\n"); return; }
-        if (used+256>4096) break;
+        if (!thunks && !(thunks=near_image_memory(image_size,16384))) { printf("Callbacks: no thunk memory, mouse uses the stick\n"); return; }
+        if (used+320>16384) break; /* a thunk is under 320 bytes */
         unsigned char *t=thunks+used, *f=image+found;
         size_t k=0;
         /* pushfq; push rax rcx rdx r8-r11 rbx; mov rbx, rsp; and rsp, -16; sub rsp, 0xa0 (works at
@@ -369,11 +370,24 @@ static void install_game_callbacks(const Segment *segments, uint64_t ns, uint64_
             t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x7f; t[k++]=(unsigned char)(0x84|x<<3); t[k++]=0x24;
             memcpy(t+k,&disp,4); k+=4;
         }
+        {                                                           /* runtime_guest_ret=[rbx+0x48] (rax, rcx saved) */
+            const uintptr_t at=(uintptr_t)&runtime_guest_ret;
+            t[k++]=0x48; t[k++]=0x8b; t[k++]=0x43; t[k++]=0x48;     /* mov rax, [rbx+0x48] */
+            t[k++]=0x48; t[k++]=0xb9; memcpy(t+k,&at,8); k+=8;      /* movabs rcx, &runtime_guest_ret */
+            t[k++]=0x48; t[k++]=0x89; t[k++]=0x01;                  /* mov [rcx], rax */
+        }
+        if (c->rdx==1) { t[k++]=0x49; t[k++]=0x89; t[k++]=0xd1; }   /* mov r9, rdx */
         t[k++]=0x48; t[k++]=0x89; t[k++]=0xf9;                      /* mov rcx, rdi */
         t[k++]=0x48; t[k++]=0x89; t[k++]=0xf2;                      /* mov rdx, rsi */
         const uintptr_t base=(uintptr_t)image, host=(uintptr_t)c->callback;
         t[k++]=0x49; t[k++]=0xb8; memcpy(t+k,&base,8); k+=8;        /* movabs r8, image */
-        t[k++]=0x4d; t[k++]=0x89; t[k++]=0xf1;                      /* mov r9, r14 */
+        if (c->rdx==2) { t[k++]=0x4c; t[k++]=0x8b; t[k++]=0x4b; t[k++]=0x48; } /* mov r9, [rbx+0x48]: the return address */
+        if (!c->rdx) { t[k++]=0x4d; t[k++]=0x89; t[k++]=0xf1; }     /* mov r9, r14 */
+        if (c->rdx==2) {                                            /* movabs rax, &runtime_guest_rbp; mov [rax], rbp */
+            const uintptr_t at=(uintptr_t)&runtime_guest_rbp;
+            t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&at,8); k+=8;
+            t[k++]=0x48; t[k++]=0x89; t[k++]=0x28;
+        }
         t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;        /* movabs rax, callback */
         t[k++]=0xff; t[k++]=0xd0;                                   /* call rax */
         for (int x=0;x<8;++x) {                                     /* movdqu xmmx, [rsp+0x20+16x] */

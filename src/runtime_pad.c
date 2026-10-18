@@ -419,7 +419,7 @@ static pthread_mutex_t camera_lock=PTHREAD_MUTEX_INITIALIZER;
 /* Mouse motion (pixels) not yet given to the follow camera [0] and to the joypad state [1]: each
  * gets all of it (the follow camera does not read the joypad's right stick values, the other
  * cameras do not use the follow camera's direction). */
-static float camera_dx[4], camera_dy[4]; /* [2]: the aiming camera (U3), [3]: the cover camera (U3 test) */
+static float camera_dx[5], camera_dy[5]; /* [2]: the aiming camera (U3), [3]: the cover camera (U3 test), [4]: aiming on a climb (U3) */
 static volatile uint64_t camera_hook_us; /* last follow camera callback: it turns with the mouse */
 static volatile uint64_t sticks_hook_us; /* last joypad callback: the mouse is a right stick value there */
 static int mouse_debug(void) {
@@ -462,16 +462,46 @@ static volatile float follow_correction;  /* degrees the direction is short of t
 static volatile float follow_push;        /* the right stick while the direction turns (-0.3, 0, 0.3) */
 static volatile int follow_has_arc;       /* the follow camera's vertical arc is known */
 static int follow_bad, follow_off;        /* frames in a row with unexpected fields; 1: callback off */
-/* 1 when the camera's fields look like a unit horizontal direction and an arc in [0,1]. */
+/* The fields looked right at least once: unexpected values later are a camera mode of the game
+ * (climbing tilts the direction), not a wrong offset. Then the mouse is a right stick only while
+ * they last, and the camera takes it again as soon as they look right (the same for aim/cover). */
+static int follow_seen_ok, aim_seen_ok, cover_seen_ok;
+/* Back from the stick only after this many good frames in a row, so a camera at the edge of the
+ * check does not switch the mouse every frame; and at most one such log line every 5 s. */
+enum { FIELDS_GOOD_AGAIN = 10 };
+static int follow_good, aim_good, cover_good;
+static int fields_log_now(uint64_t *last_us) {
+    const uint64_t now=now_us();
+    if (*last_us && now-*last_us<5000000u) return 0;
+    *last_us=now;
+    return 1;
+}
+static uint64_t follow_log_us, aim_log_us, cover_log_us;
+/* 1 when the camera's fields look like a unit direction that is mostly horizontal and an arc in
+ * [0,1]. Climbing tilts the direction (U3: y 0.14, horizontal length 0.99); the turns rotate x/z
+ * around the vertical and the heading only reads x/z, so a tilted direction turns the same. A
+ * wrong offset gives a length far from 1. */
 static int follow_fields_ok(const float *dir, const float *arc) {
     const float len=dir[0]*dir[0]+dir[1]*dir[1]+dir[2]*dir[2];
-    const int ok=len>0.96f && len<1.04f && dir[1]>-0.1f && dir[1]<0.1f &&
+    const float flat=dir[0]*dir[0]+dir[2]*dir[2];
+    const int ok=len>0.96f && len<1.04f && flat>=0.49f &&
                  (!arc || (*arc>=-0.01f && *arc<=1.01f));
-    if (ok) { follow_bad=0; return 1; }
-    if (++follow_bad>=30) {
-        follow_off=1;
-        printf("Mouse: follow camera fields unexpected (direction %.3f %.3f %.3f, arc %.3f), "
-               "mouse camera off, the mouse is a stick\n",dir[0],dir[1],dir[2],arc ? *arc : 0.0f);
+    if (ok) {
+        if (follow_bad>=30) {
+            if (++follow_good<FIELDS_GOOD_AGAIN) return 0;
+            if (fields_log_now(&follow_log_us))
+                printf("Mouse: follow camera fields as expected again, the mouse turns the camera\n");
+        }
+        follow_bad=follow_good=0;
+        follow_seen_ok=1;
+        return 1;
+    }
+    follow_good=0;
+    if (++follow_bad==30) {
+        follow_off=!follow_seen_ok;
+        if (follow_off || fields_log_now(&follow_log_us)) printf("Mouse: follow camera fields unexpected (direction %.3f %.3f %.3f, arc %.3f), %s\n",
+               dir[0],dir[1],dir[2],arc ? *arc : 0.0f,
+               follow_off ? "mouse camera off, the mouse is a stick" : "the mouse is a stick until they look right again");
     }
     return 0;
 }
@@ -668,6 +698,7 @@ static volatile int aim_direct=1;
 static int aim_bad, aim_off, aim_pending;
 static float aim_kept=1.0f, aim_before, aim_after;
 static void discover_call(int f, uint64_t rdi, uint64_t rsi);
+#define DISCOVER_EDGE 26 /* the climbing aim candidates start here (GOW3_MOUSE_DISCOVER) */
 static int discover_on(void) {
     static int on=-1;
     if (on<0) { const char *v=getenv("GOW3_MOUSE_DISCOVER"); on=v && v[0]=='1'; }
@@ -724,14 +755,20 @@ static float aim_camera(uint64_t camera, size_t dir_at, size_t copy_at, size_t c
     const float len=v[0]*v[0]+v[1]*v[1]+v[2]*v[2];
     if (!(len>0.96f && len<1.04f) || !(v[1]>-0.9f && v[1]<0.9f) || SDL_fabsf(copy[0]-v[0])>1e-3f || SDL_fabsf(copy[1]-v[1])>1e-3f ||
         SDL_fabsf(copy[2]-v[2])>1e-3f) {
-        if (++aim_bad>=30) {
-            aim_off=1;
-            printf("Mouse: aim camera fields unexpected (%.3f %.3f %.3f / %.3f %.3f %.3f), mouse aims with the stick\n",
-                   v[0],v[1],v[2],copy[0],copy[1],copy[2]);
+        aim_good=0;
+        if (++aim_bad==30) {
+            aim_off=!aim_seen_ok;
+            if (aim_off || fields_log_now(&aim_log_us)) printf("Mouse: aim camera fields unexpected (%.3f %.3f %.3f / %.3f %.3f %.3f), mouse aims with the stick%s\n",
+                   v[0],v[1],v[2],copy[0],copy[1],copy[2],aim_off ? "" : " until they look right again");
         }
         return 0.0f;
     }
-    aim_bad=0;
+    if (aim_bad>=30) {
+        if (++aim_good<FIELDS_GOOD_AGAIN) return 0.0f;
+        if (fields_log_now(&aim_log_us)) printf("Mouse: aim camera fields as expected again\n");
+    }
+    aim_bad=aim_good=0;
+    aim_seen_ok=1;
     const uint64_t last_us=aim_hook_us;
     aim_hook_us=now_us();
     float dx, dy;
@@ -778,10 +815,57 @@ static float aim_camera(uint64_t camera, size_t dir_at, size_t copy_at, size_t c
                               aim_hook_us*1e-6,dx,dy,heading,aim_heading(v),y,aim_kept,aim_direct ? "" : " stick");
     return turn;
 }
+/* GOW3_MOUSE_DISCOVER: the callers (return addresses, image offsets) of the aiming cameras' updates,
+ * counted per second for each camera: they should share the base method that calls UpdateLocation. */
+static void discover_ret(const char *name, int slot, uint64_t image) {
+    static struct { uint64_t at, calls; } seen[4][8];
+    static uint64_t second_us[4];
+    static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
+    const uint64_t ret=runtime_guest_ret, now=now_us();
+    pthread_mutex_lock(&lock);
+    if (ret>=image && ret<image+0x4000000) {
+        int i=0;
+        while (i<8 && seen[slot][i].at && seen[slot][i].at!=ret-image) ++i;
+        if (i<8) { seen[slot][i].at=ret-image; ++seen[slot][i].calls; }
+    }
+    if (!second_us[slot]) second_us[slot]=now;
+    if (now-second_us[slot]>=1000000) {
+        second_us[slot]=now;
+        char line[512];
+        int n=snprintf(line,sizeof(line),"Mouse discover: %s returns",name);
+        for (int i=0;i<8 && seen[slot][i].at;++i) {
+            if (seen[slot][i].calls) n+=snprintf(line+n,sizeof(line)-n," img %#llx x%llu",(unsigned long long)seen[slot][i].at,(unsigned long long)seen[slot][i].calls);
+            seen[slot][i].calls=0;
+        }
+        puts(line);
+    }
+    pthread_mutex_unlock(&lock);
+}
+static volatile uint64_t aim_request_us; /* the last u3_aim_camera call */
 static void __attribute__((ms_abi)) u3_aim_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
-    (void)unused; (void)image; (void)r14;
-    if (discover_on()) discover_call(2,camera,0);
+    (void)unused; (void)r14;
+    if (discover_on()) { discover_call(2,camera,0); discover_ret("U3 aim camera",0,image); }
+    aim_request_us=now_us();
     aim_camera(camera,0x200,0x11e0,0,NULL,0,0);
+}
+static int edge_aim_enabled(void);
+/* U3 1.02: in some places (hanging on some walls) the zoom camera runs its UpdateLocation (vtable +0x150,
+ * big3 file 0x51f3e0, its object in rsi; found by the GOW3_MOUSE_CAMERA_LOG census) without the request
+ * evaluation that calls u3_aim_camera (+0x128). There the mouse turns the same fields from here, with
+ * GOW3_MOUSE_EDGE_AIM=1 (aiming while hanging, off by default). */
+static void __attribute__((ms_abi)) u3_aim_camera_update(uint64_t locator, uint64_t camera, uint64_t image, uint64_t r14) {
+    (void)locator; (void)r14;
+    if (!edge_aim_enabled() || (aim_request_us && now_us()-aim_request_us<100000)) return;
+    /* the update leaves early (keeps the last locator) while the game's time scale is 0 (paused):
+     * [[image+0x1b3a838]+0xa0]+0x14 (Opus); no turns then, so none pile up */
+    const uint64_t clock=*(const uint64_t *)(uintptr_t)(image+0x1b3a838);
+    if (clock>=0x10000) {
+        const uint64_t at=*(const uint64_t *)(uintptr_t)(clock+0xa0);
+        if (at>=0x10000 && *(const float *)(uintptr_t)(at+0x14)==0.0f) return;
+    }
+    /* here +0x11e0 is the state (the update rewrites +0x200 from its final locator, so the two differ):
+     * it alone is checked and turned */
+    aim_camera(camera,0x11e0,0x11e0,0,NULL,0,0);
 }
 static void __attribute__((ms_abi)) u3_aim_camera_100(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)unused; (void)image; (void)r14;
@@ -803,6 +887,96 @@ static void __attribute__((ms_abi)) u2_aim_camera_100(uint64_t camera, uint64_t 
     (void)image; (void)r14;
     if (discover_on()) discover_call(20,camera,rsi);
     aim_camera(camera,0x1f30,0xdc0,0xd90,NULL,0,0);
+}
+/* U3 aiming while hanging on a climb (CameraEdgeAim, the update at big3 file 0x4dbf00 in 1.02; found
+ * by the GOW3_MOUSE_DISCOVER dumps, read by Opus): its object in rsi, the previous Locator in rdx
+ * (position, then a rotation quaternion at +0x10). The game turns the look vector at +0x200 (copies
+ * at +0x210 and +0x230) by the right stick as a rate (45 degrees/s at most), around the previous
+ * Locator's y axis, not the world's. GOW3_MOUSE_EDGE_AIM=1 (off by default): the mouse turns it
+ * directly, yaw around that axis (within 90 degrees of where aiming started) and pitch toward it
+ * (60 degrees at most either way, |dot| <= 0.87); like the other cameras, should the game not keep
+ * the turns, the mouse goes back to the right stick. */
+static volatile uint64_t edge_hook_us;
+static volatile int edge_direct=1;
+static int edge_pending;
+static float edge_kept=1.0f, edge_before[3], edge_after[3], edge_start[3];
+static uint64_t edge_log_us;
+static int edge_aim_enabled(void) {
+    static int on=-1;
+    if (on<0) { const char *v=getenv("GOW3_MOUSE_EDGE_AIM"); on=v && v[0]=='1'; if (on) printf("Mouse: aiming on a climb turns with the mouse\n"); }
+    return on;
+}
+static float dot3(const float *a, const float *b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+static void __attribute__((ms_abi)) u3_edge_aim_camera(uint64_t locator, uint64_t camera, uint64_t image, uint64_t previous) {
+    if (discover_on()) { discover_call(DISCOVER_EDGE,locator,camera); discover_ret("U3 climbing aim camera",1,image); }
+    if (!edge_aim_enabled() || !camera || previous<0x10000) return;
+    float *v=(float *)(uintptr_t)(camera+0x200);
+    const float *q=(const float *)(uintptr_t)(previous+0x10);
+    const float qq=q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3], vv=dot3(v,v);
+    if (!(qq>0.96f && qq<1.04f) || !(vv>0.96f && vv<1.04f)) {
+        if (fields_log_now(&edge_log_us)) printf("Mouse: climbing aim fields unexpected (%.3f %.3f %.3f, rotation %.3f %.3f %.3f %.3f), mouse aims with the stick\n",
+                                                 v[0],v[1],v[2],q[0],q[1],q[2],q[3]);
+        return;
+    }
+    /* up: the previous Locator's rotation applied to (0, 1, 0) */
+    float up[3]={2.0f*(q[0]*q[1]-q[3]*q[2]),1.0f-2.0f*(q[0]*q[0]+q[2]*q[2]),2.0f*(q[1]*q[2]+q[3]*q[0])};
+    const float ul=SDL_sqrtf(dot3(up,up));
+    for (int i=0;i<3;++i) up[i]/=ul;
+    const uint64_t last_us=edge_hook_us;
+    edge_hook_us=now_us();
+    float dx, dy;
+    camera_take(4,&dx,&dy);
+    if (!last_us || edge_hook_us-last_us>250000) { /* aiming on a climb starts */
+        for (int i=0;i<3;++i) edge_start[i]=v[i];
+        edge_pending=0;
+    }
+    if (edge_pending) { /* how much of the last turn is still there */
+        float d[3], w[3];
+        for (int i=0;i<3;++i) { d[i]=v[i]-edge_before[i]; w[i]=edge_after[i]-edge_before[i]; }
+        float kept=dot3(d,w)/dot3(w,w);
+        kept=kept<0.0f ? 0.0f : kept>1.0f ? 1.0f : kept;
+        edge_kept+=0.2f*(kept-edge_kept);
+        const int direct=edge_kept<0.12f ? 0 : edge_kept>0.3f ? 1 : edge_direct;
+        if (direct!=edge_direct) printf("Mouse: climbing aim %s (kept %.2f)\n",direct ? "turns with the mouse" : "keeps no turns, mouse aims with the stick",edge_kept);
+        edge_direct=direct;
+        edge_pending=0;
+    }
+    float turn=dx*MOUSE_DEGREES_PER_PIXEL*mouse_sensitivity();
+    float pitch=(mouse_cfg.invert_y ? dy : -dy)*MOUSE_DEGREES_PER_PIXEL*mouse_sensitivity();
+    if (!edge_direct) { if (turn!=0.0f) turn=turn>0.0f ? 0.5f : -0.5f; pitch=0.0f; } /* a probe turn */
+    if (turn==0.0f && pitch==0.0f) return;
+    /* v = h cos(e) + up sin(e): h the horizontal direction (unit, across up), e the elevation */
+    float e=dot3(v,up);
+    e=e<-1.0f ? -1.0f : e>1.0f ? 1.0f : e;
+    float h[3]={v[0]-e*up[0],v[1]-e*up[1],v[2]-e*up[2]};
+    const float hl=SDL_sqrtf(dot3(h,h));
+    if (hl<1e-3f) return;
+    for (int i=0;i<3;++i) h[i]/=hl;
+    if (turn!=0.0f) { /* the same sense as aim_rotate around the world's y */
+        const float a=turn*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
+        const float side[3]={up[1]*h[2]-up[2]*h[1],up[2]*h[0]-up[0]*h[2],up[0]*h[1]-up[1]*h[0]};
+        float n[3];
+        for (int i=0;i<3;++i) n[i]=h[i]*c-side[i]*s;
+        float s0[3]={edge_start[0],edge_start[1],edge_start[2]};
+        const float se=dot3(s0,up);
+        for (int i=0;i<3;++i) s0[i]-=se*up[i];
+        if (dot3(n,s0)>=0.0f || dot3(n,s0)>=dot3(h,s0)) for (int i=0;i<3;++i) h[i]=n[i]; /* within 90 degrees of the start */
+    }
+    const float el_before=SDL_asinf(e)*57.29578f;
+    float el=el_before+pitch; /* never past 60 degrees by the mouse, but no snap from beyond */
+    if (el>60.0f) el=el_before>60.0f ? el_before : 60.0f;
+    if (el<-60.0f) el=el_before<-60.0f ? el_before : -60.0f;
+    const float r=el*0.017453293f, ch=SDL_cosf(r), sh=SDL_sinf(r);
+    float out[3];
+    for (int i=0;i<3;++i) out[i]=h[i]*ch+up[i]*sh;
+    for (int i=0;i<3;++i) edge_before[i]=v[i];
+    float *copy1=(float *)(uintptr_t)(camera+0x210), *copy2=(float *)(uintptr_t)(camera+0x230);
+    for (int i=0;i<3;++i) { v[i]=out[i]; copy1[i]=out[i]; copy2[i]=out[i]; edge_after[i]=out[i]; }
+    float w[3]={out[0]-edge_before[0],out[1]-edge_before[1],out[2]-edge_before[2]};
+    edge_pending=dot3(w,w)>=0.0026f*0.0026f;
+    if (mouse_debug()) printf("Mouse: climbing aim t=%.4f dx=%.1f dy=%.1f up=%.3f %.3f %.3f dir=%.3f %.3f %.3f->%.3f %.3f %.3f kept=%.2f%s\n",
+                              edge_hook_us*1e-6,dx,dy,up[0],up[1],up[2],edge_before[0],edge_before[1],edge_before[2],out[0],out[1],out[2],
+                              edge_kept,edge_direct ? "" : " stick");
 }
 /* U3 cover (camera-cover.cpp, the update at file 0x4d9bd0 in 1.02, 0x119060 in 1.00, its camera in rsi; fields found
  * by the GOW3_MOUSE_DISCOVER dumps): the orbit's horizontal look direction (x, 0, z) at +0x2f0 and
@@ -826,16 +1000,24 @@ static int cover_enabled(void) {
 static void cover_camera(uint64_t camera, size_t dir_at, size_t pitch_at, float lo, float hi) {
     if (!cover_enabled() || cover_off || !camera) return;
     float *dir=(float *)(uintptr_t)(camera+dir_at), *pitch=(float *)(uintptr_t)(camera+pitch_at);
-    const float len=dir[0]*dir[0]+dir[2]*dir[2];
-    if (!(len>0.92f && len<1.08f) || !(dir[1]>-0.01f && dir[1]<0.01f) || !(*pitch>=lo-7.0f && *pitch<=hi+7.0f)) {
-        if (++cover_bad>=30) {
-            cover_off=1;
-            printf("Mouse: cover camera fields unexpected (%.3f %.3f %.3f, pitch %.2f), cover uses the stick\n",
-                   dir[0],dir[1],dir[2],*pitch);
+    /* usually horizontal, but tilted in some covers (slopes, ledges: y up to 0.1 seen); taken while
+     * mostly horizontal, the tilt kept */
+    const float len=dir[0]*dir[0]+dir[1]*dir[1]+dir[2]*dir[2], flat=dir[0]*dir[0]+dir[2]*dir[2];
+    if (!(len>0.92f && len<1.08f) || !(flat>=0.49f) || !(*pitch>=lo-7.0f && *pitch<=hi+7.0f)) {
+        cover_good=0;
+        if (++cover_bad==30) {
+            cover_off=!cover_seen_ok;
+            if (cover_off || fields_log_now(&cover_log_us)) printf("Mouse: cover camera fields unexpected (%.3f %.3f %.3f, pitch %.2f), cover uses the stick%s\n",
+                   dir[0],dir[1],dir[2],*pitch,cover_off ? "" : " until they look right again");
         }
         return;
     }
-    cover_bad=0;
+    if (cover_bad>=30) {
+        if (++cover_good<FIELDS_GOOD_AGAIN) return;
+        if (fields_log_now(&cover_log_us)) printf("Mouse: cover camera fields as expected again\n");
+    }
+    cover_bad=cover_good=0;
+    cover_seen_ok=1;
     cover_hook_us=now_us();
     float dx, dy;
     camera_take(3,&dx,&dy);
@@ -856,8 +1038,8 @@ static void cover_camera(uint64_t camera, size_t dir_at, size_t pitch_at, float 
     if (turn!=0.0f) {
         const float a=turn*0.017453293f, c=SDL_cosf(a), sn=SDL_sinf(a);
         float x=dir[0]*c-dir[2]*sn, z=dir[0]*sn+dir[2]*c;
-        const float l=SDL_sqrtf(x*x+z*z);
-        dir[0]=x/l; dir[1]=0.0f; dir[2]=z/l;
+        const float l=SDL_sqrtf(x*x+z*z), h=SDL_sqrtf(1.0f-dir[1]*dir[1]); /* the tilt (y) stays */
+        dir[0]=x/l*h; dir[2]=z/l*h;
         if (SDL_fabsf(turn)>=0.15f) { cover_before=heading; cover_after=aim_heading(dir); cover_pending=1; }
     }
     if (up!=0.0f) {
@@ -885,38 +1067,42 @@ static void __attribute__((ms_abi)) u1_cover_camera(uint64_t rdi, uint64_t camer
 }
 static const RuntimeGuestCallback guest_callbacks[]={
     {"U1 follow camera (mouse)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 28 01 00 00 44 89 8d 00 ff ff ff "
-     "49 89 cd 48 89 d3 49 89 f7 49 89 fc 4c 8b 35 ?? ?? ?? ?? 49 8b",6,u1_follow_camera,NULL,0},
+     "49 89 cd 48 89 d3 49 89 f7 49 89 fc 4c 8b 35 ?? ?? ?? ?? 49 8b",6,u1_follow_camera,NULL,0,0},
     {"U1 pad update (mouse)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec b8 00 00 00 49 89 fe 4c 8b 2d ?? ?? ?? ?? 49 8b",
-     6,u1_pad_update,U1_STICKS,0x64e},
-    {"U1 joypad sticks (mouse)",U1_STICKS,5,u1_joypad_sticks,NULL,0},
+     6,u1_pad_update,U1_STICKS,0x64e,0},
+    {"U1 joypad sticks (mouse)",U1_STICKS,5,u1_joypad_sticks,NULL,0,0},
     {"U1 aim camera (mouse, 1.00 and 1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 68 02 00 00 49 89 d7 48 89 f3 "
-     "49 89 fe 4c ?? 2d",6,u1_aim_camera,NULL,0},
+     "49 89 fe 4c ?? 2d",6,u1_aim_camera,NULL,0,0},
     {"U1 cover camera (mouse, 1.00 and 1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 88 01 00 00 49 89 d7 48 89 f3 "
-     "49 89 fe 4c ?? 25 ?? ?? ?? ?? 49 8b 04 24",6,u1_cover_camera,NULL,0},
+     "49 89 fe 4c ?? 25 ?? ?? ?? ?? 49 8b 04 24",6,u1_cover_camera,NULL,0,0},
     {"U2 follow camera (mouse, 1.00)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 48 01 00 00 44 89 8d 18 ff ff ff "
-     "48 89 8d c8 fe ff ff 49 89 d5 4c 89 ad 38 ff ff ff 48 89 f3 49",6,u2_follow_camera,NULL,0},
+     "48 89 8d c8 fe ff ff 49 89 d5 4c 89 ad 38 ff ff ff 48 89 f3 49",6,u2_follow_camera,NULL,0,0},
     {"U2 follow camera (mouse, 1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 28 01 00 00 45 89 cc 48 89 8d f8 fe ff ff "
-     "49 89 d6 49 89 fd 48 8b 55 20 4c 8b 7d 18 48 8b 45 28",6,u2_follow_camera,NULL,0},
+     "49 89 d6 49 89 fd 48 8b 55 20 4c 8b 7d 18 48 8b 45 28",6,u2_follow_camera,NULL,0,0},
     {"U2 cover camera (mouse, 1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 68 01 00 00 49 89 d7 48 89 f3 "
-     "49 89 fe 4c ?? 2d",6,u2_cover_camera,NULL,0},
+     "49 89 fe 4c ?? 2d",6,u2_cover_camera,NULL,0,0},
     {"U2 cover camera (mouse, 1.00)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec a8 01 00 00 49 89 d7 49 89 f5 "
-     "49 89 fe 4c ?? 25",6,u2_cover_camera,NULL,0},
+     "49 89 fe 4c ?? 25",6,u2_cover_camera,NULL,0,0},
     {"U2 aim camera (mouse, 1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec d8 01 00 00 49 89 f6 49 89 ff "
-     "4c ?? 2d ?? ?? ?? ?? 49 8b 45",6,u2_aim_camera,NULL,0},
+     "4c ?? 2d ?? ?? ?? ?? 49 8b 45",6,u2_aim_camera,NULL,0,0},
     {"U2 aim camera (mouse, 1.00)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 38 01 00 00 49 89 f6 49 89 ff "
-     "4c ?? 2d ?? ?? ?? ?? 49 8b 45 00 48 89 45 d0 e8 92 1b",6,u2_aim_camera_100,NULL,0},
+     "4c ?? 2d ?? ?? ?? ?? 49 8b 45 00 48 89 45 d0 e8 92 1b",6,u2_aim_camera_100,NULL,0,0},
     {"U3 follow camera (mouse, 1.00)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec d8 01 00 00 44 89 8d a0 fe ff ff "
-     "48 89 8d 48 fe ff ff 49 89 d5 48 89 f3 49 89 ff 4c 8b 65 20 4c",6,u3_follow_camera,NULL,0},
+     "48 89 8d 48 fe ff ff 49 89 d5 48 89 f3 49 89 ff 4c 8b 65 20 4c",6,u3_follow_camera,NULL,0,0},
     {"U3 follow camera (mouse, 1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec b8 01 00 00 45 89 cc 48 89 8d 68 fe ff ff "
-     "49 89 d6 49 89 fd 48 8b 55 20 48 8b 45 28 48 8d 0d ?? ?? ?? ??",6,u3_follow_camera,NULL,0},
+     "49 89 d6 49 89 fd 48 8b 55 20 48 8b 45 28 48 8d 0d ?? ?? ?? ??",6,u3_follow_camera,NULL,0,0},
     {"U3 cover camera (mouse, 1.00)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec b8 02 00 00 48 89 d3 49 89 f4 "
-     "49 89 fe 48 ?? 05",6,u3_cover_camera,NULL,0},
+     "49 89 fe 48 ?? 05",6,u3_cover_camera,NULL,0,0},
     {"U3 cover camera (mouse, 1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 38 02 00 00 48 89 d3 49 89 f6 "
-     "49 89 ff 48 8d 05 ?? ?? ?? ?? 48 8b 00 48",6,u3_cover_camera,NULL,0},
+     "49 89 ff 48 8d 05 ?? ?? ?? ?? 48 8b 00 48",6,u3_cover_camera,NULL,0,0},
     {"U3 aim camera (mouse, 1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec c8 00 00 00 49 89 f6 48 89 fb "
-     "4c 8d 25 ?? ?? ?? ?? 49 8b 04 24",6,u3_aim_camera,NULL,0},
+     "4c 8d 25 ?? ?? ?? ?? 49 8b 04 24",6,u3_aim_camera,NULL,0,0},
+    {"U3 climbing aim camera (mouse, 1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 18 02 00 00 48 89 d3 49 89 f6 "
+     "49 89 fc 48 8d 15 ?? ?? ?? ?? 48 8b 02 48 89 45 d0 49 8b 86 b0 00",6,u3_edge_aim_camera,NULL,0,1},
+    {"U3 aim camera update (mouse, 1.02)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec b8 02 00 00 49 89 d6 49 89 f7 48 89 fb "
+     "4c 8d 2d ?? ?? ?? ?? 49 8b 45 00 48 89 45 d0 49 63 87 e4 00 00 00",6,u3_aim_camera_update,NULL,0,0},
     {"U3 aim camera (mouse, 1.00)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 68 49 89 f6 48 89 fb "
-     "4c ?? 2d ?? ?? ?? ?? 49 8b 45 00 48 89 45 d0 e8 25",6,u3_aim_camera_100,NULL,0},
+     "4c ?? 2d ?? ?? ?? ?? 49 8b 45 00 48 89 45 d0 e8 25",6,u3_aim_camera_100,NULL,0,0},
 };
 /* GOW3_MOUSE_DISCOVER=1 (diagnostics): finds the aiming and cover cameras. In 1.02: U3 A-E
  * (CameraControlZoom A-C, camera-cover.cpp D-E), U1 aiming F-I, U2 cover J-M and aiming N-S; in
@@ -925,16 +1111,21 @@ static const RuntimeGuestCallback guest_callbacks[]={
  * argument; while aiming or with the follow camera not running (over 100 ms), each writes the
  * first 0x8000 bytes (as far as mapped) of its first and second arguments' objects to
  * GOW3_MOUSE_DISCOVER_FILE (default mouse_discover.bin) at most every 30 ms, 800 times per function.
+ * UC3 1.02 hanging cameras 1-9 (CameraEdgeAim 1, now hooked; other hanging aim candidates 2-8:
+ * MonkeyBars 2-3, FreeRope 4-5, Spider 6, CameraLookAround 7, CameraControlStick 8; CameraControlEdge
+ * 9): 0x2000 bytes, every 50 ms, 1500 times; 2-8 only while L2 is held with the follow, aim and climbing
+ * aim hooks all silent (over 100 ms), 1 and 9 also while 1 or 9 ran in the last 100 ms.
  * Record: "MDSC", function (| 0x40 for the second argument) | (aiming | follow off << 1) << 8 |
  * right stick x << 16 | y << 24 (U1: with the mouse in it), time (us), object address, size, bytes. */
 static uint8_t last_right[2]={128,128};
-#define DISCOVER_FUNCTIONS 26
+#define DISCOVER_FUNCTIONS 35
 static struct { uint64_t calls, aim_calls, rdi, last_dump_us; unsigned dumps; } discover[DISCOVER_FUNCTIONS];
-static uint64_t discover_second_us;
+static uint64_t discover_second_us, discover_edge_us;
+static char discover_label(int f) { return f<DISCOVER_EDGE ? (char)('A'+f) : (char)('1'+f-DISCOVER_EDGE); }
 static pthread_mutex_t discover_lock=PTHREAD_MUTEX_INITIALIZER;
 /* One record of the object at `at` (0 when it is not mapped memory). */
 static int discover_dump(FILE *out, int f, uint64_t at, uint64_t now, int follow_off_now) {
-    uint32_t size=at>=0x10000 ? 0x8000 : 0;
+    uint32_t size=at>=0x10000 ? ((f&0x3f)>=DISCOVER_EDGE ? 0x2000 : 0x8000) : 0;
 #ifdef _WIN32
     MEMORY_BASIC_INFORMATION info;
     if (!size || !VirtualQuery((void *)(uintptr_t)at,&info,sizeof(info)) || info.State!=MEM_COMMIT ||
@@ -968,7 +1159,7 @@ static void discover_call(int f, uint64_t rdi, uint64_t rsi) {
         int n=snprintf(line,sizeof(line),"Mouse discover: aim=%d follow=%d",aim_held,camera_hook_us && now-camera_hook_us<100000);
         for (int i=0;i<DISCOVER_FUNCTIONS && n<(int)sizeof(line);++i) {
             if (!discover[i].calls && !discover[i].rdi) continue; /* not installed in this game */
-            n+=snprintf(line+n,sizeof(line)-n,"  %c %llu/%llu rdi=%#llx",'A'+i,(unsigned long long)discover[i].calls,
+            n+=snprintf(line+n,sizeof(line)-n,"  %c %llu/%llu rdi=%#llx",discover_label(i),(unsigned long long)discover[i].calls,
                         (unsigned long long)discover[i].aim_calls,(unsigned long long)discover[i].rdi);
         }
         puts(line);
@@ -977,7 +1168,13 @@ static void discover_call(int f, uint64_t rdi, uint64_t rsi) {
     }
     static FILE *out;
     const int follow_off_now=!(camera_hook_us && now-camera_hook_us<100000);
-    if ((aim_held || follow_off_now) && rdi && discover[f].dumps<800 && now-discover[f].last_dump_us>=30000) {
+    const int edge=f>=DISCOVER_EDGE;
+    if (f==DISCOVER_EDGE || f==DISCOVER_EDGE+8) discover_edge_us=now;
+    const int hanging=f>DISCOVER_EDGE && f<DISCOVER_EDGE+8; /* the other hanging aim candidates */
+    const int want=hanging ? aim_held && follow_off_now && !(aim_hook_us && now-aim_hook_us<100000) &&
+                             !(edge_hook_us && now-edge_hook_us<100000)
+                           : aim_held || follow_off_now || (edge && now-discover_edge_us<100000);
+    if (want && rdi && discover[f].dumps<(edge ? 1500u : 800u) && now-discover[f].last_dump_us>=(edge ? 50000u : 30000u)) {
         if (!out) {
             const char *path=getenv("GOW3_MOUSE_DISCOVER_FILE");
             out=fopen(path && *path ? path : "mouse_discover.bin","wb");
@@ -986,7 +1183,7 @@ static void discover_call(int f, uint64_t rdi, uint64_t rsi) {
         if (discover_dump(out,f|0x40,rsi,now,follow_off_now) || wrote) {
             fflush(out);
             discover[f].last_dump_us=now;
-            if (++discover[f].dumps==800) printf("Mouse discover: function %c dumps done\n",'A'+f);
+            if (++discover[f].dumps==(edge ? 1500u : 800u)) printf("Mouse discover: function %c dumps done\n",discover_label(f));
         }
     }
     pthread_mutex_unlock(&discover_lock);
@@ -999,73 +1196,203 @@ DISCOVER_CALLBACK(discover_m,12) DISCOVER_CALLBACK(discover_n,13) DISCOVER_CALLB
 DISCOVER_CALLBACK(discover_q,16) DISCOVER_CALLBACK(discover_r,17) DISCOVER_CALLBACK(discover_s,18)
 DISCOVER_CALLBACK(discover_t,19) DISCOVER_CALLBACK(discover_u,20) DISCOVER_CALLBACK(discover_v,21)
 DISCOVER_CALLBACK(discover_w,22) DISCOVER_CALLBACK(discover_x,23) DISCOVER_CALLBACK(discover_y,24) DISCOVER_CALLBACK(discover_z,25)
+DISCOVER_CALLBACK(discover_1,26) DISCOVER_CALLBACK(discover_2,27) DISCOVER_CALLBACK(discover_3,28)
+DISCOVER_CALLBACK(discover_4,29) DISCOVER_CALLBACK(discover_5,30) DISCOVER_CALLBACK(discover_6,31)
+DISCOVER_CALLBACK(discover_7,32) DISCOVER_CALLBACK(discover_9,34)
+/* 8 (CameraControlStick, a modifier other cameras call through their vtables): also counts its callers'
+ * return addresses (image offsets) per second, apart while L2 is held with the follow, aim and
+ * climbing aim hooks silent, and logs them with the image-pointing qwords just below its rdi. */
+static void __attribute__((ms_abi)) discover_8(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t ret) {
+    discover_call(33,rdi,rsi);
+    /* the caller's callers: the guest keeps rbp frames (push rbp; mov rbp, rsp), [rbp+8] their returns */
+    uint64_t chain[5]={0};
+    uint64_t frame=runtime_guest_rbp;
+    for (int d=0;d<5 && frame>=0x10000 && !(frame&7);++d) {
+#ifdef _WIN32
+        MEMORY_BASIC_INFORMATION info;
+        if (!VirtualQuery((void *)(uintptr_t)frame,&info,sizeof(info)) || info.State!=MEM_COMMIT ||
+            (info.Protect & (PAGE_NOACCESS|PAGE_GUARD)) || frame+16>(uint64_t)(uintptr_t)info.BaseAddress+info.RegionSize) break;
+#endif
+        const uint64_t r=((const uint64_t *)(uintptr_t)frame)[1], next=((const uint64_t *)(uintptr_t)frame)[0];
+        if (r<image || r>=image+0x4000000) break;
+        chain[d]=r-image;
+        if (next<=frame) break;
+        frame=next;
+    }
+    static struct { uint64_t at, calls, slow, rdi, chain[5]; } seen[16];
+    static uint64_t second_us;
+    const uint64_t now=now_us();
+    const int slow=aim_held && !(camera_hook_us && now-camera_hook_us<100000) && !(aim_hook_us && now-aim_hook_us<100000) &&
+                   !(edge_hook_us && now-edge_hook_us<100000);
+    pthread_mutex_lock(&discover_lock);
+    const uint64_t at=ret-image;
+    int i=0;
+    while (i<16 && seen[i].at && (seen[i].at!=at || memcmp(seen[i].chain,chain,sizeof(chain)))) ++i;
+    if (i<16) { seen[i].at=at; ++seen[i].calls; seen[i].slow+=slow; seen[i].rdi=rdi; memcpy(seen[i].chain,chain,sizeof(chain)); }
+    if (!second_us) second_us=now;
+    if (now-second_us>=1000000) {
+        second_us=now;
+        for (int j=0;j<16 && seen[j].at;++j) {
+            if (!seen[j].calls) continue;
+            char line[512];
+            int n=snprintf(line,sizeof(line),"Mouse discover: 8 return img %#llx calls %llu slow %llu rdi %#llx",(unsigned long long)seen[j].at,
+                           (unsigned long long)seen[j].calls,(unsigned long long)seen[j].slow,(unsigned long long)seen[j].rdi);
+            n+=snprintf(line+n,sizeof(line)-n," chain");
+            for (int d=0;d<5 && seen[j].chain[d];++d) n+=snprintf(line+n,sizeof(line)-n," %#llx",(unsigned long long)seen[j].chain[d]);
+            uint64_t r=seen[j].rdi;
+#ifdef _WIN32
+            MEMORY_BASIC_INFORMATION info; /* only below rdi within its mapped region */
+            if (r<0x10200 || !VirtualQuery((void *)(uintptr_t)(r-0x200),&info,sizeof(info)) || info.State!=MEM_COMMIT ||
+                (info.Protect & (PAGE_NOACCESS|PAGE_GUARD)) || (uint64_t)(uintptr_t)info.BaseAddress+info.RegionSize<r) r=0;
+#endif
+            for (uint64_t o=0x10;o<=0x200 && r>=0x10000+o && n<(int)sizeof(line)-40;o+=8) {
+                const uint64_t q=*(const uint64_t *)(uintptr_t)(r-o);
+                if (q>=image && q<image+0x4000000) n+=snprintf(line+n,sizeof(line)-n," [-%#llx]=img %#llx",(unsigned long long)o,(unsigned long long)(q-image));
+            }
+            puts(line);
+            seen[j].calls=seen[j].slow=0;
+        }
+    }
+    pthread_mutex_unlock(&discover_lock);
+}
 static const RuntimeGuestCallback discover_callbacks[]={
     {"U3 zoom camera A (discover, file 0x5161c0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec b8 02 00 00 49 89 d5 49 89 f7 "
-     "49 89 fc 48 8d 05 ?? ?? ?? ?? 48 8b 00 48",6,discover_a,NULL,0},
+     "49 89 fc 48 8d 05 ?? ?? ?? ?? 48 8b 00 48",6,discover_a,NULL,0,0},
     {"U3 zoom camera B (discover, file 0x5197e0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec c8 09 00 00 45 89 c6 48 89 b5 "
-     "90 f6 ff ff 49 89 ff 4c 8d 25 ?? ?? ?? ??",6,discover_b,NULL,0},
+     "90 f6 ff ff 49 89 ff 4c 8d 25 ?? ?? ?? ??",6,discover_b,NULL,0,0},
     {"U3 zoom camera C (discover, file 0x515cc0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec c8 00 00 00 49 89 f6 48 89 fb "
-     "4c 8d 25 ?? ?? ?? ?? 49 8b 04 24",6,discover_c,NULL,0},
+     "4c 8d 25 ?? ?? ?? ?? 49 8b 04 24",6,discover_c,NULL,0,0},
     {"U3 cover camera D (discover, file 0x4d9bd0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 38 02 00 00 48 89 d3 49 89 f6 "
-     "49 89 ff 48 8d 05 ?? ?? ?? ?? 48 8b 00 48",6,discover_d,NULL,0},
+     "49 89 ff 48 8d 05 ?? ?? ?? ?? 48 8b 00 48",6,discover_d,NULL,0,0},
     {"U3 cover camera E (discover, file 0x4d85a0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 58 49 89 d7 48 89 f3 49 89 fe "
-     "4c 8d 25 ?? ?? ?? ?? 49 8b 04 24 48 89 45",6,discover_e,NULL,0},
+     "4c 8d 25 ?? ?? ?? ?? 49 8b 04 24 48 89 45",6,discover_e,NULL,0,0},
     /* U1 aiming (camerazoom.cpp), eboot.bin 1.02 file offsets */
     {"U1 zoom camera F (discover, file 0xc6b30)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 08 09 00 00 89 95 0c f7 ff ff "
-     "49 89 f7 49 89 fc 4c ?? 35",6,discover_f,NULL,0},
+     "49 89 f7 49 89 fc 4c ?? 35",6,discover_f,NULL,0,0},
     {"U1 zoom camera G (discover, file 0xc95c0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 68 02 00 00 49 89 d7 48 89 f3 "
-     "49 89 fe 4c ?? 2d",6,discover_g,NULL,0},
+     "49 89 fe 4c ?? 2d",6,discover_g,NULL,0,0},
     {"U1 zoom camera H (discover, file 0xc6140)","55 48 89 e5 41 57 41 56 53 48 83 ec 68 48 89 fb 4c ?? 3d ?? ?? ?? ?? "
-     "49 8b 07 48 89 45 e0 48 c7 83 80 18 00",6,discover_h,NULL,0},
+     "49 8b 07 48 89 45 e0 48 c7 83 80 18 00",6,discover_h,NULL,0,0},
     {"U1 zoom camera I (discover, file 0xc2420)","55 48 89 e5 41 57 41 56 41 54 53 48 83 ec 70 45 89 c7 48 89 d3 49 89 fe "
-     "4c ?? 25 ?? ?? ?? ?? 49 8b 04 24 48",6,discover_i,NULL,0},
+     "4c ?? 25 ?? ?? ?? ?? 49 8b 04 24 48",6,discover_i,NULL,0,0},
     /* U2 cover (cameracover.cpp and neighbours), big2 1.02 file offsets */
     {"U2 cover camera J (discover, file 0x41fc80)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 68 01 00 00 49 89 d7 48 89 f3 "
-     "49 89 fe 4c ?? 2d",6,discover_j,NULL,0},
+     "49 89 fe 4c ?? 2d",6,discover_j,NULL,0,0},
     {"U2 cover camera K (discover, file 0x41c150)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 e4 e0 ff ff ff 48 81 ec 80 02 00 00 "
-     "49 89 f7 48 89 fb 4c ?? 2d",6,discover_k,NULL,0},
+     "49 89 f7 48 89 fb 4c ?? 2d",6,discover_k,NULL,0,0},
     {"U2 cover camera L (discover, file 0x418540)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 28 01 00 00 49 89 d7 48 89 f3 "
-     "49 89 fe 48 ?? 05 ?? ?? ?? ?? 48 8b 00 48 89 45 d0 bf",6,discover_l,NULL,0},
+     "49 89 fe 48 ?? 05 ?? ?? ?? ?? 48 8b 00 48 89 45 d0 bf",6,discover_l,NULL,0,0},
     {"U2 cover camera M (discover, file 0x4198d0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 e4 e0 ff ff ff 48 81 ec a0 02 00 00 "
-     "48 89 f3 49 89 fe 48 ?? 05",6,discover_m,NULL,0},
+     "48 89 f3 49 89 fe 48 ?? 05",6,discover_m,NULL,0,0},
     /* U2 aiming (camerazoom.cpp), big2 1.02 file offsets */
     {"U2 zoom camera N (discover, file 0x455020)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 98 01 00 00 48 89 f3 49 89 ff "
-     "4c ?? 25 ?? ?? ?? ?? 49 8b 04",6,discover_n,NULL,0},
+     "4c ?? 25 ?? ?? ?? ?? 49 8b 04",6,discover_n,NULL,0,0},
     {"U2 zoom camera O (discover, file 0x4579b0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec e8 08 00 00 41 89 d7 48 89 fb "
-     "4c ?? 35 ?? ?? ?? ?? 49 8b 06",6,discover_o,NULL,0},
+     "4c ?? 35 ?? ?? ?? ?? 49 8b 06",6,discover_o,NULL,0,0},
     {"U2 zoom camera P (discover, file 0x459670)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec d8 01 00 00 49 89 f6 49 89 ff "
-     "4c ?? 2d ?? ?? ?? ?? 49 8b 45",6,discover_p,NULL,0},
+     "4c ?? 2d ?? ?? ?? ?? 49 8b 45",6,discover_p,NULL,0,0},
     {"U2 zoom camera Q (discover, file 0x45b480)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 98 01 00 00 49 89 d6 49 89 f7 "
-     "48 89 fb 4c ?? 2d",6,discover_q,NULL,0},
+     "48 89 fb 4c ?? 2d",6,discover_q,NULL,0,0},
     {"U2 zoom camera R (discover, file 0x456800)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec c8 00 00 00 48 89 f3 49 89 fe "
-     "4c ?? 25 ?? ?? ?? ?? 49 8b 04 24 48 89 45 d0 c5 f8 57",6,discover_r,NULL,0},
+     "4c ?? 25 ?? ?? ?? ?? 49 8b 04 24 48 89 45 d0 c5 f8 57",6,discover_r,NULL,0,0},
     {"U2 zoom camera S (discover, file 0x45d1c0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 78 01 00 00 48 89 cb 89 95 "
-     "dc fe ff ff 41 89 f4 49 89 ff 4c",6,discover_s,NULL,0},
+     "dc fe ff ff 41 89 f4 49 89 ff 4c",6,discover_s,NULL,0,0},
     /* 1.00 aiming candidates (base game file offsets) */
     {"U3 zoom camera T (discover, 1.00 file 0x13fa60)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 68 49 89 f6 48 89 fb "
-     "4c ?? 2d ?? ?? ?? ?? 49 8b 45 00 48 89 45 d0 e8 25",6,discover_t,NULL,0},
+     "4c ?? 2d ?? ?? ?? ?? 49 8b 45 00 48 89 45 d0 e8 25",6,discover_t,NULL,0,0},
     {"U2 zoom camera U (discover, 1.00 file 0x194270)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 38 01 00 00 49 89 f6 49 89 ff "
-     "4c ?? 2d ?? ?? ?? ?? 49 8b 45 00 48 89 45 d0 e8 92 1b",6,discover_u,NULL,0},
+     "4c ?? 2d ?? ?? ?? ?? 49 8b 45 00 48 89 45 d0 e8 92 1b",6,discover_u,NULL,0,0},
     {"U2 zoom camera V (discover, 1.00 file 0x1947c0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 88 02 00 00 48 89 d3 49 89 f7 "
-     "49 89 fe 4c ?? 2d",6,discover_v,NULL,0},
+     "49 89 fe 4c ?? 2d",6,discover_v,NULL,0,0},
     /* U1 cover (CameraControlCover), eboot.bin file offsets 1.02 / 1.00; each pattern fits both */
     {"U1 cover camera W (discover, file 0xa9880 / 0xa9980)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 88 01 00 00 49 89 d7 48 89 f3 "
-     "49 89 fe 4c ?? 25 ?? ?? ?? ?? 49 8b 04 24",6,discover_w,NULL,0},
+     "49 89 fe 4c ?? 25 ?? ?? ?? ?? 49 8b 04 24",6,discover_w,NULL,0,0},
     {"U1 cover camera X (discover, file 0xa9150 / 0xa9250)","55 48 89 e5 41 57 41 56 41 54 53 48 83 ec 30 49 89 f6 48 89 fb "
-     "4c ?? 3d ?? ?? ?? ?? 49 8b 07 48 89 45 d8 49",6,discover_x,NULL,0},
+     "4c ?? 3d ?? ?? ?? ?? 49 8b 07 48 89 45 d8 49",6,discover_x,NULL,0,0},
     {"U1 cover camera Y (discover, file 0xa7f60 / 0xa8070)","55 48 89 e5 41 57 41 56 53 48 81 ec 88 00 00 00 48 89 fb "
-     "4c ?? 3d ?? ?? ?? ?? 49 8b 07 48 89 45 e0 89 93 e0",6,discover_y,NULL,0},
+     "4c ?? 3d ?? ?? ?? ?? 49 8b 07 48 89 45 e0 89 93 e0",6,discover_y,NULL,0,0},
     {"U1 cover camera Z (discover, file 0xaa910 / 0xaaa00)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 58 01 00 00 49 89 d7 49 89 f4 "
-     "49 89 fe 48 ?? 05 ?? ?? ?? ?? 48 8b 00 48",6,discover_z,NULL,0},
+     "49 89 fe 48 ?? 05 ?? ?? ?? ?? 48 8b 00 48",6,discover_z,NULL,0,0},
+    /* UC3 1.02 climbing aim (big3 1.02 file offsets): CameraEdgeAim, the player's edge aim, CameraControlEdge */
+    {"U3 edge aim camera 1 (discover, file 0x4dbf00)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 18 02 00 00 48 89 d3 49 89 f6 "
+     "49 89 fc 48 8d 15 ?? ?? ?? ?? 48 8b 02 48 89 45 d0 49 8b 86 b0 00",6,discover_1,NULL,0,0},
+    {"U3 MonkeyBars 2 (discover, file 0x50a000)","55 48 89 e5 41 57 41 56 53 48 83 ec 78 49 89 f6 48 89 fb 48 8b 83 b0 00 00 00 "
+     "48 8b 00 8b 48 7c 3b 8b b8 00 00 00 74 02 31 c0",6,discover_2,NULL,0,0},
+    {"U3 MonkeyBars 3 (discover, file 0x509cf0)","55 48 89 e5 41 57 41 56 41 54 53 48 83 ec 10 48 89 d3 49 89 f7 49 89 fe "
+     "4c 8d 25 ?? ?? ?? ?? 49 8b 04 24 48 89 45 d8 48 8d 7d d0 e8",6,discover_3,NULL,0,0},
+    {"U3 FreeRope 4 (discover, file 0x4f93f0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 68 48 89 f3 49 89 fe "
+     "4c 8d 3d ?? ?? ?? ?? 49 8b 07 48 89 45 d0 48 8b 83 b0 00 00 00",6,discover_4,NULL,0,0},
+    {"U3 FreeRope 5 (discover, file 0x4f64e0)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 38 02 00 00 48 89 fb "
+     "4c 8d 25 ?? ?? ?? ?? 49 8b 04 24 48 89 45 d0 c5 f8 28 06 c5 f8",6,discover_5,NULL,0,0},
+    {"U3 Spider 6 (discover, file 0x510550)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 e4 e0 ff ff ff 48 81 ec 60 01 00 00 "
+     "4d 89 c7 49 89 ce 48 89 54 24 38 49 89 f5 48 89 7c",6,discover_6,NULL,0,0},
+    {"U3 CameraLookAround 7 (discover, file 0x4fd350)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 e4 e0 ff ff ff 48 81 ec 60 02 00 00 "
+     "48 89 d3 49 89 f7 49 89 fe 48 8d 05 ?? ?? ?? ?? 48",6,discover_7,NULL,0,0},
+    {"U3 CameraControlStick 8 (discover, file 0x4fa880)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 78 48 89 cb 49 89 ff "
+     "48 8d 3d ?? ?? ?? ?? 48 8b 07 48 89 45 d0 c5 f8 28 03 c4 c1 78",6,discover_8,NULL,0,2},
+    {"U3 edge camera 9 (discover, file 0x4ddc10)","55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 08 01 00 00 48 89 f3 "
+     "48 8d 05 ?? ?? ?? ?? 48 8b 00 48 89 45 d0 48 8b 42 10 48 89 45 80 48 8b 02",6,discover_9,NULL,0,0},
 };
+/* GOW3_MOUSE_CAMERA_LOG=1 (diagnostics, UC3 1.02): which camera controls run. The blend tree (big3
+ * file 0x10246f0, recursive) calls each active control's UpdateLocation through vtable slot +0x150 with
+ * the control in r14; hooked at the two loads (file 0x102498b, read by Opus). Logs each update function
+ * the first time it runs, then once a second every one that ran with its calls, how many of them came
+ * while L2 was held with the follow, aim and climbing aim hooks silent ("slow"), and whether the mouse
+ * has a hook for it. */
+static void __attribute__((ms_abi)) u3_camera_census(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t control) {
+    (void)unused0; (void)unused1;
+    if (control<0x10000) return;
+    const uint64_t vt=*(const uint64_t *)(uintptr_t)control;
+    if (vt<image || vt>=image+0x4000000) return;
+    const uint64_t fn=*(const uint64_t *)(uintptr_t)(vt+0x150);
+    static struct { uint64_t fn, vt, calls, slow; } seen[32];
+    static uint64_t second_us;
+    static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
+    const uint64_t now=now_us();
+    const int slow=aim_held && !(camera_hook_us && now-camera_hook_us<100000) && !(aim_hook_us && now-aim_hook_us<100000) &&
+                   !(edge_hook_us && now-edge_hook_us<100000);
+    /* the update functions the mouse hooks (image offsets in 1.02): follow, cover, climbing aim */
+    static const uint64_t hooked[]={0x4e7880,0x4e7970,0x4ce080,0x4d03b0,0x4e8e40,0x4d4510,0x513890}; /* follow (0x4e8e40 calls it), cover, climbing aim, edge (calls follow), zoom update */
+    pthread_mutex_lock(&lock);
+    int i=0;
+    while (i<32 && seen[i].fn && seen[i].fn!=fn-image) ++i;
+    if (i<32) {
+        if (!seen[i].fn) {
+            seen[i].fn=fn-image; seen[i].vt=vt-image;
+            int mouse=0;
+            for (size_t h=0;h<sizeof(hooked)/sizeof(*hooked);++h) mouse|=seen[i].fn==hooked[h];
+            printf("Mouse cameras: new update img %#llx (file %#llx) vtable img %#llx%s%s\n",(unsigned long long)seen[i].fn,
+                   (unsigned long long)(seen[i].fn+0xbb50),(unsigned long long)seen[i].vt,mouse ? " mouse" : " NO MOUSE",slow ? " (slow)" : "");
+        }
+        ++seen[i].calls; seen[i].slow+=slow;
+    }
+    if (!second_us) second_us=now;
+    if (now-second_us>=1000000) {
+        second_us=now;
+        char line[1024];
+        int n=snprintf(line,sizeof(line),"Mouse cameras: aim=%d",aim_held);
+        for (int j=0;j<32 && seen[j].fn && n<(int)sizeof(line)-64;++j) {
+            if (!seen[j].calls) continue;
+            n+=snprintf(line+n,sizeof(line)-n,"  %#llx %llu/%llu",(unsigned long long)seen[j].fn,(unsigned long long)seen[j].calls,(unsigned long long)seen[j].slow);
+            seen[j].calls=seen[j].slow=0;
+        }
+        puts(line);
+    }
+    pthread_mutex_unlock(&lock);
+}
+static const RuntimeGuestCallback census_callback=
+    {"U3 camera census (1.02, file 0x102498b)","49 8b 06 48 8b 80 50 01 00 00 c4 c1 7a 10 a6 08 01 00 00 c4 c1 7a 10 ae 0c 01 00 00",
+     10,u3_camera_census,NULL,0,0};
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
-    static RuntimeGuestCallback all[sizeof(guest_callbacks)/sizeof(*guest_callbacks)+sizeof(discover_callbacks)/sizeof(*discover_callbacks)];
+    static RuntimeGuestCallback all[sizeof(guest_callbacks)/sizeof(*guest_callbacks)+sizeof(discover_callbacks)/sizeof(*discover_callbacks)+1];
     size_t n=0;
     for (size_t i=0;i<sizeof(guest_callbacks)/sizeof(*guest_callbacks);++i)
         all[n++]=guest_callbacks[i];
     const char *on=getenv("GOW3_MOUSE_DISCOVER");
     if (on && on[0]=='1')
         for (size_t i=0;i<sizeof(discover_callbacks)/sizeof(*discover_callbacks);++i) all[n++]=discover_callbacks[i];
+    const char *census=getenv("GOW3_MOUSE_CAMERA_LOG");
+    if (census && census[0]=='1') all[n++]=census_callback;
     *count=n;
     return all;
 }
@@ -1137,8 +1464,12 @@ static void sample_host(PadData *d) {
         /* A trigger mapped to another button (pad.r1=lefttrigger) no longer presses L2/R2; mapped to
          * its own (pad.l2=lefttrigger, as the launcher writes) it stays analog. */
         bool trigger_mapped[2]={false,false};
-        const uint8_t triggers[2]={trigger(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFT_TRIGGER)),
-                                   trigger(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))};
+        uint8_t triggers[2]={trigger(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFT_TRIGGER)),
+                             trigger(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))};
+        /* Menu shortcut L2+R2+L3+R3 (gow3_overlay.cpp): with both sticks clicked the triggers stay
+         * out of the game, so forming the shortcut does not aim or fire. */
+        if (SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_LEFT_STICK) &&
+            SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_RIGHT_STICK)) triggers[0]=triggers[1]=0;
         for (size_t i=0;i<pad_map.count;++i) {
             const int source=pad_map.entries[i].source;
             if (source==SRC_TRIGGER_LEFT || source==SRC_TRIGGER_RIGHT) {
@@ -1190,12 +1521,28 @@ static void sample_host(PadData *d) {
     const int joypad=sticks_hook_us && now-sticks_hook_us<100000;
     const int aiming=aim_hook_us && now-aim_hook_us<100000;
     const int covering=!cover_off && cover_hook_us && now-cover_hook_us<100000 && !following;
-    for (int q=0;q<4;++q) {
-        if (captured && (q==2 ? aiming : q==3 ? covering : following || joypad)) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
+    const int edging=edge_hook_us && now-edge_hook_us<100000;
+    for (int q=0;q<5;++q) {
+        if (captured && (q==2 ? aiming : q==3 ? covering : q==4 ? edging : following || joypad)) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
         else { camera_dx[q]=camera_dy[q]=0; }
     }
     pthread_mutex_unlock(&camera_lock);
-    const int aim_turns=(aim_held && aiming && aim_direct) || (!aim_held && covering && cover_direct);
+    /* GOW3_MOUSE_DEBUG: the mouse is a stick while aiming (aim camera hook silent or keeping no
+     * turns), with the age of each camera hook; at most once a second. */
+    if (mouse_debug() && captured && aim_held && !(aiming && aim_direct) && !(edging && edge_direct)) {
+        static uint64_t stick_log_us;
+        if (!stick_log_us || now-stick_log_us>=1000000) {
+            stick_log_us=now;
+            const long long ms_follow=camera_hook_us ? (long long)(now-camera_hook_us)/1000 : -1;
+            const long long ms_aim=aim_hook_us ? (long long)(now-aim_hook_us)/1000 : -1;
+            const long long ms_cover=cover_hook_us ? (long long)(now-cover_hook_us)/1000 : -1;
+            const long long ms_edge=edge_hook_us ? (long long)(now-edge_hook_us)/1000 : -1;
+            printf("Mouse: aiming with the stick: hooks follow %lld ms, aim %lld ms (direct %d, bad %d, off %d), "
+                   "cover %lld ms, climbing aim %lld ms (direct %d) ago\n",ms_follow,ms_aim,(int)aim_direct,aim_bad,aim_off,ms_cover,
+                   ms_edge,(int)edge_direct);
+        }
+    }
+    const int aim_turns=(aim_held && aiming && aim_direct) || (!aim_held && covering && cover_direct) || (edging && edge_direct);
     const int direct_x=joypad || aim_turns || (following && !aim_held && follow_direct);
     const int direct_y=joypad || aim_turns || (following && !aim_held && follow_direct && follow_has_arc);
     /* Mouse look as a stick: the mouse's speed, smoothed over 12 ms (reports arrive in bursts), as

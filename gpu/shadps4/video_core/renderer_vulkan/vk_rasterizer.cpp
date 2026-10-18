@@ -439,6 +439,9 @@ struct PacketStage {
     u32 flat_size;
     u32 num_ring;
     u32 num_leaves; ///< uc3: LeafCopy entries after the ring bindings
+    /// R.10 A1 v8 (Fable 2): a trusted draw's flat in its submission's arena (alive until
+    /// stage B recorded the submission); null when the flat follows the user data inline.
+    const u32* flat_ext;
 };
 constexpr u32 AlignPacket(u32 size) {
     return (size + 7) & ~7u;
@@ -531,9 +534,13 @@ bool Rasterizer::RingDedupOn() {
 }
 
 void Rasterizer::NoteGuestWrite(VAddr address, u64 size) {
-    SrtNoteWrite(address, size);
+    SrtNoteWrite(address, size, SrtOriginGuestWrite);
     if (RingDedup() && size) {
-        DedupNoteWrite(address, size);
+        if (OnStageA()) {
+            DedupNoteWrite(address, size);
+        } else {
+            dedup_offthread.fetch_add(1, std::memory_order_release);
+        }
     }
 }
 
@@ -555,7 +562,7 @@ void Rasterizer::DedupNoteWrite(VAddr address, u64 size) {
 }
 
 void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
-    SrtNoteWrite(address, size);
+    SrtNoteWrite(address, size, SrtOriginPendingGpu);
     if (!draw_pipe || !size) {
         return;
     }
@@ -690,11 +697,10 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
     for (u32 index = 0; index < stage.buffers.size(); ++index) {
         const auto& desc = stage.buffers[index];
         if (desc.IsSpecial()) {
-            if (desc.buffer_type == Shader::BufferType::Flatbuf &&
-                !stage.flattened_ud_buf.empty()) {
+            const auto flat = stage.FlatUserData();
+            if (desc.buffer_type == Shader::BufferType::Flatbuf && !flat.empty()) {
                 const size_t before = out.size();
-                copy(index, stage.flattened_ud_buf.data(), 0,
-                     stage.flattened_ud_buf.size() * sizeof(u32));
+                copy(index, flat.data(), 0, flat.size() * sizeof(u32));
                 if (out.size() != before) {
                     for (const auto& leaf : stage.gpu_leaves) {
                         leaves.push_back({out.back().offset + leaf.dst_dw * sizeof(u32), leaf.src});
@@ -730,6 +736,11 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         if (!RingDedup()) {
             copy(index, nullptr, address, size);
             continue;
+        }
+        if (const u32 offthread = dedup_offthread.load(std::memory_order_acquire);
+            offthread != dedup_offthread_seen) {
+            dedup_offthread_seen = offthread;
+            RingDedupClear();
         }
         // R.9.10: the same constants bound again in this submission: the earlier copy serves,
         // unless guest memory changed under it since (a pending GPU write over it, data read
@@ -854,7 +865,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
                                 (unsigned long long)stage->pgm_hash, u32(stage->sw_stage),
                                 stage->gpu_leaves.size(),
                                 stage->gpu_leaves[0].dst_dw, ring.size(), leaves.size(),
-                                has_flatbuf, stage->flattened_ud_buf.size());
+                                has_flatbuf, stage->FlatUserData().size());
                     for (const auto& desc : stage->buffers) {
                         const auto& f = desc.sharp_fetch;
                         std::printf("  buffer type %u summary %u mask %#x offsets %u %u %u %u\n",
@@ -882,9 +893,10 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
                 }
             }
             ++num_stages;
+            // R.10 A1 v8: a trusted flat is read by stage B from the arena, not copied.
+            const u32 inline_flat = stage->trusted_flat ? 0 : u32(stage->FlatUserData().size());
             size += sizeof(PacketStage) +
-                    AlignPacket(u32(stage->user_data.size() + stage->flattened_ud_buf.size()) *
-                                sizeof(u32)) +
+                    AlignPacket(u32(stage->user_data.size() + inline_flat) * sizeof(u32)) +
                     u32(ring.size() * sizeof(RingBinding)) +
                     u32(leaves.size() * sizeof(LeafCopy));
         }
@@ -937,22 +949,26 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
         const auto& leaves = stage_leaves[stage_index];
         const auto& ring = rings[stage_index++];
         auto& header = *reinterpret_cast<PacketStage*>(out);
+        const auto flat = stage->FlatUserData();
+        const u32* const flat_ext = stage->trusted_flat;
         header = {stage,
                   stage->pgm_base,
                   static_cast<u32>(stage->user_data.size()),
-                  static_cast<u32>(stage->flattened_ud_buf.size()),
+                  static_cast<u32>(flat.size()),
                   static_cast<u32>(ring.size()),
-                  static_cast<u32>(leaves.size())};
+                  static_cast<u32>(leaves.size()),
+                  flat_ext};
         out += sizeof(PacketStage);
         std::memcpy(out, ring.data(), ring.size() * sizeof(RingBinding));
         out += ring.size() * sizeof(RingBinding);
         std::memcpy(out, leaves.data(), leaves.size() * sizeof(LeafCopy));
         out += leaves.size() * sizeof(LeafCopy);
         std::memcpy(out, stage->user_data.data(), stage->user_data.size_bytes());
-        std::memcpy(out + stage->user_data.size_bytes(), stage->flattened_ud_buf.data(),
-                    stage->flattened_ud_buf.size() * sizeof(u32));
-        out += AlignPacket(u32(stage->user_data.size() + stage->flattened_ud_buf.size()) *
-                           sizeof(u32));
+        const u32 inline_flat = flat_ext ? 0 : u32(flat.size());
+        if (inline_flat) {
+            std::memcpy(out + stage->user_data.size_bytes(), flat.data(), inline_flat * sizeof(u32));
+        }
+        out += AlignPacket(u32(stage->user_data.size() + inline_flat) * sizeof(u32));
     }
     if (cs) {
         std::memcpy(out, cs, sizeof(AmdGpu::ComputeProgram));
@@ -1029,9 +1045,10 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
                                reinterpret_cast<const LeafCopy*>(in), stage.num_leaves};
         in += stage.num_leaves * sizeof(LeafCopy);
         const auto* words = reinterpret_cast<const u32*>(in);
-        Shader::Info::ud_snapshots[i] = {stage.info, words, stage.ud_size, words + stage.ud_size,
+        const u32* const flat = stage.flat_ext ? stage.flat_ext : words + stage.ud_size;
+        Shader::Info::ud_snapshots[i] = {stage.info, words, stage.ud_size, flat,
                                          stage.flat_size, stage.pgm_base};
-        in += AlignPacket((stage.ud_size + stage.flat_size) * sizeof(u32));
+        in += AlignPacket((stage.ud_size + (stage.flat_ext ? 0 : stage.flat_size)) * sizeof(u32));
     }
     Shader::Info::num_ud_snapshots = packet.num_stages;
     self.num_ring_stages = packet.num_stages;
@@ -1247,18 +1264,26 @@ void Rasterizer::PrintPipeStats() {
             dedup_hits = dedup_misses = dedup_stale = 0;
         }
         {
-            extern std::atomic<u64> g_gow3_gfx_pipe_split[6];
+            extern std::atomic<u64> g_gow3_gfx_pipe_split[11];
             const u64 pub = g_gow3_gfx_pipe_split[0].exchange(0, std::memory_order_relaxed);
             const u64 chk = g_gow3_gfx_pipe_split[1].exchange(0, std::memory_order_relaxed);
             const u64 calls = g_gow3_gfx_pipe_split[2].exchange(0, std::memory_order_relaxed);
             const u64 params = g_gow3_gfx_pipe_split[3].exchange(0, std::memory_order_relaxed);
             const u64 walk = g_gow3_gfx_pipe_split[4].exchange(0, std::memory_order_relaxed);
             const u64 cmp = g_gow3_gfx_pipe_split[5].exchange(0, std::memory_order_relaxed);
+            const u64 changed = g_gow3_gfx_pipe_split[6].exchange(0, std::memory_order_relaxed);
+            const u64 values = g_gow3_gfx_pipe_split[7].exchange(0, std::memory_order_relaxed);
+            const u64 apply = g_gow3_gfx_pipe_split[8].exchange(0, std::memory_order_relaxed);
+            const u64 apply_copy = g_gow3_gfx_pipe_split[9].exchange(0, std::memory_order_relaxed);
+            const u64 apply_find = g_gow3_gfx_pipe_split[10].exchange(0, std::memory_order_relaxed);
             if (calls) {
                 const double us = seconds * 1e6 / cycles / calls;
                 std::printf("  A:gfx pipeline split (us/draw): publish+pump %.2f, prepared check %.2f "
-                            "(GetParams %.2f, SRT walk %.2f, flat compare %.2f)\n",
-                            us * pub, us * chk, us * params, us * walk, us * cmp);
+                            "(GetParams %.2f, SRT walk %.2f, flat compare %.2f; trust: changed-since "
+                            "%.2f, value compare %.2f, trusted apply %.2f (program check + flat copy "
+                            "%.2f, pipeline find %.2f))\n",
+                            us * pub, us * chk, us * params, us * walk, us * cmp, us * changed,
+                            us * values, us * apply, us * apply_copy, us * apply_find);
             }
         }
         std::printf("  stage B by step (%% of time, us/call):");
@@ -1611,6 +1636,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     DebugState.IncDrawCall();
+    DumpOnDraw(pipeline);
 
     ResetBindings(false);
     scheduler.KickRecording();
@@ -1663,6 +1689,111 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
     DrawIndirectRecord(pipeline, is_indexed, indirect);
+}
+
+// uc3: GOW3_DUMP_PS=<hex ps hash> with GOW3_DUMP_TRIGGER=<file>: when the file exists, the
+// color targets of the next draw (direct or indirect) with that pixel shader are written raw
+// (Vulkan linear layout, num_bits per pixel) to GOW3_DUMP_DIR, and GOW3_DUMP_MEM=<hex addr>:<hex
+// size> guest memory with them (cave torch light debugging).
+void Rasterizer::DumpOnDraw(const GraphicsPipeline* pipeline) {
+    static const char* dump_ps = std::getenv("GOW3_DUMP_PS");
+    static const char* dump_trigger = std::getenv("GOW3_DUMP_TRIGGER");
+    static int dump_index = 0;
+    const auto* dps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    if (dump_ps && dump_trigger && dps &&
+        dps->pgm_hash == std::strtoull(dump_ps, nullptr, 16) && std::remove(dump_trigger) == 0) {
+        const char* dir = std::getenv("GOW3_DUMP_DIR");
+        const std::string base = dir && *dir ? dir : "out/dump";
+        scheduler.EndRendering();
+        const auto dump_image = [&](VideoCore::Image& image, const char* tag) {
+            if (image.info.props.is_depth) {
+                return;
+            }
+            const u32 w = image.info.size.width, h = image.info.size.height;
+            const VkDeviceSize size = VkDeviceSize(w) * h * std::max(image.info.num_bits / 8, 1u);
+            const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                               .size = size,
+                                               .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+            const VmaAllocationCreateInfo alloc_ci{
+                .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                         VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
+            VkBuffer buffer{};
+            VmaAllocation allocation{};
+            VmaAllocationInfo info{};
+            if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer,
+                                &allocation, &info) != VK_SUCCESS) {
+                return;
+            }
+            runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
+                            vk::PipelineStageFlagBits2::eTransfer,
+                            vk::AccessFlagBits2::eTransferRead);
+            runtime.FlushBarriers();
+            const vk::Image vk_image = image.GetImage();
+            scheduler.Record([vk_image, buffer, w, h](vk::CommandBuffer cmdbuf) {
+                cmdbuf.copyImageToBuffer(
+                    vk_image, vk::ImageLayout::eTransferSrcOptimal, vk::Buffer{buffer},
+                    vk::BufferImageCopy{.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                        .imageExtent = {w, h, 1}});
+            });
+            char path[512];
+            std::snprintf(path, sizeof(path), "%s/%s_%03d_%llx_fmt%d_%ubit_%ux%u.raw",
+                          base.c_str(), tag, dump_index,
+                          (unsigned long long)image.info.guest_address,
+                          int(image.info.pixel_format), image.info.num_bits, w, h);
+            std::printf("ucndc: dump %s (flags %#x, mips %u, layers %u)\n", path,
+                        unsigned(image.flags), image.info.resources.levels,
+                        image.info.resources.layers);
+            std::fflush(stdout);
+            scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer,
+                                              allocation, info, size, file = std::string{path}] {
+                vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
+                if (FILE* f = std::fopen(file.c_str(), "wb")) {
+                    std::fwrite(info.pMappedData, 1, size, f);
+                    std::fclose(f);
+                }
+                vmaDestroyBuffer(allocator, buffer, allocation);
+            });
+        };
+        for (u32 i = 0; i < AmdGpu::NUM_COLOR_BUFFERS; ++i) {
+            if (cb_descs[i].first) {
+                char tag[16];
+                std::snprintf(tag, sizeof(tag), "mrt%u", i);
+                dump_image(texture_cache.GetImage(cb_descs[i].first), tag);
+            }
+        }
+        // GOW3_DUMP_IMAGES=<hex addr>/<hex addr>/...: GPU images at these guest addresses.
+        if (const char* list = std::getenv("GOW3_DUMP_IMAGES")) {
+            for (const char* p = list; p && *p;) {
+                char* end = nullptr;
+                const VAddr addr = std::strtoull(p, &end, 16);
+                std::vector<VideoCore::ImageId> found;
+                texture_cache.ForEachImageInRegion(
+                    addr, 1, [&](VideoCore::ImageId id, VideoCore::Image&) { found.push_back(id); });
+                std::printf("ucndc: dump images at %#llx: %zu\n", (unsigned long long)addr,
+                            found.size());
+                for (const auto id : found) {
+                    dump_image(texture_cache.GetImage(id), "img");
+                }
+                p = end && *end == '/' ? end + 1 : nullptr;
+            }
+        }
+        if (const char* mem = std::getenv("GOW3_DUMP_MEM")) {
+            char* end = nullptr;
+            const VAddr addr = std::strtoull(mem, &end, 16);
+            const size_t len = end && *end == ':' ? std::strtoull(end + 1, nullptr, 16) : 0;
+            char path[512];
+            std::snprintf(path, sizeof(path), "%s/mem_%03d_%llx.raw", base.c_str(), dump_index,
+                          (unsigned long long)addr);
+            if (FILE* f = len ? std::fopen(path, "wb") : nullptr) {
+                std::fwrite(reinterpret_cast<const void*>(addr), 1, len, f);
+                std::fclose(f);
+            }
+        }
+        begin_memo.valid = false;
+        ++dump_index;
+    }
+
 }
 
 void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_indexed,
@@ -1777,109 +1908,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         }
     });
     DebugState.IncDrawCall();
-    // uc3: GOW3_DUMP_PS=<hex ps hash> with GOW3_DUMP_TRIGGER=<file>: when the file exists, the
-    // color targets of the next indirect draw with that pixel shader are written raw (Vulkan
-    // linear layout, num_bits per pixel) to GOW3_DUMP_DIR, and GOW3_DUMP_MEM=<hex addr>:<hex
-    // size> guest memory with them (cave torch light debugging).
-    {
-        static const char* dump_ps = std::getenv("GOW3_DUMP_PS");
-        static const char* dump_trigger = std::getenv("GOW3_DUMP_TRIGGER");
-        static int dump_index = 0;
-        const auto* dps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-        if (dump_ps && dump_trigger && dps &&
-            dps->pgm_hash == std::strtoull(dump_ps, nullptr, 16) && std::remove(dump_trigger) == 0) {
-            const char* dir = std::getenv("GOW3_DUMP_DIR");
-            const std::string base = dir && *dir ? dir : "out/dump";
-            scheduler.EndRendering();
-            const auto dump_image = [&](VideoCore::Image& image, const char* tag) {
-                if (image.info.props.is_depth) {
-                    return;
-                }
-                const u32 w = image.info.size.width, h = image.info.size.height;
-                const VkDeviceSize size = VkDeviceSize(w) * h * std::max(image.info.num_bits / 8, 1u);
-                const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                                                   .size = size,
-                                                   .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
-                const VmaAllocationCreateInfo alloc_ci{
-                    .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
-                             VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
-                    .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
-                VkBuffer buffer{};
-                VmaAllocation allocation{};
-                VmaAllocationInfo info{};
-                if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer,
-                                    &allocation, &info) != VK_SUCCESS) {
-                    return;
-                }
-                runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
-                                vk::PipelineStageFlagBits2::eTransfer,
-                                vk::AccessFlagBits2::eTransferRead);
-                runtime.FlushBarriers();
-                const vk::Image vk_image = image.GetImage();
-                scheduler.Record([vk_image, buffer, w, h](vk::CommandBuffer cmdbuf) {
-                    cmdbuf.copyImageToBuffer(
-                        vk_image, vk::ImageLayout::eTransferSrcOptimal, vk::Buffer{buffer},
-                        vk::BufferImageCopy{.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-                                            .imageExtent = {w, h, 1}});
-                });
-                char path[512];
-                std::snprintf(path, sizeof(path), "%s/%s_%03d_%llx_fmt%d_%ubit_%ux%u.raw",
-                              base.c_str(), tag, dump_index,
-                              (unsigned long long)image.info.guest_address,
-                              int(image.info.pixel_format), image.info.num_bits, w, h);
-                std::printf("ucndc: dump %s (flags %#x, mips %u, layers %u)\n", path,
-                            unsigned(image.flags), image.info.resources.levels,
-                            image.info.resources.layers);
-                std::fflush(stdout);
-                scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer,
-                                                  allocation, info, size, file = std::string{path}] {
-                    vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
-                    if (FILE* f = std::fopen(file.c_str(), "wb")) {
-                        std::fwrite(info.pMappedData, 1, size, f);
-                        std::fclose(f);
-                    }
-                    vmaDestroyBuffer(allocator, buffer, allocation);
-                });
-            };
-            for (u32 i = 0; i < AmdGpu::NUM_COLOR_BUFFERS; ++i) {
-                if (cb_descs[i].first) {
-                    char tag[16];
-                    std::snprintf(tag, sizeof(tag), "mrt%u", i);
-                    dump_image(texture_cache.GetImage(cb_descs[i].first), tag);
-                }
-            }
-            // GOW3_DUMP_IMAGES=<hex addr>/<hex addr>/...: GPU images at these guest addresses.
-            if (const char* list = std::getenv("GOW3_DUMP_IMAGES")) {
-                for (const char* p = list; p && *p;) {
-                    char* end = nullptr;
-                    const VAddr addr = std::strtoull(p, &end, 16);
-                    std::vector<VideoCore::ImageId> found;
-                    texture_cache.ForEachImageInRegion(
-                        addr, 1, [&](VideoCore::ImageId id, VideoCore::Image&) { found.push_back(id); });
-                    std::printf("ucndc: dump images at %#llx: %zu\n", (unsigned long long)addr,
-                                found.size());
-                    for (const auto id : found) {
-                        dump_image(texture_cache.GetImage(id), "img");
-                    }
-                    p = end && *end == '/' ? end + 1 : nullptr;
-                }
-            }
-            if (const char* mem = std::getenv("GOW3_DUMP_MEM")) {
-                char* end = nullptr;
-                const VAddr addr = std::strtoull(mem, &end, 16);
-                const size_t len = end && *end == ':' ? std::strtoull(end + 1, nullptr, 16) : 0;
-                char path[512];
-                std::snprintf(path, sizeof(path), "%s/mem_%03d_%llx.raw", base.c_str(), dump_index,
-                              (unsigned long long)addr);
-                if (FILE* f = len ? std::fopen(path, "wb") : nullptr) {
-                    std::fwrite(reinterpret_cast<const void*>(addr), 1, len, f);
-                    std::fclose(f);
-                }
-            }
-            begin_memo.valid = false;
-            ++dump_index;
-        }
-    }
+    DumpOnDraw(pipeline);
 
     ResetBindings(false);
     scheduler.KickRecording();
@@ -3967,7 +3996,7 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
             // Both buffers were not transferred to GPU yet. Can safely copy in host memory.
             NoteGuestWrite(dst, num_bytes);
             std::memcpy(std::bit_cast<void*>(dst), std::bit_cast<void*>(src), num_bytes);
-            SrtNoteWrite(dst, num_bytes); // uc3 R.21: again once written
+            SrtNoteWrite(dst, num_bytes, SrtOriginRewrite); // uc3 R.21: again once written
             return;
         }
     }

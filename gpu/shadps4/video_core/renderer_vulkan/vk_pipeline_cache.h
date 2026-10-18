@@ -120,7 +120,10 @@ struct PrepWorker {
     std::unordered_map<const Program*, Shader::Info> infos;
     boost::container::static_vector<Stage, MaxShaderStages> stages;
     std::vector<u64> read_pages; ///< R.21: guest pages the SRT walks read (unsorted)
+    std::vector<u64> ptr_pages;  ///< R.10 A1 v8: of them, the table pointer pages
+    std::vector<Shader::SrtGuestRun> guest_runs; ///< R.10 A1 v9: guest ranges the walks read
     std::vector<Shader::SrtCheck> checks; ///< R.22: values the SRT walks read
+    std::vector<u8> check_bytes;          ///< R.10 A1: the bytes those runs read
     bool failed = false;
 };
 
@@ -161,8 +164,29 @@ public:
     void NotePrepTrustDivergence(const char* what, u64 hash, VAddr base);
     u64 prep_trust_hits = 0, prep_trust_misses = 0, prep_trust_divergences = 0;
     /// R.21 miss reasons: GPU leaves, wait/unnoted packet, big write, page write, too many pages.
-    u64 prep_trust_why[5]{};
+    u64 prep_trust_why[7]{};
     u64 prep_trust_validated = 0;
+    u64 prep_trust_wait_validated = 0; ///< R.10 A1: after a CPU WaitRegMem, trusted by value
+    u64 prep_trust_wait_changed = 0;   ///< R.10 A1: after a CPU WaitRegMem, values changed
+    u64 prep_trust_label_page = 0;     ///< R.10 A1: a met wait's label page written since the snapshot
+    u64 prep_trust_label_unmet = 0;    ///< R.10 A1: ... and a met wait no longer holds
+    u64 prep_trust_check_calls = 0, prep_trust_checks = 0; ///< R.10 A1: value compares, runs
+    u64 prep_trust_check_bytes = 0, prep_trust_check_skips = 0; ///< bytes compared, compares deduped
+    u64 prep_trust_stamp_validated[4]{}; ///< R.10 A1: trusted by value after why 1/2/3 ([0] after a wait)
+    u64 prep_trust_stamp_changed[4]{};   ///< R.10 A1: values changed, by the same origin
+    const PreparedDraw* last_value_ok = nullptr; ///< R.10 A1: the previous call's draw held by value
+    /// R.10 A1 v8 (Fable 1a): the pipeline the last trusted apply found, with its key. Reset
+    /// whenever a graphics pipeline is erased or replaced.
+    const GraphicsPipeline* last_trusted_pipe = nullptr;
+    u64 last_trusted_hash = 0;
+    GraphicsPipelineKey last_trusted_key{};
+    u64 prep_trust_pipe_reused = 0; ///< R.10 A1 v8: trusted applies that reused it
+    /// R.10 A1 v8 (Fable, diagnostics): page write misses by the origin of the stamp (SrtOrigin),
+    /// and whether the regular walk then gave the prepared flat (needless) or not (real).
+    u64 prep_trust_pw_origin[8]{}, prep_trust_pw_needless[8]{}, prep_trust_pw_real[8]{};
+    u64 prep_trust_pw_ptr = 0, prep_trust_pw_leaf = 0; ///< stamped page held a table pointer / leaves
+    /// R.10 A1 v9: page writes resolved by their ranges: missed the reads (trusted), hit, unknown.
+    u64 prep_trust_pw_missed[8]{}, prep_trust_pw_hit[8]{}, prep_trust_pw_unknown[8]{};
 
     /// gow3: the prepared draw the last GetGraphicsPipeline used, or null (regular path).
     [[nodiscard]] const PreparedDraw* UsedPrepared() const noexcept {

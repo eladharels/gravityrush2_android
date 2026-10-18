@@ -100,15 +100,37 @@ u64 SrtHostOf(u64 address, u64 need) {
     return reinterpret_cast<u64>(backing);
 }
 void SrtRecordCheck(u64 guest, u32 size) {
-    SrtCheck check{SrtHostOf(guest, size), 0, size, 0};
-    std::memcpy(&check.value, reinterpret_cast<const void*>(check.host), size);
-    t_srt_checks->push_back(check);
+    if (t_srt_guest_runs) {
+        auto& runs = *t_srt_guest_runs;
+        if (!runs.empty() && runs.back().guest + runs.back().size == guest) {
+            runs.back().size += size;
+        } else {
+            runs.push_back({guest, size});
+        }
+    }
+    const u64 host = SrtHostOf(guest, size);
+    auto& bytes = *t_srt_check_bytes;
+    const u32 off = static_cast<u32>(bytes.size());
+    bytes.resize(off + size);
+    std::memcpy(bytes.data() + off, reinterpret_cast<const void*>(host), size);
+    // R.10 A1 (Fable): reads that continue the previous one extend its run.
+    auto& checks = *t_srt_checks;
+    if (!checks.empty() && checks.back().host + checks.back().size == host &&
+        checks.back().raw_off + checks.back().size == off) {
+        checks.back().size += size;
+        return;
+    }
+    checks.push_back({host, off, size});
 }
 // uc3 R.21: records the page of each table pointer the walker loads (guest_base 0 is user data).
 SrtPtr PS4_SYSV_ABI RecordingSrtLoadPtr(const u8* host_base, u64 guest_base, u64 off) {
     if (guest_base != 0 && t_srt_read_pages) {
         t_srt_read_pages->push_back((guest_base + off) >> 12);
         t_srt_read_pages->push_back((guest_base + off + 7) >> 12);
+        if (t_srt_ptr_pages) {
+            t_srt_ptr_pages->push_back((guest_base + off) >> 12);
+            t_srt_ptr_pages->push_back((guest_base + off + 7) >> 12);
+        }
         if (t_srt_checks) {
             SrtRecordCheck(guest_base + off, 8);
         }

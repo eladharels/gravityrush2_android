@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -85,73 +86,189 @@ struct PreparedVertexInputs {
 inline constexpr u32 SrtPageSlots = 1u << 16;
 inline std::atomic<u64> g_srt_write_seq{0};
 inline std::atomic<u64> g_srt_global_seq{0};
-inline std::atomic<u64> g_srt_big_seq{0};
 inline std::atomic<u64> g_srt_page_seq[SrtPageSlots];
 /// Diagnostics: 0 waits (global), 1 page writes, 2 big writes, 3 packets that wrote without a
 /// noted range (global).
 inline std::atomic<u64> g_srt_bumps[4];
+/// uc3 R.10 A1 (Fable): stamps only move forward, so writers on several threads cannot lower
+/// a stamp a later write already raised.
+inline void SrtStoreMax(std::atomic<u64>& stamp, u64 seq) noexcept {
+    u64 current = stamp.load(std::memory_order_relaxed);
+    while (current < seq &&
+           !stamp.compare_exchange_weak(current, seq, std::memory_order_release,
+                                        std::memory_order_relaxed)) {
+    }
+}
 inline void SrtGlobalEvent(u32 source = 0) noexcept {
     const u64 seq = g_srt_write_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
-    g_srt_global_seq.store(seq, std::memory_order_release);
+    SrtStoreMax(g_srt_global_seq, seq);
     g_srt_bumps[source].fetch_add(1, std::memory_order_relaxed);
 }
-/// uc3 R.22: the last big writes with their page ranges, so a big write only invalidates the
-/// prepared draws that read inside it. Written and read on the command processor thread.
-inline constexpr u32 SrtBigRing = 256;
-struct SrtBigWrite {
-    std::atomic<u64> seq{0};
-    std::atomic<u64> first{0}, last{0};
+/// uc3 R.10 A1 (b, Fable): big writes stamp regions of 64 pages (256 KB) like the pages, so a
+/// big write only invalidates the prepared draws that read inside it, with any number of
+/// writers and no scan. Direct-mapped and untagged: a collision only invalidates more. Writes
+/// over SrtRegionSlots regions move the global stamp.
+inline constexpr u32 SrtRegionSlots = 1u << 16;
+inline std::atomic<u64> g_srt_region_seq[SrtRegionSlots];
+/// R.10 A1 v8 (Fable, diagnostics): who stamped each page slot last. Racy and untagged like
+/// the stamps; it only feeds the counters of the page write misses.
+enum SrtOrigin : u8 {
+    SrtOriginOther,
+    SrtOriginPacket,     ///< a memory-writing packet, on the command thread
+    SrtOriginGuestWrite, ///< Rasterizer::NoteGuestWrite (before a host-side write)
+    SrtOriginPendingGpu, ///< Rasterizer::NotePendingGpuWrite
+    SrtOriginLanding,    ///< a PM4 write landing (DmaData, WriteData, fences)
+    SrtOriginBinding,    ///< a written buffer binding of a draw or dispatch
+    SrtOriginRewrite,    ///< stamped again once written (DMA copy, HLE, constant RAM)
+    SrtNumOrigins,
 };
-inline SrtBigWrite g_srt_big_ring[SrtBigRing];
-inline std::atomic<u64> g_srt_big_count{0};
-inline void SrtNoteWrite(u64 address, u64 size) noexcept {
+inline std::atomic<u8> g_srt_page_origin[SrtPageSlots];
+/// uc3 R.10 A1 (GOW3_PREP_TRUST_A1=1, Fable): prep trust made sound without the value
+/// re-check. Writes are stamped again where they land (stage B / recording thread), the worker
+/// flags GPU-written dwords its walk read, graphics waits are evaluated by the worker (a draw
+/// after a wait not yet met is not trusted) instead of moving the global stamp, and packets
+/// that write guest memory stamp their own range.
+inline bool SrtA1() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_PREP_TRUST_A1");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+/// R.10 A1 v9 (Fable): the last writes of each page slot with their range in the page, so a
+/// page write can be told apart from one that hit the bytes a prepared draw read. Every entry
+/// a writer replaces goes to `evicted` (max seq), so with no writer in flight (done == count)
+/// the writes since a snapshot are the entries after it, or `evicted` is after it. Entry:
+/// seq (40 bits) | first byte (12) | last byte (12). Untagged like the stamps: writes of an
+/// aliased page only count as more hits.
+inline constexpr u32 SrtPageRing = 8;
+struct SrtPageHistory {
+    std::atomic<u32> count;
+    std::atomic<u32> done;
+    std::atomic<u64> evicted;
+    std::atomic<u64> entries[SrtPageRing];
+};
+inline SrtPageHistory g_srt_page_history[SrtPageSlots];
+inline constexpr u64 SrtSeqMask = (u64(1) << 40) - 1;
+inline void SrtNoteWrite(u64 address, u64 size, u8 origin = SrtOriginOther) noexcept {
     if (size == 0) {
         return;
     }
     const u64 seq = g_srt_write_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
     const u64 first = address >> 12, last = (address + size - 1) >> 12;
     if (last - first >= 64) {
-        auto& slot = g_srt_big_ring[g_srt_big_count.fetch_add(1, std::memory_order_acq_rel) %
-                                    SrtBigRing];
-        slot.first.store(first, std::memory_order_relaxed);
-        slot.last.store(last, std::memory_order_relaxed);
-        slot.seq.store(seq, std::memory_order_release);
-        g_srt_big_seq.store(seq, std::memory_order_release);
+        const u64 first_region = first >> 6, last_region = last >> 6;
+        if (last_region - first_region >= SrtRegionSlots) {
+            SrtStoreMax(g_srt_global_seq, seq);
+        } else {
+            for (u64 region = first_region; region <= last_region; ++region) {
+                SrtStoreMax(g_srt_region_seq[region % SrtRegionSlots], seq);
+            }
+        }
         g_srt_bumps[2].fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    const bool history = SrtA1();
     for (u64 page = first; page <= last; ++page) {
-        g_srt_page_seq[page % SrtPageSlots].store(seq, std::memory_order_release);
+        if (history) {
+            const u64 base = page << 12;
+            const u64 begin = std::max(address, base) - base;
+            const u64 end = std::min(address + size, base + 4096) - base - 1;
+            auto& slot = g_srt_page_history[page % SrtPageSlots];
+            const u32 n = slot.count.fetch_add(1, std::memory_order_acq_rel);
+            const u64 old = slot.entries[n % SrtPageRing].exchange(
+                (end << 52) | (begin << 40) | (seq & SrtSeqMask), std::memory_order_acq_rel);
+            SrtStoreMax(slot.evicted, old & SrtSeqMask);
+            slot.done.fetch_add(1, std::memory_order_release);
+        }
+        SrtStoreMax(g_srt_page_seq[page % SrtPageSlots], seq);
+        g_srt_page_origin[page % SrtPageSlots].store(origin, std::memory_order_relaxed);
     }
     g_srt_bumps[1].fetch_add(1, std::memory_order_relaxed);
 }
+/// A write landing in guest memory (stage B, the recording thread, a copy thread).
+inline void SrtNoteLanding(u64 address, u64 size, u8 origin = SrtOriginLanding) noexcept {
+    if (!SrtA1() || size == 0) {
+        return;
+    }
+    SrtNoteWrite(address, size, origin);
+}
+/// uc3 R.10 A1 (a): labels written by graphics packets (EOP/EOS/ReleaseMem/WriteData of a
+/// label), with the value and the submission, noted by the prep worker while it walks a
+/// submission. A wait the worker finds not met yet is GPU-GPU when a label write of the same
+/// submission, or of an earlier one the GPU thread has not started, meets it: it does not
+/// protect CPU writes (GPU outputs are on the page stamps and the GPU-leaf check), so the
+/// draws after it stay trusted. Values from submissions already run do not count (a label CPU
+/// and GPU both write). Direct-mapped: a lost entry only leaves a wait counted as CPU.
+inline constexpr u32 SrtLabelSlots = 1u << 12;
+struct SrtGpuLabel {
+    std::atomic<u64> address{0};
+    std::atomic<u64> value{0};
+    std::atomic<u64> seq{0};
+};
+inline SrtGpuLabel g_srt_gpu_labels[SrtLabelSlots];
+inline void SrtNoteGpuLabel(u64 address, u64 value, u64 seq) noexcept {
+    auto& slot = g_srt_gpu_labels[(address >> 2) % SrtLabelSlots];
+    slot.address.store(0, std::memory_order_relaxed);
+    slot.value.store(value, std::memory_order_relaxed);
+    slot.seq.store(seq, std::memory_order_relaxed);
+    slot.address.store(address, std::memory_order_release);
+}
+inline bool SrtGpuLabelValue(u64 address, u64& value, u64& seq) noexcept {
+    const auto& slot = g_srt_gpu_labels[(address >> 2) % SrtLabelSlots];
+    if (slot.address.load(std::memory_order_acquire) != address) {
+        return false;
+    }
+    value = slot.value.load(std::memory_order_relaxed);
+    seq = slot.seq.load(std::memory_order_relaxed);
+    return slot.address.load(std::memory_order_acquire) == address;
+}
+/// Diagnostics: waits the worker found not met, of them GPU-GPU.
+inline std::atomic<u64> g_srt_waits_unmet{0}, g_srt_waits_gpu{0};
+/// R.10 A1: waits that left draws after a wait: [0] WaitRegMem on a CPU label, [1] MemSemaphore,
+/// [2] Rewind; and the most frequent CPU wait sites (label address and compare function).
+inline std::atomic<u64> g_srt_wait_kinds[3];
+struct SrtWaitSite {
+    u64 address;
+    u32 function;
+    u32 ref;
+    u64 count;
+};
+inline std::mutex g_srt_wait_sites_mutex;
+inline std::array<SrtWaitSite, 64> g_srt_wait_sites{};
+inline u32 g_srt_num_wait_sites = 0;
+inline u64 g_srt_wait_sites_lost = 0;
+inline void SrtNoteCpuWait(u64 address, u32 function, u32 ref) noexcept {
+    std::scoped_lock lk{g_srt_wait_sites_mutex};
+    for (u32 i = 0; i < g_srt_num_wait_sites; ++i) {
+        auto& site = g_srt_wait_sites[i];
+        if (site.address == address && site.function == function) {
+            site.ref = ref;
+            ++site.count;
+            return;
+        }
+    }
+    if (g_srt_num_wait_sites == g_srt_wait_sites.size()) {
+        ++g_srt_wait_sites_lost;
+        return;
+    }
+    g_srt_wait_sites[g_srt_num_wait_sites++] = {address, function, ref, 1};
+}
+
+/// Set by the SRT fixup hook when a walk off the GPU-side threads (the prep worker) read a
+/// GPU-written dword.
+inline thread_local bool g_srt_walk_gpu_leaf = false;
+
 /// 0: unchanged since `snap`; 1 only a global event (R.22: the values may still be checked),
 /// 2 a big write, 3 a page write.
 inline u32 SrtChangedSince(u64 snap, const u64* pages, u32 count) noexcept {
-    if (g_srt_big_seq.load(std::memory_order_acquire) > snap) {
-        // Newest first, down to the first big write before the snapshot.
-        const u64 total = g_srt_big_count.load(std::memory_order_acquire);
-        u64 scanned = 0;
-        for (u64 n = total; n > 0; --n, ++scanned) {
-            if (scanned == SrtBigRing) {
-                return 2;
-            }
-            const auto& slot = g_srt_big_ring[(n - 1) % SrtBigRing];
-            if (slot.seq.load(std::memory_order_acquire) <= snap) {
-                break;
-            }
-            const u64 first = slot.first.load(std::memory_order_relaxed);
-            const u64 last = slot.last.load(std::memory_order_relaxed);
-            for (u32 i = 0; i < count; ++i) {
-                if (pages[i] >= first && pages[i] <= last) {
-                    return 2;
-                }
-            }
-        }
-    }
     for (u32 i = 0; i < count; ++i) {
         if (g_srt_page_seq[pages[i] % SrtPageSlots].load(std::memory_order_acquire) > snap) {
             return 3;
+        }
+        if (g_srt_region_seq[(pages[i] >> 6) % SrtRegionSlots].load(std::memory_order_acquire) >
+            snap) {
+            return 2;
         }
     }
     if (g_srt_global_seq.load(std::memory_order_acquire) > snap) {
@@ -159,6 +276,103 @@ inline u32 SrtChangedSince(u64 snap, const u64* pages, u32 count) noexcept {
     }
     return 0;
 }
+/// R.10 A1 v9 (Fable): how the writes to `page` since `snap` meet the guest ranges a draw
+/// read: 0 none of them hits, 1 one hits, 2 unknown (history lost, writer in flight, or no
+/// range read on the page).
+inline u32 SrtPageWritesHit(u64 page, u64 snap, const Shader::SrtGuestRun* runs,
+                            u32 num_runs) noexcept {
+    const u64 base = page << 12;
+    bool reads_page = false;
+    for (u32 r = 0; r < num_runs; ++r) {
+        reads_page |= runs[r].guest < base + 4096 && runs[r].guest + runs[r].size > base;
+    }
+    if (!reads_page) {
+        return 2;
+    }
+    auto& slot = g_srt_page_history[page % SrtPageSlots];
+    const u32 done = slot.done.load(std::memory_order_acquire);
+    if (slot.count.load(std::memory_order_acquire) != done) {
+        return 2;
+    }
+    u64 entries[SrtPageRing];
+    for (u32 j = 0; j < SrtPageRing; ++j) {
+        entries[j] = slot.entries[j].load(std::memory_order_acquire);
+    }
+    const u64 evicted = slot.evicted.load(std::memory_order_acquire);
+    if (slot.done.load(std::memory_order_acquire) != done ||
+        slot.count.load(std::memory_order_acquire) != done) {
+        return 2;
+    }
+    const u64 since = snap & SrtSeqMask;
+    if (evicted > since) {
+        return 2;
+    }
+    bool any = false;
+    for (const u64 entry : entries) {
+        if ((entry & SrtSeqMask) <= since) {
+            continue;
+        }
+        any = true;
+        const u64 begin = base + ((entry >> 40) & 0xFFF), end = base + (entry >> 52) + 1;
+        for (u32 r = 0; r < num_runs; ++r) {
+            if (runs[r].guest < end && runs[r].guest + runs[r].size > begin) {
+                return 1;
+            }
+        }
+    }
+    return any ? 0 : 2;
+}
+
+/// R.10 A1 v9 (Fable): SrtChangedSince where the page writes that miss the ranges read do not
+/// count. `page_hits`: 0 every page write missed them, 1 one hit, 2 unknown (as
+/// SrtPageWritesHit); untouched when no page was written.
+inline u32 SrtChangedSinceRanges(u64 snap, const u64* pages, u32 count,
+                                 const Shader::SrtGuestRun* runs, u32 num_runs,
+                                 u32& page_hits) noexcept {
+    u32 hits = 0;
+    bool written = false;
+    for (u32 i = 0; i < count; ++i) {
+        if (g_srt_page_seq[pages[i] % SrtPageSlots].load(std::memory_order_acquire) > snap) {
+            written = true;
+            hits = std::max(hits, SrtPageWritesHit(pages[i], snap, runs, num_runs));
+            if (hits != 0) {
+                page_hits = hits;
+                return 3;
+            }
+        }
+        if (g_srt_region_seq[(pages[i] >> 6) % SrtRegionSlots].load(std::memory_order_acquire) >
+            snap) {
+            return 2;
+        }
+    }
+    if (written) {
+        page_hits = 0;
+    }
+    if (g_srt_global_seq.load(std::memory_order_acquire) > snap) {
+        return 1;
+    }
+    return 0;
+}
+
+/// R.10 A1 v8 (diagnostics): the index of the first page stamped since `snap`, or `count`.
+inline u32 SrtChangedPage(u64 snap, const u64* pages, u32 count) noexcept {
+    for (u32 i = 0; i < count; ++i) {
+        if (g_srt_page_seq[pages[i] % SrtPageSlots].load(std::memory_order_acquire) > snap) {
+            return i;
+        }
+    }
+    return count;
+}
+
+/// uc3 R.10 A1 (Fable): a wait the worker found met before a draw: re-tested at the draw when
+/// the page of its label was written since the snapshot (labels share pages densely).
+struct SrtMetWait {
+    u64 address;
+    u32 ref;
+    u32 mask;
+    u8 function;  ///< PM4CmdWaitRegMem::Function
+    u8 semaphore; ///< MemSemaphore wait: met while the 64-bit value is not 0
+};
 
 struct PreparedDraw {
     enum : u32 { Pending = 0, Ready = 1, Unavailable = 2 };
@@ -166,15 +380,31 @@ struct PreparedDraw {
     u64 reg_checksum{};
     u64 srt_snap{};        ///< R.21: g_srt_write_seq read before the worker's walk
     bool no_gpu_leaves{};  ///< R.20: the worker's walk found no GPU-written dwords
+    bool after_wait{};     ///< R.10 A1: follows a wait the worker found not yet met
+    u8 wait_kind{};        ///< R.10 A1: worst such wait: 1 WaitRegMem (value-checked), 2 other
+    u32 num_wait_pages{};  ///< R.10 A1: label pages of the met waits (not in read_pages)
+    const u64* wait_pages{};
+    u32 num_met_waits{};   ///< R.10 A1: the met waits, re-tested when their pages changed
+    const SrtMetWait* met_waits{};
+    const u8* check_bytes{}; ///< R.10 A1: the bytes the check runs read
+    const PreparedDraw* dedup_prev{}; ///< R.10 A1: runs marked equal to this draw's
     u32 num_read_pages{};  ///< R.21: guest pages the walks read (0xFF: too many, untrusted)
     std::array<u64, 24> read_pages{};
+    u32 ptr_page_mask{};   ///< R.10 A1 v8: bit i, read_pages[i] holds a table pointer read
     const Shader::SrtCheck* checks{}; ///< R.22: values the walks read, owned by the submission
+    const Shader::SrtGuestRun* guest_runs{}; ///< R.10 A1 v9: guest ranges the walks read
+    u32 num_guest_runs{};
     u32 num_checks{};
     GraphicsPipelineKey key{};
+    u64 key_hash{};        ///< R.10 A1 v8: std::hash of key, computed by the worker
     u32 num_stages{};
     std::array<PreparedStage, MaxShaderStages> stages{};
     PreparedVertexInputs vertex{};
 };
+
+/// R.10 A1: true when every wait the worker found met before `draw` with its label on `page`
+/// still holds.
+bool SrtMetWaitsHold(const PreparedDraw& draw, u64 page);
 
 class DrawPreparation {
 public:

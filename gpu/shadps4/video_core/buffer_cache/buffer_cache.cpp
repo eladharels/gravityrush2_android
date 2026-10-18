@@ -1750,6 +1750,8 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         const auto ranges_lock = RangesLock();
         gpu_modified_ranges.Add(device_addr, size);
         NoteGpuWrite(device_addr, size);
+        // uc3 R.10 A1: stamped where the write binds
+        Vulkan::SrtNoteLanding(device_addr, size, Vulkan::SrtOriginBinding);
     }
     return {arena, arena->Offset(device_addr)};
 }

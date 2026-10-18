@@ -103,6 +103,10 @@ struct Info : InfoPersistent {
 
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
+    /// uc3 R.10 A1 v8 (Fable 2): a trusted prepared draw's flat, in its submission's arena,
+    /// read instead of flattened_ud_buf until the next RefreshFlatBuf (GPU command thread).
+    const u32* trusted_flat = nullptr;
+    u32 trusted_flat_size = 0;
     /// uc3 (R.8.2): dwords of flattened_ud_buf left 0 for a GPU copy (see SrtGpuLeaf).
     std::vector<SrtGpuLeaf> gpu_leaves;
     PersistentSrtInfo srt_info;
@@ -178,6 +182,9 @@ struct Info : InfoPersistent {
         if (const auto* snapshot = Snapshot()) [[unlikely]] {
             return {snapshot->flat, snapshot->flat_size};
         }
+        if (trusted_flat) {
+            return {trusted_flat, trusted_flat_size};
+        }
         return flattened_ud_buf;
     }
 
@@ -212,6 +219,7 @@ struct Info : InfoPersistent {
     }
 
     void RefreshFlatBuf() {
+        trusted_flat = nullptr;
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());

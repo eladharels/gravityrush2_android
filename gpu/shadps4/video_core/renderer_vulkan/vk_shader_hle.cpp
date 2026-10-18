@@ -333,7 +333,7 @@ static bool CopyGuestThroughBacking(Rasterizer& rasterizer, VAddr dst, VAddr src
     rasterizer.NoteGuestWrite(dst, size);
     const bool written =
         Core::Memory::Instance()->TryWriteBacking(reinterpret_cast<void*>(dst), backing, size);
-    SrtNoteWrite(dst, size); // uc3 R.21: again once written
+    SrtNoteWrite(dst, size, SrtOriginRewrite); // uc3 R.21: again once written
     return written;
 }
 
@@ -490,7 +490,7 @@ void RunInOrderCopy(Rasterizer& rasterizer, const u8* data) {
     // itself goes through the page tracker (a protected page faults and invalidates).
     rasterizer.WaitHostCopies();
     std::memcpy(reinterpret_cast<void*>(copy.dst), bytes, copy.size);
-    SrtNoteWrite(copy.dst, copy.size);
+    SrtNoteWrite(copy.dst, copy.size, SrtOriginRewrite);
 }
 } // namespace
 

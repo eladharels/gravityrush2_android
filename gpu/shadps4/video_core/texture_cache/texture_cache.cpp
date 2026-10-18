@@ -889,6 +889,37 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             }
         }
 
+        // ucndc: GOW3_MIP_TRACE=1 (diagnostic): why a target inside an image's range is not taken
+        // as one of its mips (the first 40 cases).
+        static const bool mip_trace = std::getenv("GOW3_MIP_TRACE") != nullptr;
+        static int mip_traces = 0;
+        // Bloom (0x1145450000..) and distortion (0x113d6b0000..) chains are always logged.
+        const auto in_watch = [](u64 x) {
+            return (x >= 0x1145400000ULL && x < 0x1145800000ULL) ||
+                   (x >= 0x113d6b0000ULL && x < 0x113d6e0000ULL);
+        };
+        if (mip_trace && (mip_traces < 40 || in_watch(image_info.guest_address) ||
+                          in_watch(cache_image.info.guest_address))) {
+            ++mip_traces;
+            const auto& a = image_info;
+            const auto& b = cache_image.info;
+            std::printf("ucndc: mip trace %#llx %ux%u fmt %d bits %u pitch %u tile %d array %d levels %u "
+                        "type %d inside %#llx %ux%u fmt %d bits %u pitch %u tile %d array %d levels %u "
+                        "type %d compatible %d mip_of %d; parent mips:",
+                        (unsigned long long)a.guest_address, a.size.width, a.size.height,
+                        int(a.pixel_format), a.num_bits, a.pitch, int(a.tile_mode), int(a.array_mode),
+                        a.resources.levels, int(a.type), (unsigned long long)b.guest_address,
+                        b.size.width, b.size.height, int(b.pixel_format), b.num_bits, b.pitch,
+                        int(b.tile_mode), int(b.array_mode), b.resources.levels, int(b.type),
+                        int(a.IsCompatible(b)), a.MipOf(b));
+            for (u32 m = 0; m < b.resources.levels && m < 8; ++m) {
+                const auto& [mip_size, mip_pitch, mip_height, mip_ofs] = b.mips_layout[m];
+                std::printf(" [%u +%#llx size %#llx pitch %u h %u]", m, (unsigned long long)mip_ofs,
+                            (unsigned long long)mip_size, u32(mip_pitch), u32(mip_height));
+            }
+            std::printf("\n");
+            std::fflush(stdout);
+        }
         // Image isn't a subresource but a chance overlap.
         if (safe_to_delete) {
             FreeImage(cache_image_id);
@@ -897,6 +928,38 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         return {{}, -1, -1};
     } else {
         // Left overlap, the image from cache is a possible subresource of the image requested
+        // ucndc: GOW3_MIP_TRACE=1, the other direction: a new image whose range holds an image
+        // already in the cache (logged when that one is not taken as its mip).
+        static const bool mip_trace_left = std::getenv("GOW3_MIP_TRACE") != nullptr;
+        static int mip_traces_left = 0;
+        const auto in_watch_left = [](u64 x) {
+            return (x >= 0x1145400000ULL && x < 0x1145800000ULL) ||
+                   (x >= 0x113d6b0000ULL && x < 0x113d6e0000ULL);
+        };
+        if (mip_trace_left &&
+            (mip_traces_left < 40 || in_watch_left(image_info.guest_address) ||
+             in_watch_left(cache_image.info.guest_address)) &&
+            cache_image.info.MipOf(image_info) < 0) {
+            ++mip_traces_left;
+            const auto& a = cache_image.info;
+            const auto& b = image_info;
+            std::printf("ucndc: mip trace (left) %#llx %ux%u fmt %d bits %u pitch %u tile %d array %d levels %u "
+                        "type %d inside %#llx %ux%u fmt %d bits %u pitch %u tile %d array %d levels %u "
+                        "type %d compatible %d mip_of %d; parent mips:",
+                        (unsigned long long)a.guest_address, a.size.width, a.size.height,
+                        int(a.pixel_format), a.num_bits, a.pitch, int(a.tile_mode), int(a.array_mode),
+                        a.resources.levels, int(a.type), (unsigned long long)b.guest_address,
+                        b.size.width, b.size.height, int(b.pixel_format), b.num_bits, b.pitch,
+                        int(b.tile_mode), int(b.array_mode), b.resources.levels, int(b.type),
+                        int(a.IsCompatible(b)), a.MipOf(b));
+            for (u32 m = 0; m < b.resources.levels && m < 8; ++m) {
+                const auto& [mip_size, mip_pitch, mip_height, mip_ofs] = b.mips_layout[m];
+                std::printf(" [%u +%#llx size %#llx pitch %u h %u]", m, (unsigned long long)mip_ofs,
+                            (unsigned long long)mip_size, u32(mip_pitch), u32(mip_height));
+            }
+            std::printf("\n");
+            std::fflush(stdout);
+        }
         if (auto mip = cache_image.info.MipOf(image_info); mip >= 0) {
             if (auto slice = cache_image.info.SliceOf(image_info, mip); slice >= 0) {
                 // We have a larger image created and a separate one, representing a subres of it
@@ -1018,6 +1081,41 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     // Try to resolve overlaps (if any)
     int view_mip{-1};
     int view_slice{-1};
+
+    // ucndc: GOW3_MIP_FIX=1: a single-level image that is exactly one mip of a larger image in
+    // the cache (it was rendered on its own, often before the larger one existed) is copied into
+    // that mip and dropped, so the draw writes the larger image's mip and samplers see it.
+    if (image_id && info.resources.levels == 1 && ImageInfo::MipFixEnabled()) {
+        for (const auto& cache_id : image_ids) {
+            if (cache_id == image_id) {
+                continue;
+            }
+            auto& parent = slot_images[cache_id];
+            if (parent.info.resources.levels <= 1 ||
+                parent.info.guest_address > info.guest_address) {
+                continue;
+            }
+            const s32 mip = info.MipOf(parent.info);
+            if (mip < 0) {
+                continue;
+            }
+            const s32 slice = info.SliceOf(parent.info, mip);
+            if (slice < 0) {
+                continue;
+            }
+            auto& single = slot_images[image_id];
+            runtime.CopyMip(&single, &parent, mip, slice);
+            if (single.binding.is_bound || single.binding.is_target) {
+                single.binding.needs_rebind = 1u;
+            }
+            FreeImage(image_id);
+            image_id = cache_id;
+            view_mip = mip;
+            view_slice = slice;
+            break;
+        }
+    }
+
     if (!image_id) {
         for (const auto& cache_id : image_ids) {
             view_mip = -1;
@@ -1062,6 +1160,29 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     if (view_slice > 0) {
         desc.view_info.range.base.layer = view_slice;
+    }
+
+    // ucndc: GOW3_MIP_TRACE=1: requests in the bloom and distortion chains and what they resolve to.
+    static const bool find_trace = std::getenv("GOW3_MIP_TRACE") != nullptr;
+    static int find_traces = 0;
+    if (find_trace && find_traces < 400 &&
+        ((info.guest_address >= 0x1145400000ULL && info.guest_address < 0x1145800000ULL) ||
+         (info.guest_address >= 0x113d6b0000ULL && info.guest_address < 0x113d6e0000ULL))) {
+        ++find_traces;
+        const auto& r = image.info;
+        std::printf("ucndc: mip find %#llx %ux%u pitch %u levels %u size %#llx pow2 %d binding %d -> "
+                    "%#llx %ux%u pitch %u levels %u size %#llx view_mip %d mips:",
+                    (unsigned long long)info.guest_address, info.size.width, info.size.height,
+                    info.pitch, info.resources.levels, (unsigned long long)info.guest_size,
+                    int(info.props.is_pow2), int(desc.type), (unsigned long long)r.guest_address,
+                    r.size.width, r.size.height, r.pitch, r.resources.levels,
+                    (unsigned long long)r.guest_size, view_mip);
+        for (u32 m = 0; m < r.resources.levels && m < 8; ++m) {
+            std::printf(" [%u +%#llx p %u]", m, (unsigned long long)r.mips_layout[m].offset,
+                        u32(r.mips_layout[m].pitch));
+        }
+        std::printf("\n");
+        std::fflush(stdout);
     }
 
     cached = FindImageCacheEntry{

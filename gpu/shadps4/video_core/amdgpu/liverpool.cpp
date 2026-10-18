@@ -444,6 +444,63 @@ bool ComputeRegisterOpcode(PM4ItOpcode opcode) {
     }
 }
 
+/// uc3 R.10 A1 (R.22 §1): the guest range a memory-writing packet writes, stamped on the
+/// command thread instead of a global change. False when the range is not known.
+bool SrtNotePacketRange(const PM4Type3Header* header) {
+    const auto stamp = [](VAddr address, u64 size) {
+        Vulkan::SrtNoteWrite(address, size, Vulkan::SrtOriginPacket);
+        return true;
+    };
+    const auto label_size = [](DataSelect sel) -> u32 {
+        switch (sel) {
+        case DataSelect::None:
+            return 0;
+        case DataSelect::Data32Low:
+            return 4;
+        case DataSelect::Data64:
+        case DataSelect::GpuClock64:
+        case DataSelect::PerfCounter:
+            return 8;
+        default:
+            return ~0u;
+        }
+    };
+    switch (header->opcode.Value()) {
+    case PM4ItOpcode::EventWriteEop: {
+        const auto* eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+        const u32 size = label_size(eop->data_sel.Value());
+        return size == ~0u ? false : size == 0 ? true : stamp(reinterpret_cast<VAddr>(eop->Address<u32>()), size);
+    }
+    case PM4ItOpcode::EventWriteEos: {
+        const auto* eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
+        return stamp(eos->Address<VAddr>(), 4);
+    }
+    case PM4ItOpcode::ReleaseMem: {
+        const auto* release = reinterpret_cast<const PM4CmdReleaseMem*>(header);
+        if (release->data_sel.Value() == DataSelect::GdsMemStore) {
+            return stamp(release->Address<VAddr>(), release->num_dw * sizeof(u32));
+        }
+        const u32 size = label_size(release->data_sel.Value());
+        return size == ~0u ? false : size == 0 ? true : stamp(release->Address<VAddr>(), size);
+    }
+    case PM4ItOpcode::DmaData: {
+        const auto* dma = reinterpret_cast<const PM4DmaData*>(header);
+        if (dma->dst_sel == DmaDataDst::Memory || dma->dst_sel == DmaDataDst::MemoryUsingL2) {
+            return stamp(dma->DstAddress<VAddr>(), dma->NumBytes());
+        }
+        return dma->dst_sel == DmaDataDst::Gds;
+    }
+    case PM4ItOpcode::WriteData: {
+        const auto* write = reinterpret_cast<const PM4CmdWriteData*>(header);
+        return stamp(write->Address<VAddr>(), (header->count.Value() - 2) * sizeof(u32));
+    }
+    case PM4ItOpcode::CopyData:
+        return true; // not executed (logged as unhandled)
+    default:
+        return false;
+    }
+}
+
 bool ComputePipeOn() {
     static const bool enabled = [] {
         const char* value = std::getenv("GOW3_COMPUTE_PIPE");
@@ -452,6 +509,50 @@ bool ComputePipeOn() {
     return enabled;
 }
 } // namespace
+
+void Liverpool::SrtNoteGpuLabelPacket(const PM4Header* header, u64 seq) {
+    switch (header->type3.opcode.Value()) {
+    case PM4ItOpcode::EventWriteEop: {
+        const auto* eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+        const auto address = reinterpret_cast<VAddr>(eop->Address<u32>());
+        if (eop->data_sel.Value() == DataSelect::Data32Low) {
+            Vulkan::SrtNoteGpuLabel(address, eop->DataDWord(), seq);
+        } else if (eop->data_sel.Value() == DataSelect::Data64) {
+            Vulkan::SrtNoteGpuLabel(address, eop->DataQWord(), seq);
+        }
+        break;
+    }
+    case PM4ItOpcode::EventWriteEos: {
+        const auto* eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
+        if (eos->command.Value() == PM4CmdEventWriteEos::Command::SignalFence) {
+            Vulkan::SrtNoteGpuLabel(eos->Address<VAddr>(), eos->DataDWord(), seq);
+        }
+        break;
+    }
+    case PM4ItOpcode::ReleaseMem: {
+        const auto* release = reinterpret_cast<const PM4CmdReleaseMem*>(header);
+        if (release->data_sel.Value() == DataSelect::Data32Low) {
+            Vulkan::SrtNoteGpuLabel(release->Address<VAddr>(), release->DataDWord(), seq);
+        } else if (release->data_sel.Value() == DataSelect::Data64) {
+            Vulkan::SrtNoteGpuLabel(release->Address<VAddr>(), release->DataQWord(), seq);
+        }
+        break;
+    }
+    case PM4ItOpcode::WriteData: {
+        const auto* write = reinterpret_cast<const PM4CmdWriteData*>(header);
+        const u32 dwords = header->type3.count.Value() - 2;
+        if (dwords == 1) {
+            Vulkan::SrtNoteGpuLabel(write->Address<VAddr>(), write->data[0], seq);
+        } else if (dwords == 2) {
+            Vulkan::SrtNoteGpuLabel(write->Address<VAddr>(),
+                                    write->data[0] | u64(write->data[1]) << 32, seq);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
 
 namespace {
 void SignalEop(const PM4CmdEventWriteEop& eop) {
@@ -463,6 +564,7 @@ void SignalEop(const PM4CmdEventWriteEop& eop) {
             if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                 memcpy(address, &data, num_bytes);
             }
+            Vulkan::SrtNoteLanding(reinterpret_cast<VAddr>(address), num_bytes);
         },
         [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
 }
@@ -526,6 +628,9 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
         UNREACHABLE_MSG("WriteData src_sel = {}, dst_sel = {}", u32(dma_data->src_sel),
                         u32(dma_data->dst_sel));
     }
+    if (dma_data->dst_sel == DmaDataDst::Memory || dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
+        Vulkan::SrtNoteLanding(dma_data->DstAddress<VAddr>(), dma_data->NumBytes());
+    }
 }
 
 void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
@@ -545,6 +650,8 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
                      (header->type3.count.Value() - 2) * sizeof(u32), Gow3WriteLog::WriteData);
     std::memcpy(write_data->Address<u64*>(), write_data->data,
                 (header->type3.count.Value() - 2) * sizeof(u32));
+    Vulkan::SrtNoteLanding(write_data->Address<VAddr>(),
+                           (header->type3.count.Value() - 2) * sizeof(u32));
 }
 
 void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
@@ -560,6 +667,7 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
         if (!memory->TryWriteBacking(address, &value, num_bytes)) {
             memcpy(address, &value, num_bytes);
         }
+        Vulkan::SrtNoteLanding(reinterpret_cast<VAddr>(address), num_bytes);
     });
     if (event_eos.command == PM4CmdEventWriteEos::Command::GdsStore) {
         ASSERT(event_eos.size == 1);
@@ -586,6 +694,7 @@ void SignalReleaseMem(Vulkan::Rasterizer& rasterizer, const ReleaseMemTask& task
         if (!Core::Memory::Instance()->TryWriteBacking(address, &value, sizeof(value))) {
             std::memcpy(address, &value, sizeof(value));
         }
+        Vulkan::SrtNoteLanding(reinterpret_cast<VAddr>(address), sizeof(value));
     };
     switch (packet.data_sel.Value()) {
     case DataSelect::Data32Low:
@@ -603,6 +712,7 @@ void SignalReleaseMem(Vulkan::Rasterizer& rasterizer, const ReleaseMemTask& task
     case DataSelect::GdsMemStore:
         rasterizer.CopyBuffer(packet.Address<VAddr>(), packet.gds_index,
                               packet.num_dw * sizeof(u32), false, true);
+        Vulkan::SrtNoteLanding(packet.Address<VAddr>(), packet.num_dw * sizeof(u32));
         break;
     default:
         UNREACHABLE();
@@ -772,7 +882,8 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             memcpy(dump_const->Address<void*>(),
                    cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
             // uc3 R.21: stamped again once written, for walks that read before the copy.
-            Vulkan::SrtNoteWrite(dump_const->Address<VAddr>(), dump_const->Size());
+            Vulkan::SrtNoteWrite(dump_const->Address<VAddr>(), dump_const->Size(),
+                                 Vulkan::SrtOriginRewrite);
             break;
         }
         case PM4ItOpcode::IncrementCeCounter: {
@@ -1740,14 +1851,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             // uc3 R.21: a wait may release data the CPU wrote while the GPU waited; a packet
             // that wrote guest memory without noting its range counts as a global change.
+            // R.10 A1: graphics waits are evaluated by the prep worker instead, and a packet's
+            // own range is stamped when known.
             if (opcode == PM4ItOpcode::MemSemaphore || opcode == PM4ItOpcode::Rewind ||
                 opcode == PM4ItOpcode::WaitRegMem || opcode == PM4ItOpcode::WaitOnCeCounter) {
-                Vulkan::SrtGlobalEvent(0);
+                if (!Vulkan::SrtA1()) {
+                    Vulkan::SrtGlobalEvent(0);
+                }
             } else if ((opcode == PM4ItOpcode::DmaData || opcode == PM4ItOpcode::WriteData ||
                         opcode == PM4ItOpcode::CopyData || opcode == PM4ItOpcode::EventWriteEop ||
                         opcode == PM4ItOpcode::EventWriteEos ||
                         opcode == PM4ItOpcode::ReleaseMem) &&
-                       Vulkan::g_srt_write_seq.load(std::memory_order_relaxed) == srt_seq_before) {
+                       Vulkan::g_srt_write_seq.load(std::memory_order_relaxed) == srt_seq_before &&
+                       !(Vulkan::SrtA1() && SrtNotePacketRange(&header->type3))) {
                 Vulkan::SrtGlobalEvent(3);
             }
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
@@ -2171,7 +2287,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             Vulkan::SrtGlobalEvent(0);
         } else if ((opcode == PM4ItOpcode::DmaData || opcode == PM4ItOpcode::WriteData ||
                     opcode == PM4ItOpcode::CopyData || opcode == PM4ItOpcode::ReleaseMem) &&
-                   Vulkan::g_srt_write_seq.load(std::memory_order_relaxed) == srt_seq_before) {
+                   Vulkan::g_srt_write_seq.load(std::memory_order_relaxed) == srt_seq_before &&
+                   !(Vulkan::SrtA1() && SrtNotePacketRange(&header->type3))) {
             Vulkan::SrtGlobalEvent(3);
         }
 
