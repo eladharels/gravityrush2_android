@@ -445,6 +445,25 @@ static bool GfxPipeSplit() {
     return on;
 }
 std::atomic<u32> g_gow3_pool_reuses;
+// uc3: GOW3_A1_DIVERGENCE_LOG=1 - diagnostic: on a prep trust flat divergence, print why the draw
+// was trusted (stamp state, value check) and the dwords that differ (trusted vs recomputed).
+static bool A1DivergenceLog() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_A1_DIVERGENCE_LOG");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+struct A1TrustContext {
+    u32 stamp_why = ~0u; ///< why from the stamps, before the value check
+    u32 origin = ~0u;
+    bool by_value = false;
+    bool values_hold = false;
+    bool after_wait = false;
+    bool label_unmet = false;
+    u32 num_checks = 0;
+};
+static A1TrustContext g_a1_ctx;
 std::atomic<u32> g_gow3_pending_draws;
 namespace {
 struct PhaseTimer {
@@ -931,6 +950,10 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
                     last_value_ok = &prepared;
                 }
             }
+            if (A1DivergenceLog()) {
+                g_a1_ctx = {why, origin, by_value, values_hold, wait_check, label_unmet,
+                            prepared.num_checks};
+            }
             if (by_value && values_hold) {
                 why = 0;
                 ++prep_trust_validated;
@@ -1045,6 +1068,34 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         if (flat_differs) {
             if (trusted) {
                 NotePrepTrustDivergence("flat", stage.hash, info.pgm_base);
+                if (A1DivergenceLog()) {
+                    const auto& ctx = g_a1_ctx;
+                    std::printf("uc3 A1 divergence detail: shader %#llx stage %u base %#llx->%#llx "
+                                "flat dwords %u->%zu; stamps why %u origin %u pw_origin %d, by value %d "
+                                "(values held %d, %u checks), after a wait %d, label unmet %d; differ:",
+                                (unsigned long long)stage.hash, i,
+                                (unsigned long long)stage.pgm_base,
+                                (unsigned long long)info.pgm_base, u32(stage.flat_size),
+                                info.flattened_ud_buf.size(), ctx.stamp_why, ctx.origin,
+                                pw_origin == ~0u ? -1 : int(pw_origin), int(ctx.by_value),
+                                int(ctx.values_hold), ctx.num_checks, int(ctx.after_wait),
+                                int(ctx.label_unmet));
+                    const size_t n = std::min<size_t>(stage.flat_size, info.flattened_ud_buf.size());
+                    u32 shown = 0;
+                    u32 total = 0;
+                    for (size_t d = 0; d < n; ++d) {
+                        if (stage.flat[d] != info.flattened_ud_buf[d]) {
+                            ++total;
+                            if (shown < 24) {
+                                ++shown;
+                                std::printf(" [%zu] %#x->%#x", d, stage.flat[d],
+                                            info.flattened_ud_buf[d]);
+                            }
+                        }
+                    }
+                    std::printf(" (%u of %zu dwords; user data %zu dwords)\n", total, n,
+                                info.user_data.size());
+                }
             }
             if (pw_origin < SrtNumOrigins) {
                 ++prep_trust_pw_real[pw_origin];

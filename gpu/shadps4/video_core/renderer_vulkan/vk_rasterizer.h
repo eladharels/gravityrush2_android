@@ -284,6 +284,7 @@ private:
     };
     /// Everything of an indirect draw after the pipeline selection (GPU thread or stage B).
     void DumpOnDraw(const GraphicsPipeline* pipeline);
+    void SamplerLog(const GraphicsPipeline* pipeline);
     void DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_indexed,
                             const IndirectDraw& indirect);
     /// Everything of an indirect dispatch after the pipeline selection.

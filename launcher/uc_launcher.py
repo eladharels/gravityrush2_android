@@ -63,7 +63,8 @@ GAMES = [
      {'GOW3_HLE_INORDER': '1', 'GOW3_ACB_DISPATCH_PIPE': '1'}),
     ('uc3', "Uncharted 3: Drake's Deception", 'big3-ps4_Shipping.elf', ('Jogável · 60 FPS', 'Playable · 60 FPS'),
      {'GOW3_COMPUTE_PIPE': '1', 'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1',
-      'GOW3_MIP_FIX': '1', 'GOW3_MOUSE_EDGE_AIM': '1'}),
+      'GOW3_MIP_FIX': '1', 'GOW3_MOUSE_EDGE_AIM': '1', 'GOW3_SCOPE_SPLIT_SCALAR': '1',
+      'GOW3_DEPTH_KEEP_CLEAR': '1'}),
 ]
 # Off unless chosen in Options > Advanced (launcher.json 'experimental'): (games, value).
 EXPERIMENTAL = {'GOW3_PREP_TRUST_A1': (('uc3',), '1')}
@@ -106,6 +107,8 @@ TOGGLE_HELP = {
     'GOW3_JOB_SPIN': ('Threads de jobs giram menos antes de dormir (menos CPU)', 'Job threads spin less before sleeping (less CPU)'),
     'GOW3_MIP_FIX': ('Bloom e distorção corretos (imagem não fica lavada, UC3)', 'Correct bloom and distortion (no washed-out image, UC3)'),
     'GOW3_MOUSE_EDGE_AIM': ('Mouse na mira pendurado e escalando (UC3)', 'Mouse aiming while hanging and climbing (UC3)'),
+    'GOW3_SCOPE_SPLIT_SCALAR': ('Névoa dos cones de luz sem cunhas pretas (UC3)', 'Light cone fog without black wedges (UC3)'),
+    'GOW3_DEPTH_KEEP_CLEAR': ('Sombras e luzes sem piscar (UC3)', 'Shadows and lights without flicker (UC3)'),
     'GOW3_PREP_TRUST_A1': ('Experimental: preparo de desenhos mais rápido (+FPS, UC3)', 'Experimental: faster draw preparation (+FPS, UC3)'),
     'GOW3_JOB_SLEEP': ('Threads de jobs podem dormir no gameplay (menos CPU)', 'Job threads may sleep in gameplay (less CPU)'),
 }

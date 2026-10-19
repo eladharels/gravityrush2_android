@@ -51,6 +51,9 @@ struct Block : Hook {
     bool is_dummy{};
 };
 
+// uc3: GOW3_SCOPE_SPLIT_SCALAR (see control_flow_graph.cpp); part of the shader cache version.
+bool ScopeSplitScalar();
+
 class CFG {
     using Label = u32;
     using BlockList = boost::intrusive::set<Block>;

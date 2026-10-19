@@ -93,6 +93,58 @@ static void WatchLog(const char* what, const Image& image) {
 // uc3: GOW3_FLASH_TRACE time base: process start (the game window follows within seconds).
 static const auto uc3_flash_clock = std::chrono::steady_clock::now();
 
+// uc3: GOW3_EXPAND_FRESH=1 - when an image grows (more layers/levels), take the new image from
+// guest memory and copy the old one into it only if the GPU wrote the old one (refreshed first).
+// Before, the old image was always copied over the fresh upload, so a CPU-filled array whose old
+// copy was stale showed dark for a moment (flickering wall/texture, SanitizeCopyLayers N -> N+1).
+static bool ExpandFresh() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_EXPAND_FRESH");
+        const bool v = env && env[0] == '1';
+        if (v) {
+            std::printf("Texture cache: grown images start from guest memory\n");
+        }
+        return v;
+    }();
+    return on;
+}
+
+// uc3: GOW3_EXPAND_TRACE=1 - diagnostic: one line per image expansion and per freed image with
+// more than one layer (caller line, address, layers, flags), to find who shrinks an array back.
+static bool ExpandTrace() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_EXPAND_TRACE");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+// uc3: GOW3_DEPTH_KEEP_CLEAR=1 - a depth image recreated through overlap resolution (shadow map
+// arrays grown one layer at a time) keeps the HTILE clear state of the image it replaces. Before,
+// the new image registered its HTILE with clear mask 0, so a pending HTILE clear (ClearMeta) was
+// lost and the next cascade was drawn over uncleared depth (flickering light/shadows).
+static bool DepthKeepClear() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_DEPTH_KEEP_CLEAR");
+        const bool v = env && env[0] == '1';
+        if (v) {
+            std::printf("Texture cache: recreated depth images keep their HTILE clear state\n");
+        }
+        return v;
+    }();
+    return on;
+}
+
+static double ExpandTraceTime() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - uc3_flash_clock)
+        .count();
+}
+
+static bool ExpandTraceBudget() {
+    static std::atomic<int> lines{0};
+    return lines.fetch_add(1, std::memory_order_relaxed) < 50000;
+}
+
 static constexpr u32 MAX_IMAGES = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_IMAGE_VIEWS = std::numeric_limits<u16>::max();
 
@@ -663,8 +715,17 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
     }
 
     if (recreate) {
+        const bool fresh = ExpandFresh();
         auto new_info = requested_info;
-        new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
+        if (fresh) {
+            // SubresourceExtent compares levels first, so std::max can drop layers.
+            new_info.resources.levels =
+                std::max(requested_info.resources.levels, cache_image.info.resources.levels);
+            new_info.resources.layers =
+                std::max(requested_info.resources.layers, cache_image.info.resources.layers);
+        } else {
+            new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
+        }
         new_info.UpdateSize();
         const auto new_image_id = slot_images.Insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(new_image_id);
@@ -672,19 +733,72 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         // Inherit image usage
         auto& new_image = slot_images[new_image_id];
         new_image.usage = cache_image.usage;
+        const bool src_gpu = True(cache_image.flags & ImageFlagBits::GpuModified);
+        const u32 src_flags = static_cast<u32>(cache_image.flags);
+        const u64 uploaded = Gow3Stats::image_upload_bytes.load(std::memory_order_relaxed);
+        if (fresh && src_gpu) {
+            RefreshImage(cache_image);
+        }
         // Upstream #5229: the added layers/levels start from guest memory, not undefined.
         if (new_info.num_samples == 1 &&
-            (new_info.resources.layers > cache_image.info.resources.layers ||
+            ((fresh && !src_gpu) ||
+             new_info.resources.layers > cache_image.info.resources.layers ||
              new_info.resources.levels > cache_image.info.resources.levels)) {
             RefreshImage(new_image);
         }
+        const bool refreshed =
+            Gow3Stats::image_upload_bytes.load(std::memory_order_relaxed) != uploaded;
         new_image.flags &= ~ImageFlagBits::Dirty;
         // When creating a depth buffer through overlap resolution don't clear it on first use.
         new_image.info.meta_info.htile_clear_mask = 0;
-        runtime.CopyColorAndDepth(&cache_image, &new_image);
+        const VAddr old_htile = cache_image.info.meta_info.htile_addr;
+        bool had_meta = false;
+        s32 old_clear_mask = 0;
+        if (old_htile) {
+            const auto it = surface_metas.find(old_htile);
+            if (it != surface_metas.end() && it.value().type == MetaType::HTile &&
+                it.value().owner_uid == cache_image.image_uid) {
+                had_meta = true;
+                old_clear_mask = it.value().clear_mask;
+            }
+        }
+        const bool keep_clear = DepthKeepClear() && had_meta;
+        if (keep_clear) {
+            new_image.info.meta_info.htile_addr = old_htile;
+            new_image.info.meta_info.htile_clear_mask = old_clear_mask;
+        }
+        const bool copied = !fresh || src_gpu;
+        if (copied) {
+            runtime.CopyColorAndDepth(&cache_image, &new_image);
+        }
+        if (ExpandTrace() && ExpandTraceBudget()) {
+            const auto& o = cache_image.info;
+            std::printf("Expand trace: %.2f s recreate (depth) addr %#llx size %#llx type %d fmt %d "
+                        "%ux%u layers %u->%u levels %u->%u flags %#x gpu %d bound %d target %d "
+                        "refreshed %d copied %d htile %#llx meta %d clear_mask %#x kept %d\n",
+                        ExpandTraceTime(), (unsigned long long)o.guest_address,
+                        (unsigned long long)new_info.guest_size, int(new_info.type),
+                        int(new_info.pixel_format), new_info.size.width, new_info.size.height,
+                        u32(o.resources.layers), u32(new_info.resources.layers),
+                        u32(o.resources.levels), u32(new_info.resources.levels), src_flags,
+                        int(src_gpu), int(cache_image.binding.is_bound),
+                        int(cache_image.binding.is_target), int(refreshed), int(copied),
+                        (unsigned long long)old_htile, int(had_meta), u32(old_clear_mask),
+                        int(keep_clear));
+        }
 
         // Free the cache image.
         FreeImage(cache_image_id);
+        if (keep_clear) {
+            const auto& kept = slot_images[new_image_id];
+            RegisterMeta(old_htile, MetaDataInfo{
+                                        .type = MetaType::HTile,
+                                        .owner_id = new_image_id,
+                                        .owner_uid = kept.image_uid,
+                                        .num_samples = kept.info.num_samples,
+                                        .clear_mask = old_clear_mask,
+                                    });
+        }
         return new_image_id;
     }
 
@@ -987,15 +1101,57 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
     return {merged_image_id, -1, -1};
 }
 
-ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
+void TextureCache::TraceFree(const Image& image, u32 line) {
+    if (image.info.resources.layers <= 1 || !ExpandTrace() || !ExpandTraceBudget()) {
+        return;
+    }
+    const auto& o = image.info;
+    std::printf("Expand trace: %.2f s free line %u addr %#llx size %#llx type %d fmt %d %ux%u "
+                "layers %u levels %u flags %#x bound %d target %d age %llu\n",
+                ExpandTraceTime(), line, (unsigned long long)o.guest_address,
+                (unsigned long long)o.guest_size, int(o.type), int(o.pixel_format), o.size.width,
+                o.size.height, u32(o.resources.layers), u32(o.resources.levels),
+                static_cast<u32>(image.flags), int(image.binding.is_bound),
+                int(image.binding.is_target),
+                (unsigned long long)(scheduler.CurrentTick() - image.tick_accessed_last));
+}
+
+ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id,
+                                  std::source_location loc) {
     const auto new_image_id = slot_images.Insert(instance, runtime, slot_image_views, info);
     RegisterImage(new_image_id);
 
     auto& src_image = slot_images[image_id];
     auto& new_image = slot_images[new_image_id];
 
+    const bool fresh = ExpandFresh();
+    const bool src_gpu = True(src_image.flags & ImageFlagBits::GpuModified);
+    const u32 src_flags = static_cast<u32>(src_image.flags);
+    const u64 uploaded = Gow3Stats::image_upload_bytes.load(std::memory_order_relaxed);
+    if (fresh && src_gpu) {
+        RefreshImage(src_image);
+    }
     RefreshImage(new_image);
-    runtime.CopyImage(&src_image, &new_image);
+    const bool refreshed =
+        Gow3Stats::image_upload_bytes.load(std::memory_order_relaxed) != uploaded;
+    const bool copied = !fresh || src_gpu;
+    if (copied) {
+        runtime.CopyImage(&src_image, &new_image);
+    }
+    if (ExpandTrace() && ExpandTraceBudget()) {
+        const auto& o = src_image.info;
+        std::printf("Expand trace: %.2f s expand line %u addr %#llx size %#llx->%#llx type %d->%d "
+                    "fmt %d->%d %ux%u layers %u->%u levels %u->%u flags %#x gpu %d bound %d "
+                    "target %d refreshed %d copied %d\n",
+                    ExpandTraceTime(), u32(loc.line()), (unsigned long long)o.guest_address,
+                    (unsigned long long)o.guest_size, (unsigned long long)info.guest_size,
+                    int(o.type), int(info.type), int(o.pixel_format), int(info.pixel_format),
+                    info.size.width, info.size.height, u32(o.resources.layers),
+                    u32(info.resources.layers), u32(o.resources.levels),
+                    u32(info.resources.levels), src_flags, int(src_gpu),
+                    int(src_image.binding.is_bound), int(src_image.binding.is_target),
+                    int(refreshed), int(copied));
+    }
 
     if (src_image.binding.is_bound || src_image.binding.is_target) {
         src_image.binding.needs_rebind = 1u;

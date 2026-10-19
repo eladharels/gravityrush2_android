@@ -22,6 +22,7 @@
 #include "common/thread.h"
 #include "gow3_overlay.h"
 #include "core/emulator_settings.h"
+#include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
@@ -32,9 +33,14 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 10u; // uc3: shadPS4 nightly 23c4133 (upstream: 9)
+static constexpr u32 ShaderBinaryVersion = 11u; // uc3: divergence scope fix (upstream: 9)
 static constexpr u32 ShaderMetaVersion = 10u;   // uc3: SRT walker context (upstream: 6)
 static constexpr u32 PipelineKeyVersion = 7u;   // uc3: shadPS4 nightly 23c4133 (upstream: 3)
+// uc3: translator options that change the shaders it produces are part of the cached version, so
+// switching one retranslates the shaders instead of reusing the cached ones.
+static u32 TranslatedBinaryVersion() {
+    return ShaderBinaryVersion | (Shader::Gcn::ScopeSplitScalar() ? 0x10000u : 0u);
+}
 } // namespace Serialization
 
 namespace Vulkan {
@@ -596,7 +602,7 @@ void RegisterShaderMeta(const Shader::Info& info,
     Serialization::Writer meta{ar};
 
     meta.Write(Serialization::ShaderMetaVersion);
-    meta.Write(Serialization::ShaderBinaryVersion);
+    meta.Write(Serialization::TranslatedBinaryVersion());
 
     meta.Write(perm_hash);
     meta.Write(perm_idx);
@@ -631,7 +637,7 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
 
     u32 binary_version{};
     meta.Read(binary_version);
-    if (binary_version != Serialization::ShaderBinaryVersion) {
+    if (binary_version != Serialization::TranslatedBinaryVersion()) {
         return false;
     }
 

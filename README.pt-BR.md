@@ -192,6 +192,8 @@ ligam o conjunto testado. Todas também valem com o prefixo antigo `GOW3_`
 | `UC_JOB_SPIN`, `UC_JOB_SLEEP` | `UC_JOB_SPIN=100` + `UC_JOB_SLEEP=1`: as seis threads de jobs do jogo giram menos e dormem durante o jogo; o uso de CPU cai de uns 66% para uns 50% com o mesmo FPS (UC3) |
 | `UC_MIP_FIX` | O cache de texturas aceita render targets desenhados num mip de uma imagem maior, então o bloom e a distorção não se perdem (corrige a imagem lavada e acinzentada no UC3) |
 | `UC_MOUSE_EDGE_AIM` | O mouse gira a câmera ao mirar pendurado num beiral ou escalando, e nos pontos pendurado onde a mira girava devagar (UC3) |
+| `UC_DEPTH_KEEP_CLEAR` | Um array de mapas de sombra recriado com mais camadas mantém a limpeza de profundidade pendente da imagem que ele substitui (corrige luzes, sombras e paredes escuras piscando no UC3, por exemplo no castelo) |
+| `UC_SCOPE_SPLIT_SCALAR` | O tradutor de shaders executa para a wave inteira uma instrução escalar que fica entre as instruções vetoriais de um bloco divergente, como a GPU faz (corrige as cunhas pretas e o chuvisco branco na névoa dos cones de luz do UC3) |
 | `UC_PREP_TRUST_A1` | Experimental, desligado no launcher: o preparo dos desenhos reaproveita o trabalho que consegue provar que continua válido (uns +5 FPS nas ruínas do deserto no UC3) |
 | `UC_HLE_INORDER`, `UC_ACB_DISPATCH_PIPE` | Deixam a perseguição nos telhados do UC2 a 60 FPS; desligue se o prólogo do trem falhar |
 

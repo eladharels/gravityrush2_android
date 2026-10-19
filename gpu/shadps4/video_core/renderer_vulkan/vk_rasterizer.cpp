@@ -1637,6 +1637,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
     DebugState.IncDrawCall();
     DumpOnDraw(pipeline);
+    SamplerLog(pipeline);
 
     ResetBindings(false);
     scheduler.KickRecording();
@@ -1796,6 +1797,69 @@ void Rasterizer::DumpOnDraw(const GraphicsPipeline* pipeline) {
 
 }
 
+// ucndc (GOW3_SAMPLER_LOG=<hex ps hash>, diagnosis, Opus): for draws with that pixel shader, the
+// S# of each sampler (compare function, filters, clamps, border) with the VkCompareOp the port
+// makes from it, and the images the texture cache holds at GOW3_SAMPLER_LOG_ADDR=<hex address>;
+// also each draw that renders depth to that address, with its image id. 120 lines at most.
+void Rasterizer::SamplerLog(const GraphicsPipeline* pipeline) {
+    static const char* log_ps = std::getenv("GOW3_SAMPLER_LOG");
+    if (!log_ps || !log_ps[0]) {
+        return;
+    }
+    static const u64 ps_hash = std::strtoull(log_ps, nullptr, 16);
+    static const VAddr watch = [] {
+        const char* env = std::getenv("GOW3_SAMPLER_LOG_ADDR");
+        return env && env[0] ? VAddr(std::strtoull(env, nullptr, 16)) : VAddr(0);
+    }();
+    static int lines = 0;
+    static u32 last_depth_id = ~0u;
+    if (lines >= 120) {
+        return;
+    }
+    const auto* fs = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    const u64 hash = fs ? fs->pgm_hash : 0;
+    if (watch && db_desc.first) {
+        const auto& depth = texture_cache.GetImage(db_desc.first);
+        if (depth.info.guest_address == watch && db_desc.first.index != last_depth_id) {
+            last_depth_id = db_desc.first.index;
+            std::printf("Sampler log: depth target at %#llx is image %u (%ux%u, fmt %d, %u bit), ps %016llx\n",
+                        (unsigned long long)watch, db_desc.first.index, depth.info.size.width,
+                        depth.info.size.height, int(depth.info.pixel_format), depth.info.num_bits,
+                        (unsigned long long)hash);
+            ++lines;
+        }
+    }
+    if (!fs || hash != ps_hash) {
+        return;
+    }
+    for (u32 i = 0; i < fs->samplers.size(); ++i) {
+        const auto& sampler = fs->samplers[i];
+        const auto ssharp = sampler.GetSharp(*fs);
+        std::printf("Sampler log: ps %016llx sampler %u: raw %016llx %016llx, compare op %u -> Vk %s, "
+                    "compareEnable %d, mag %u min %u mip %u, clamp %u/%u/%u, border %u, lod %u..%u, "
+                    "valid %d\n",
+                    (unsigned long long)hash, i, (unsigned long long)ssharp.raw0,
+                    (unsigned long long)ssharp.raw1, u32(ssharp.depth_compare_func.Value()),
+                    vk::to_string(LiverpoolToVK::DepthCompare(ssharp.depth_compare_func)).c_str(),
+                    int(sampler.is_depth), u32(ssharp.xy_mag_filter.Value()),
+                    u32(ssharp.xy_min_filter.Value()), u32(ssharp.mip_filter.Value()),
+                    u32(ssharp.clamp_x.Value()), u32(ssharp.clamp_y.Value()),
+                    u32(ssharp.clamp_z.Value()), u32(ssharp.border_color_type.Value()),
+                    u32(ssharp.min_lod.Value()), u32(ssharp.max_lod.Value()), int(ssharp.Valid()));
+        ++lines;
+    }
+    if (watch) {
+        texture_cache.ForEachImageInRegion(watch, 1, [&](VideoCore::ImageId id, VideoCore::Image& image) {
+            std::printf("Sampler log: ps %016llx: image %u at %#llx (%ux%u, fmt %d, %u bit, depth %d, "
+                        "flags %#x)\n",
+                        (unsigned long long)hash, id.index, (unsigned long long)image.info.guest_address,
+                        image.info.size.width, image.info.size.height, int(image.info.pixel_format),
+                        image.info.num_bits, int(image.info.props.is_depth), unsigned(image.flags));
+            ++lines;
+        });
+    }
+}
+
 void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_indexed,
                                     const IndirectDraw& indirect) {
     if (DrawPipe::OnStageB()) {
@@ -1877,6 +1941,16 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
                       (unsigned long long)count_address, a[0], a[1], a[2], s32(a[3]), a[4],
                       int(args_cpu_modified), int(args_gpu_modified));
         FrameCapture::Note(note);
+        // uc3: the blend state this indirect draw's pipeline was built with.
+        if (const auto& bc = pipeline->GetGraphicsKey().blend_controls[0]; bc.enable) {
+            std::snprintf(note, sizeof(note), "\n  blend ps %08x indirect: src %u dst %u func %u, alpha src %u dst %u func %u separate %u",
+                          u32(ps ? ps->pgm_hash : 0), u32(bc.color_src_factor), u32(bc.color_dst_factor),
+                          u32(bc.color_func), u32(bc.alpha_src_factor), u32(bc.alpha_dst_factor),
+                          u32(bc.alpha_func), u32(bc.separate_alpha_blend));
+        } else {
+            std::snprintf(note, sizeof(note), "\n  blend ps %08x indirect: off", u32(ps ? ps->pgm_hash : 0));
+        }
+        FrameCapture::Note(note);
     }
 
     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
@@ -1909,6 +1983,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     });
     DebugState.IncDrawCall();
     DumpOnDraw(pipeline);
+    SamplerLog(pipeline);
 
     ResetBindings(false);
     scheduler.KickRecording();

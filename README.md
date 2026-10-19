@@ -194,6 +194,8 @@ Every new optimization goes in **off by default** in the code; the launcher and 
 | `UC_JOB_SPIN`, `UC_JOB_SLEEP` | `UC_JOB_SPIN=100` + `UC_JOB_SLEEP=1`: the game's six job threads spin less and sleep during gameplay; CPU use drops from about 66% to about 50% at the same frame rate (UC3) |
 | `UC_MIP_FIX` | The texture cache accepts render targets drawn into one mip of a larger image, so bloom and distortion are not lost (fixes the washed-out, greyish image in UC3) |
 | `UC_MOUSE_EDGE_AIM` | The mouse turns the camera while aiming from a ledge or a climb, and at the hanging spots where the aim used to turn slowly (UC3) |
+| `UC_DEPTH_KEEP_CLEAR` | A shadow map array recreated with more layers keeps the pending depth clear of the image it replaces (fixes flickering lights, shadows and dark walls in UC3, e.g. the castle) |
+| `UC_SCOPE_SPLIT_SCALAR` | The shader translator runs a scalar instruction placed between the vector instructions of a divergent block for the whole wave, as the GPU does (fixes the black wedges and white specks in the fog of UC3's light cones) |
 | `UC_PREP_TRUST_A1` | Experimental, off in the launcher: draw preparation reuses work it can prove is still valid (about +5 FPS in the UC3 desert ruins) |
 | `UC_HLE_INORDER`, `UC_ACB_DISPATCH_PIPE` | Keep the UC2 rooftop chase at 60 FPS; turn them off if the train prologue fails |
 

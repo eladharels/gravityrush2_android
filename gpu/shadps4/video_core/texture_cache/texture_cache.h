@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <source_location>
 #include "video_core/texture_cache/readback_queue.h"
 #include "video_core/texture_cache/readback_sources.h"
 #include <chrono>
@@ -221,7 +222,10 @@ public:
                                               ImageId cache_img_id);
 
     /// Creates a new image with provided image info and copies subresources from image_id
-    [[nodiscard]] ImageId ExpandImage(const ImageInfo& info, ImageId image_id);
+    [[nodiscard]] ImageId ExpandImage(const ImageInfo& info, ImageId image_id,
+                                      std::source_location loc = std::source_location::current());
+    /// uc3: GOW3_EXPAND_TRACE=1 - one line per freed image with more than one layer.
+    void TraceFree(const Image& image, u32 line);
 
     /// Reuploads image contents.
     void RefreshImage(Image& image);
@@ -457,8 +461,10 @@ private:
     /// Touch the image in the LRU cache.
     void TouchImage(const Image& image);
 
-    void FreeImage(ImageId image_id) {
+    void FreeImage(ImageId image_id,
+                   std::source_location loc = std::source_location::current()) {
         const auto& image = slot_images[image_id];
+        TraceFree(image, loc.line());
         ResolveReadbacks(image.info.guest_address, image.info.guest_size, true,
                          ReadbackSource::ImageFree);
         UntrackImage(image_id);

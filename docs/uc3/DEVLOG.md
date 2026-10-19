@@ -4,6 +4,24 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-19 — Luzes, sombras e paredes piscando corrigidas
+
+- **Sintoma.** No castelo e em outros lugares, uma parede ficava escura ou uma luz piscava por um instante. No log apareciam muitos avisos `SanitizeCopyLayers` com a contagem de camadas subindo (1→2→3…→8).
+- **Causa** (projeto do Opus, `textura-piscando/projeto-correcao.md`). Eram arrays de mapas de sombra (profundidade, 1024–2048 px) que o cache recria com uma camada a mais sempre que o jogo reusa o mesmo espaço. Na recriação (`ResolveDepthOverlap`), a imagem nova registrava o HTILE com máscara de limpeza 0. A limpeza pendente das camadas que ainda iam ser desenhadas (o clear do HTILE por compute) se perdia, e a sombra seguinte era desenhada sobre profundidade velha.
+- **Correção** (`GOW3_DEPTH_KEEP_CLEAR`, `texture_cache.cpp`). A imagem recriada herda o endereço do HTILE e a máscara de limpeza da imagem que ela substitui, e o HTILE é registrado de novo para ela depois que a velha é liberada. No teste do castelo, as 499 recriações mantiveram a limpeza (máscaras 0xfffffffe, 0xfffffffc…), e o pisca sumiu ali e em outro lugar. Desligado no código, **ligado pelo launcher no UC3**.
+- **Testado e sem efeito no pisca, fica desligado:** `GOW3_EXPAND_FRESH` (imagem que cresce sai da memória do jogo quando a GPU não desenhou nela).
+- **Diagnósticos novos, desligados:** `GOW3_EXPAND_TRACE` (cada expansão/recriação e cada liberação de array, com a linha de quem chamou) e `GOW3_A1_DIVERGENCE_LOG` (na divergência do A1, por que o desenho foi confiado e quais dwords diferem).
+- **Ainda em aberto:** o array continua sendo recriado uma camada por vez (custo, não pisca).
+
+## 2026-10-19 — Névoa dos cones de luz: cunhas pretas e chuvisco corrigidos
+
+- **Sintoma.** Nos cones de luz com névoa (corredor da lâmpada, barco), apareciam cunhas pretas duras com pontos brancos. No PS4 a névoa preenche tudo, e as sombras são suaves.
+- **Causa** (achada com o Opus, `medidas/chuvisco/nevoa/causa-cunhas.md`). O cs e34f5e2c monta os 512 raios da névoa epipolar com laços waterfall de `v_movreld`. O compilador do jogo pôs a `s_andn2_b64` que calcula o SCC do laço no meio dos movreld. `CFG::SplitDivergenceScopes` só tira as escalares das pontas do escopo, então essa ficava dentro do "if" por lane: as lanes que não casavam saíam do laço sem o movreld, e as linhas daquela wave ficavam com passo 0 (cunha preta ou chuvisco branco).
+- **Correção** (`GOW3_SCOPE_SPLIT_SCALAR`, `control_flow_graph.cpp`). Uma escalar no meio de um escopo sobe para o início dele quando só há movrel antes dela. Se não puder subir, o escopo é dividido em volta dela. A 1ª versão (só dividir) estava certa no IR, mas a GPU errava as 11 primeiras lanes de algumas waves com a forma "if, escalar, if". A forma com a escalar no início é a mesma de um laço do mesmo shader que já funcionava. O simulador do IR do Opus bate 100% com a GPU nas 512 linhas.
+- **Padrão:** ligado no launcher para o UC3 (desligado no código, como as outras).
+- **Cache de shaders:** `ShaderBinaryVersion` 10 → 11, e o estado de `GOW3_SCOPE_SPLIT_SCALAR` entra na versão gravada. Caches antigos e a troca da opção retraduzem os shaders sozinhos, sem o launcher apagar nada.
+- **Diagnósticos novos, desligados:** `GOW3_SAMPLER_LOG=<ps>` e `GOW3_SAMPLER_LOG_ADDR=<endereço>` (samplers e imagens de um pixel shader), e a linha de blend dos draws indiretos na captura de frame.
+
 ## 2026-10-18 — v0.3.3: imagem lavada corrigida, mouse ao escalar e pendurado, A1 experimental, correções da revisão do Fable
 
 - **Imagem lavada (UC3)** (`GOW3_MIP_FIX`, `texture_cache.cpp`, `image_info.cpp`). O cache de texturas rejeitava render targets desenhados num mip de uma imagem maior (pitch diferente e checagem de tamanho), então os mips do bloom e da distorção ficavam zerados, e bloom zero soma uma névoa cinza no tonemap. Desligado no código, **ligado pelo launcher no UC3**.
