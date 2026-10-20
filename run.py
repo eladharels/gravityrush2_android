@@ -120,13 +120,7 @@ def main():
     # derived again from the new options.
     for key in env.pop('GOW3_DERIVED', '').split(','):
         env.pop(key, None)
-    derived = []
     sys.path.insert(0, str(PORT / 'scripts'))
-    import graphics_options
-    graphics, reverted = graphics_options.prepare(env['GOW3_CONFIG'], out / 'graphics_state.json')
-    if reverted:
-        print('Graphics: the last restart never reached the game; previous options restored', flush=True)
-    env.update(graphics_options.environment(graphics))
     if not env.get('GOW3_FSR411_DIR') and not (PORT / 'fsr4_411').is_dir() and (data / 'fsr4_411').is_dir():
         env['GOW3_FSR411_DIR'] = str(data / 'fsr4_411')
 

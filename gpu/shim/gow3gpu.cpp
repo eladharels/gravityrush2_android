@@ -25,6 +25,7 @@
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/rdtsc.h"
+#include "core/emulator_settings.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/libs.h"
 #include "core/emulator_settings.h"
@@ -158,7 +159,12 @@ void MemoryManager::CopySparseMemoryBacking(VAddr source, u8* dest, u64 size) {
 }
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
     Gow3WriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size, Gow3WriteLog::Backing);
-    return runtime_memory_write_backing(reinterpret_cast<uintptr_t>(address), data, size) != 0;
+    const bool written = runtime_memory_write_backing(reinterpret_cast<uintptr_t>(address), data, size) != 0;
+    // 这些写入绕过页跟踪，较大的写入可能覆盖纹理；小写入通常只是 fence/label。
+    if (written && rasterizer && size > 8) {
+        rasterizer->GetTextureCache().NoteBackingWrite(reinterpret_cast<VAddr>(address), size);
+    }
+    return written;
 }
 void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
     Gow3Stats::Timer timer{Gow3Stats::t_protect};
@@ -216,6 +222,19 @@ u32 Gow3DisplayRefreshHz() {
     return hz;
 }
 
+// gow3: set from Instance::CollectDeviceParameters() and read by the buffer cache (buffer.cpp).
+namespace {
+std::atomic<u32> g_gpu_vendor_id{0};
+} // namespace
+
+void SetGow3GpuVendorId(u32 id) {
+    g_gpu_vendor_id.store(id, std::memory_order_relaxed);
+}
+
+u32 Gow3GpuVendorId() {
+    return g_gpu_vendor_id.load(std::memory_order_relaxed);
+}
+
 #ifdef GOW3_PGO_GENERATE
 extern "C" void __gcov_dump(void);
 extern "C" void __gcov_reset(void);
@@ -236,6 +255,17 @@ static void StartProfileWriter() {
 #endif
 
 extern "C" int gow3gpu_init(const Gow3GpuConfig* config) {
+    // native 移植标志：用于确认设备运行的是包含 081df6f 修复的 GPU 库。
+    std::printf("GOW3_NATIVE_FIX_081DF6F=active\n");
+    // native 移植标志：用于确认设备运行的是包含 195c7ab 修复的 GPU 库。
+    std::printf("GOW3_NATIVE_FIX_195C7AB=active\n");
+    // native 移植标志：用于确认设备运行的是包含 a101edb 修复的 GPU 库。
+    std::printf("GOW3_NATIVE_FIX_A101EDB=active\n");
+    // native 移植标志：用于确认设备运行的是 recorder chunk 防护修复的 GPU 库。
+    std::printf("GOW3_NATIVE_FIX_SCHEDULER_CHUNK=active\n");
+    // native 移植标志：用于确认设备运行的是各向异性过滤设置移植的 GPU 库。
+    std::printf("GOW3_NATIVE_FIX_9D0F51C_ANISOTROPY=active\n");
+    std::printf("GOW3_NATIVE_FIX_9D0F51C_VIBRATION=active\n");
     Gow3Settings::Load();
 #ifdef GOW3_PGO_GENERATE
     StartProfileWriter();
@@ -368,6 +398,16 @@ extern "C" int gow3gpu_overlay_captures_input(void) {
     return Gow3Overlay::CapturesInput() ? 1 : 0;
 }
 
+// C entry point like the others: libgow3gpu.so only exports C symbols to the runtime bridge, so a
+// plain Gow3Overlay::Available() would be an undefined symbol at load time.
+extern "C" int gow3gpu_overlay_available(void) {
+    return Gow3Overlay::Available() ? 1 : 0;
+}
+
+extern "C" int gow3gpu_vibration_percent(void) {
+    return Gow3Settings::Get().vibration.load(std::memory_order_relaxed);
+}
+
 extern "C" int gow3gpu_text_input_begin(const char* initial, const char* prompt) {
     if (!g_window) return 0;
     g_window->BeginTextInput(initial ? initial : "", prompt ? prompt : "Text");
@@ -377,6 +417,14 @@ extern "C" int gow3gpu_text_input_begin(const char* initial, const char* prompt)
 extern "C" int gow3gpu_choice_begin(const char* title, const char* const* items, const char* const* images,
                                     int count, int focus) {
     if (!g_window || count <= 0) return 0;
+    // The save list is shown as a dialog the player has to read. When the overlay could not come up
+    // the dialog would never be drawn while the game kept waiting for an answer and held its input
+    // neutral, so refuse here instead of opening a list nobody can see.
+    if (!gow3gpu_overlay_available()) {
+        LOG_ERROR(Lib_SaveDataDialog,
+                  "save list: the overlay is unavailable, refusing the dialog ({} entries)", count);
+        return 0;
+    }
     // Pictures are decoded here, on the game's thread, before the list is shown.
     std::vector<Gow3Png::Image> pictures(count);
     for (int i = 0; images && i < count; ++i) {
@@ -391,6 +439,14 @@ extern "C" int gow3gpu_choice_begin(const char* title, const char* const* items,
 
 extern "C" int gow3gpu_choice_poll(void) {
     return Gow3Overlay::PollChoice();
+}
+
+extern "C" void gow3gpu_choice_cancel(void) {
+    Gow3Overlay::CancelChoice();
+}
+
+extern "C" void gow3gpu_pad_publish(uint32_t buttons) {
+    Gow3Overlay::PublishPad(buttons);
 }
 
 extern "C" int gow3gpu_text_input_poll(char* out, uint64_t size) {

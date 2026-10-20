@@ -49,6 +49,25 @@ static inline u64 FencedRDTSC() {
 }
 #endif
 
+/// android port: the unfenced counter read for the profiling counters the Uncharted renderer
+/// keeps (was __rdtsc() from <x86intrin.h>); CNTVCT_EL0 on arm64, the same clock as FencedRDTSC.
+static inline u64 RawRDTSC() {
+#if defined(_MSC_VER) && defined(ARCH_X86_64)
+    return __rdtsc();
+#elif defined(ARCH_X86_64)
+    u64 eax;
+    u64 edx;
+    asm volatile("rdtsc" : "=a"(eax), "=d"(edx));
+    return (edx << 32) | eax;
+#elif defined(ARCH_ARM64)
+    u64 ret;
+    asm volatile("mrs %0, cntvct_el0" : "=r"(ret));
+    return ret;
+#else
+#error "Missing RawRDTSC() implementation for target CPU architecture."
+#endif
+}
+
 u64 EstimateRDTSCFrequency();
 
 } // namespace Common

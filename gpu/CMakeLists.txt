@@ -40,7 +40,16 @@ elseif (GOW3_PGO STREQUAL "use")
                         -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch)
 endif()
 
-find_package(Vulkan REQUIRED)
+if (ANDROID)
+    # Bionic：不链接 libvulkan（gow3port vk_driver_loader dlopen 驱动），只要头文件。
+    # NDK 自带的 Vulkan 头太旧，vulkan-hpp（1.3.275 无 .hpp）用不了，因此用
+    # tools/android/build_bionic_deps.sh 构建的 Vulkan-Headers；Vulkan::Vulkan 就是这些头。
+    find_package(VulkanHeaders CONFIG REQUIRED)
+    add_library(Vulkan::Vulkan INTERFACE IMPORTED)
+    target_link_libraries(Vulkan::Vulkan INTERFACE Vulkan::Headers)
+else()
+    find_package(Vulkan REQUIRED)
+endif()
 find_package(fmt REQUIRED)
 find_package(Boost REQUIRED)
 # gow3 (Windows): MSYS2 has no magic_enum/miniz packages; the submodules are used instead.
@@ -62,9 +71,18 @@ if (NOT VulkanMemoryAllocator_FOUND)
 endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(XXHASH REQUIRED IMPORTED_TARGET libxxhash)
-pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
-if (NOT WIN32)
-    pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+if (ANDROID)
+    # Bionic：libgow3gpu 既不用 SDL（无窗口：帧经 AHB swapchain 送给 app，
+    # shim/gow3_present_client.cpp；输入和音频归 runtime）也不用 X11。
+    add_library(gow3_sdl3 INTERFACE)
+    add_library(PkgConfig::SDL3 ALIAS gow3_sdl3)
+    add_library(gow3_no_x11 INTERFACE)
+    add_library(PkgConfig::X11 ALIAS gow3_no_x11)
+else()
+    pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
+    if (NOT WIN32)
+        pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+    endif()
 endif()
 find_package(miniz QUIET)
 if (NOT miniz_FOUND)
@@ -113,6 +131,8 @@ add_host_shader(fs_tri.vert fs_tri_vert)
 add_host_shader(fsr.comp fsr_easu_comp SAMPLE_EASU=1)
 add_host_shader(fsr.comp fsr_rcas_comp SAMPLE_RCAS=1)
 add_host_shader(post_process.frag post_process_frag)
+add_host_shader(gsr2_convert.comp gsr2_convert_comp)
+add_host_shader(gsr2_upscale.comp gsr2_upscale_comp)
 add_host_shader(camera_motion.comp camera_motion_comp)
 add_host_shader(upscale_merge.comp upscale_merge_comp)
 add_host_shader(upscale_reactive.comp upscale_reactive_comp)
@@ -124,6 +144,8 @@ add_host_shader(depth_resample.frag depth_resample_frag)
 add_host_shader(depth_resample.frag depth_stencil_resample_frag HAS_STENCIL=1)
 add_host_shader(depth_resample.frag depth_stencil_bits_frag STENCIL_BITS=1)
 add_host_shader(camera_motion.comp camera_motion_debug_comp DEBUG_OVERLAY=1)
+add_host_shader(occlusion_predicate.comp occlusion_predicate_comp)
+add_host_shader(indirect_guard.comp indirect_guard_comp)
 foreach(BPP IN ITEMS 8 16 32 64 96 128)
     add_host_shader(tiling.comp tiling_micro_${BPP}_comp BITS_PER_PIXEL=${BPP} IS_MACRO_TILED=0)
     add_host_shader(tiling.comp tiling_macro_${BPP}_comp BITS_PER_PIXEL=${BPP} IS_MACRO_TILED=1)
@@ -140,7 +162,13 @@ set(COMMON
     shadps4/common/string_util.cpp shadps4/common/thread.cpp shadps4/common/signal_context.cpp
     shadps4/common/slot_vector.cpp shadps4/common/logging/classes.cpp shim/common/logging/log.cpp)
 file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
+if (ANDROID)
+    set(PKG_CONFIG_ARGN --static) # 静态 FFmpeg：它的私有库（-lm 等）也要带上
+endif()
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
+if (ANDROID)
+    unset(PKG_CONFIG_ARGN)
+endif()
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp)
 # Windows: a DLL cannot leave the runtime_* symbols for gow3-probe.exe to resolve, so the
 # library is static there and linked into the executable.
@@ -168,6 +196,24 @@ set_source_files_properties(shim/gow3_overlay.cpp PROPERTIES
 target_include_directories(gow3gpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
 target_compile_definitions(gow3gpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(gow3gpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
+if (ANDROID)
+    # Bionic：第三方 C 代码（FidelityFX、FSR）的直接 vk* 调用走 dispatcher
+    # （shim/vk_forwarders.cpp，由 tools/android/gen_vk_forwarders.py 生成）。
+    # AHB swapchain：AHardwareBuffer_*（libnativewindow）、Vulkan Android 平台类型、与 app 共享的
+    # wire format（tools/android/present）。每个 vulkan.hpp 用户必须看到相同的平台宏
+    # （dispatcher 的布局依赖它们）。
+    target_compile_definitions(gow3gpu PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
+    target_include_directories(gow3gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../tools/android/present)
+    # 帧生成引擎 C API（tools/android/lsfg/gow3_lsfg_api.h，change add-native-frame-generation）
+    target_include_directories(gow3gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../tools/android/lsfg)
+    target_link_libraries(gow3gpu PRIVATE nativewindow)
+    # FFmpeg 的 arm64 汇编用 adrp/add 寻址自己的表：它的符号在共享对象内不能被抢占。
+    target_link_options(gow3gpu PRIVATE
+        -Wl,--exclude-libs,libavcodec.a:libavformat.a:libavutil.a:libswscale.a:libswresample.a
+        # runtime_* 函数来自 gow3-probe（见下）；NDK 的 --no-undefined 会拒绝它们。
+        # tools/android/check_bionic_symbols.sh 验证每一个都被提供。
+        -Wl,-z,undefs)
+endif()
 # Runtime symbols (runtime_memory_*, runtime_process_*) resolve against gow3-probe.
 if (NOT WIN32)
     target_link_options(gow3gpu PRIVATE -Wl,--allow-shlib-undefined)
@@ -226,11 +272,6 @@ if (WIN32)
     target_compile_options(pad-map-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
     target_include_directories(pad-map-test PRIVATE .. ../src)
     target_link_libraries(pad-map-test PRIVATE PkgConfig::SDL3 bcrypt -pthread)
-    add_executable(audio-downmix-test EXCLUDE_FROM_ALL ../tests/test_audio_downmix.c ../src/compat_win.c)
-    set_target_properties(audio-downmix-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(audio-downmix-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(audio-downmix-test PRIVATE .. ../src)
-    target_link_libraries(audio-downmix-test PRIVATE PkgConfig::SDL3 bcrypt -pthread)
     add_executable(gow3-gpu-capabilities ../tools/gpu_capabilities.c ../packaging/windows/gow3-gpu-capabilities.rc)
     target_link_libraries(gow3-gpu-capabilities PRIVATE Vulkan::Vulkan)
     # "Play God of War III.exe": the game with the launcher's saved settings, no launcher window.
@@ -253,24 +294,15 @@ if (WIN32)
         -include ${CMAKE_CURRENT_SOURCE_DIR}/../src/compat_win.h)
     target_link_libraries(pipeline-binary-cache-test PRIVATE onecore)
 endif()
-add_executable(pipeline-binary-initialization-test EXCLUDE_FROM_ALL
-    ../tests/test_pipeline_binary_initialization.cpp ../tests/test_gpu_runtime_stubs.cpp)
-target_compile_definitions(pipeline-binary-initialization-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_include_directories(pipeline-binary-initialization-test PRIVATE shim shadps4 third_party/gcn/include)
-target_link_libraries(pipeline-binary-initialization-test PRIVATE gow3gpu)
-target_compile_options(pipeline-binary-initialization-test PRIVATE -fPIC)
-if (WIN32)
-    target_sources(pipeline-binary-initialization-test PRIVATE ../src/compat_win.c)
-    target_compile_definitions(pipeline-binary-initialization-test PRIVATE sigjmp_buf=gow3_jmp_buf)
-    target_compile_options(pipeline-binary-initialization-test PRIVATE
-        -include ${CMAKE_CURRENT_SOURCE_DIR}/../src/compat_win.h)
-    target_link_libraries(pipeline-binary-initialization-test PRIVATE onecore)
-endif()
 set_source_files_properties(../tests/test_pipeline_binary_cache.cpp PROPERTIES
     COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
 target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(motion-history-test PRIVATE ..)
+add_executable(vk-diagnostics-test EXCLUDE_FROM_ALL ../tests/test_vk_diagnostics.cpp)
+target_compile_options(vk-diagnostics-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(vk-diagnostics-test PRIVATE shim shadps4)
+target_link_libraries(vk-diagnostics-test PRIVATE gow3gpu)
 add_executable(motion-shader-test EXCLUDE_FROM_ALL ../tests/test_motion_shaders.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(motion-shader-test PRIVATE shim shadps4 third_party/gcn/include)
 target_link_libraries(motion-shader-test PRIVATE gow3gpu)
@@ -364,6 +396,9 @@ add_executable(graphics-settings-test EXCLUDE_FROM_ALL ../tests/test_graphics_se
     shim/gow3_settings.cpp)
 target_include_directories(graphics-settings-test PRIVATE shim)
 target_compile_options(graphics-settings-test PRIVATE -UNDEBUG)
+add_executable(pad-input-test EXCLUDE_FROM_ALL ../tests/test_pad_input.cpp)
+target_include_directories(pad-input-test PRIVATE shim)
+target_compile_options(pad-input-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(actor-hook-test EXCLUDE_FROM_ALL ../tests/test_actor_hook.cpp)
 target_include_directories(actor-hook-test PRIVATE shim)
 target_compile_options(actor-hook-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)

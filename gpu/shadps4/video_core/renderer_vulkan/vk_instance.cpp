@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <cstdio>
-#include <cstdlib>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -10,6 +8,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/types.h"
+#include "core/emulator_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -113,18 +112,6 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
     const std::size_t num_physical_devices = static_cast<u16>(physical_devices.size());
     ASSERT_MSG(num_physical_devices > 0, "No physical devices found");
     LOG_INFO(Render_Vulkan, "Found {} physical devices", num_physical_devices);
-    // gow3: the device list in the game log tells a missing driver apart from a wrong choice.
-    for (std::size_t i = 0; i < num_physical_devices; ++i) {
-        const auto props = physical_devices[i].getProperties();
-        std::printf("GPU %zu: %s (%s)\n", i, props.deviceName.data(),
-                    vk::to_string(props.deviceType).c_str());
-    }
-    // gow3: a saved choice can outlive its GPU (removed card, new driver order).
-    if (physical_device_index >= static_cast<s32>(num_physical_devices)) {
-        std::printf("GPU: selected GPU %d is not in the device list; choosing automatically\n",
-                    physical_device_index);
-        physical_device_index = -1;
-    }
 
     if (physical_device_index < 0) {
         std::vector<
@@ -175,9 +162,12 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
         });
         physical_device = physical_devices[std::get<0>(properties2[0])];
     } else {
+        ASSERT_MSG(physical_device_index < num_physical_devices,
+                   "Invalid physical device index {} provided when only {} devices exist",
+                   physical_device_index, num_physical_devices);
+
         physical_device = physical_devices[physical_device_index];
     }
-    std::printf("GPU: using %s\n", physical_device.getProperties().deviceName.data());
 
     available_extensions = GetSupportedExtensions(physical_device);
     format_properties = GetFormatProperties(physical_device);
@@ -219,45 +209,6 @@ std::string Instance::GetDriverVersionName() {
     return GetReadableVersion(version);
 }
 
-namespace {
-bool PipelineBinaryCacheRequested() {
-    const char* setting = std::getenv("GOW3_PIPELINE_BINARIES");
-    return !setting || *setting != '0';
-}
-}
-
-bool InitializePipelineBinaryCache(vk::Device device, bool supported,
-                                   vk::PipelineBinaryKeyKHR& global_key) {
-    global_key = vk::PipelineBinaryKeyKHR{};
-    if (!PipelineBinaryCacheRequested()) {
-        LOG_INFO(Render_Vulkan, "Pipeline binary cache disabled by settings; using normal compilation");
-        return false;
-    }
-    if (!supported) {
-        LOG_INFO(Render_Vulkan, "Pipeline binary cache unsupported; using normal compilation");
-        return false;
-    }
-    const auto& dispatch = VULKAN_HPP_DEFAULT_DISPATCHER;
-    if (!dispatch.vkGetPipelineKeyKHR || !dispatch.vkCreatePipelineBinariesKHR ||
-        !dispatch.vkGetPipelineBinaryDataKHR || !dispatch.vkDestroyPipelineBinaryKHR ||
-        !dispatch.vkReleaseCapturedPipelineDataKHR) {
-        LOG_WARNING(Render_Vulkan, "Pipeline binary cache functions unavailable; using normal compilation");
-        return false;
-    }
-    const auto result = device.getPipelineKeyKHR(nullptr, &global_key);
-    if (result != vk::Result::eSuccess || !global_key.keySize ||
-        global_key.keySize > VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR) {
-        const auto key_size = global_key.keySize;
-        global_key = vk::PipelineBinaryKeyKHR{};
-        LOG_WARNING(Render_Vulkan,
-                    "Pipeline binary cache key unavailable (result {}, size {}); using normal compilation",
-                    vk::to_string(result), key_size);
-        return false;
-    }
-    LOG_INFO(Render_Vulkan, "Pipeline binary disk cache enabled");
-    return true;
-}
-
 bool Instance::CreateDevice() {
     const vk::StructureChain feature_chain = physical_device.getFeatures2<
         vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features,
@@ -271,7 +222,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR,
         vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
         vk::PhysicalDevicePipelineBinaryFeaturesKHR,
-        vk::PhysicalDeviceMaintenance5FeaturesKHR>();
+        vk::PhysicalDeviceMaintenance5FeaturesKHR,
+        vk::PhysicalDeviceConditionalRenderingFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -306,8 +258,13 @@ bool Instance::CreateDevice() {
     };
 
     // Required
+#ifndef __ANDROID__
+    // gow3port: Bionic 的 swapchain 是 AHardwareBuffer（vk_swapchain_ahb.h），不经过 VkSurfaceKHR /
+    // VkSwapchainKHR，所以 Bionic 不要求这个扩展。Turnip 这类嵌入式驱动干脆不暴露它：把它当硬要求
+    // 会让它们连实例都建不起来，而它们其实完全能跑我们的 AHB 路径。
     ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+#endif
     ASSERT_MSG(add_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     ASSERT_MSG(add_extension(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME),
@@ -324,9 +281,27 @@ bool Instance::CreateDevice() {
     ASSERT_MSG(robustness2_features.nullDescriptor,
                "Required Vulkan feature unavailable: nullDescriptor");
 
+#ifdef __ANDROID__
+    // Bionic 的 swapchain 是 vk_swapchain_ahb.h（VkSwapchainKHR 在直连加载的 Android 驱动上不
+    // 可用），它把 AHardwareBuffer 导入成 VkImage，并把 present/acquire 的信号量导成 sync file。
+    // 这些入口只在对应扩展被启用时才从 vkGetDeviceProcAddr 取到：没启用时取到的是 nullptr，
+    // 直接调用会跳到地址 0（SIGSEGV at RIP 0），所以这里必须启用并当作硬要求。
+    ASSERT_MSG(add_extension("VK_ANDROID_external_memory_android_hardware_buffer"),
+               "Required Vulkan extension unavailable: VK_ANDROID_external_memory_android_hardware_buffer "
+               "(the AHardwareBuffer swapchain cannot import the app's buffers)");
+    ASSERT_MSG(add_extension(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME),
+               "Required Vulkan extension unavailable: VK_KHR_external_semaphore_fd "
+               "(the AHardwareBuffer swapchain cannot hand fences to the app)");
+    // VK_QUEUE_FAMILY_FOREIGN_EXT（vk_swapchain_ahb.h 的 AcquireQueues/ReleaseQueues 用它把图像
+    // 的所有权在 Android 合成器与本进程之间交接）需要这个扩展；没有它就没有 FOREIGN 队列族。
+    ASSERT_MSG(add_extension(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME),
+               "Required Vulkan extension unavailable: VK_EXT_queue_family_foreign "
+               "(the AHardwareBuffer swapchain cannot hand image ownership to the compositor)");
+#endif
+
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
-    pipeline_binaries = PipelineBinaryCacheRequested() && maintenance_5 &&
+    pipeline_binaries = maintenance_5 &&
         feature_chain.get<vk::PhysicalDeviceMaintenance5FeaturesKHR>().maintenance5 &&
         feature_chain.get<vk::PhysicalDevicePipelineBinaryFeaturesKHR>().pipelineBinaries &&
         add_extension(VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
@@ -387,6 +362,8 @@ bool Instance::CreateDevice() {
     amd_mixed_attachment_samples = add_extension(VK_AMD_MIXED_ATTACHMENT_SAMPLES_EXTENSION_NAME);
     shader_atomic_float = add_extension(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
     shader_atomic_float2 = add_extension(VK_EXT_SHADER_ATOMIC_FLOAT_2_EXTENSION_NAME);
+    // GPU breadcrumbs 的标记写入机制（vk_breadcrumbs.h）；缺失时取证降级，不影响渲染。
+    buffer_marker = add_extension(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
     if (shader_atomic_float2) {
         shader_atomic_float2_features =
             feature_chain.get<vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT>();
@@ -419,6 +396,13 @@ bool Instance::CreateDevice() {
                  image_2d_view_of_3d_features.sampler2DViewOf3D);
     }
     image_view_min_lod = add_extension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
+    // gow3: IT_SET_PREDICATION emulation wraps predicated draws in conditional rendering.
+    conditional_rendering = add_extension(VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME);
+    if (conditional_rendering) {
+        conditional_rendering =
+            feature_chain.get<vk::PhysicalDeviceConditionalRenderingFeaturesEXT>().conditionalRendering;
+        LOG_INFO(Render_Vulkan, "- conditionalRendering: {}", conditional_rendering);
+    }
     supports_memory_budget = add_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     // gow3: FSR 4 v07 INT8 (vk_temporal_upscaler): quad derivatives in compute shaders.
     compute_shader_derivatives = add_extension(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
@@ -460,6 +444,24 @@ bool Instance::CreateDevice() {
         return false;
     }
 
+    u32 sparse_queue_family_index = queue_family_index;
+    if (!(family_properties[queue_family_index].queueFlags & vk::QueueFlagBits::eSparseBinding)) {
+        const auto sparse_family = std::find_if(
+            family_properties.begin(), family_properties.end(), [](const auto& family) {
+                return family.queueCount && (family.queueFlags & vk::QueueFlagBits::eSparseBinding);
+            });
+        if (sparse_family == family_properties.end()) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "Unable to find a queue family with VK_QUEUE_SPARSE_BINDING_BIT; "
+                         "sparse buffer bindings are unavailable on this device.");
+            return false;
+        }
+        sparse_queue_family_index = static_cast<u32>(sparse_family - family_properties.begin());
+    }
+    LOG_INFO(Render_Vulkan, "Queue families: graphics={}, sparse={}, reused_graphics={}",
+             queue_family_index, sparse_queue_family_index,
+             queue_family_index == sparse_queue_family_index);
+
     static constexpr std::array queue_priorities = {1.0f};
     const vk::DeviceQueueCreateInfo queue_info = {
         .queueFamilyIndex = queue_family_index,
@@ -490,14 +492,17 @@ bool Instance::CreateDevice() {
         }
         std::printf("Readback side queue: family %d\n", int(side_queue_family));
     }
-    const std::array<vk::DeviceQueueCreateInfo, 2> queue_infos = {
-        queue_info,
-        vk::DeviceQueueCreateInfo{
-            .queueFamilyIndex = side_queue_family,
-            .queueCount = static_cast<u32>(queue_priorities.size()),
-            .pQueuePriorities = queue_priorities.data(),
-        },
-    };
+    // android port: the graphics queue, the sparse binding queue (gow3_android) when it is
+    // another family, and the readback side queue (GOW3_READBACK_SIDEQ) when it is yet another.
+    std::array<vk::DeviceQueueCreateInfo, 3> queue_infos = {queue_info, queue_info, queue_info};
+    u32 queue_info_count = 1;
+    if (sparse_queue_family_index != queue_family_index) {
+        queue_infos[queue_info_count++].queueFamilyIndex = sparse_queue_family_index;
+    }
+    if (side_queue_family != ~0u && side_queue_family != queue_family_index &&
+        side_queue_family != sparse_queue_family_index) {
+        queue_infos[queue_info_count++].queueFamilyIndex = side_queue_family;
+    }
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
@@ -516,7 +521,7 @@ bool Instance::CreateDevice() {
     }
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = side_queue_family != ~0u ? 2u : 1u,
+            .queueCreateInfoCount = queue_info_count,
             .pQueueCreateInfos = queue_infos.data(),
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
@@ -673,6 +678,9 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE{
             .shaderMixedFloatDotProductFloat16AccFloat32 = true,
         },
+        vk::PhysicalDeviceConditionalRenderingFeaturesEXT{
+            .conditionalRendering = true,
+        },
     };
 
     if (!custom_border_color) {
@@ -736,6 +744,9 @@ bool Instance::CreateDevice() {
     if (!mixed_float_dot_product) {
         device_chain.unlink<vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>();
     }
+    if (!conditional_rendering) {
+        device_chain.unlink<vk::PhysicalDeviceConditionalRenderingFeaturesEXT>();
+    }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
     if (device_result != vk::Result::eSuccess) {
@@ -745,13 +756,35 @@ bool Instance::CreateDevice() {
     device = std::move(dev);
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
-    pipeline_binaries =
-        InitializePipelineBinaryCache(*device, pipeline_binaries, pipeline_binary_global_key);
+    if (pipeline_binaries) {
+        const auto& dispatch = VULKAN_HPP_DEFAULT_DISPATCHER;
+        const bool callable = dispatch.vkGetPipelineKeyKHR && dispatch.vkCreatePipelineBinariesKHR &&
+            dispatch.vkGetPipelineBinaryDataKHR && dispatch.vkDestroyPipelineBinaryKHR &&
+            dispatch.vkReleaseCapturedPipelineDataKHR;
+        // gow3: NVIDIA's vkGetPipelineKeyKHR(device, nullptr, &key) writes one dword past an
+        // internal stack buffer and corrupts the caller's saved rbx (reproduced with 595.91.07);
+        // whether that crashes depends on register allocation, so don't request the global key on
+        // that driver. A zero key disables the whole pipeline-binary cache, which also skips the
+        // per-pipeline driver calls (CreateCachedGraphicsPipeline gates on the global key).
+        const bool global_key_safe = EmulatorSettingsImpl::Flag(
+            "GOW3_PIPELINE_BINARY_GLOBAL_KEY", driver_id != vk::DriverId::eNvidiaProprietary);
+        if (!callable || !global_key_safe ||
+            device->getPipelineKeyKHR(nullptr, &pipeline_binary_global_key) !=
+                vk::Result::eSuccess ||
+            !pipeline_binary_global_key.keySize ||
+            pipeline_binary_global_key.keySize > VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR) {
+            pipeline_binary_global_key.keySize = 0;
+            LOG_WARNING(Render_Vulkan, "Pipeline binary cache unavailable; using normal compilation");
+        } else {
+            LOG_INFO(Render_Vulkan, "Pipeline binary disk cache enabled");
+        }
+    }
     if (Dlss* dlss = Dlss::Get()) {
         dlss->Initialize(*instance, physical_device, *device);
     }
 
     graphics_queue = device->getQueue(queue_family_index, 0);
+    sparse_queue = device->getQueue(sparse_queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
     if (side_queue_family != ~0u) {
         side_queue = device->getQueue(side_queue_family, 0);
@@ -823,6 +856,8 @@ void Instance::CollectDeviceParameters() {
 
     driver_id = driver.driverID;
     vendor_name = driver.driverName.data();
+    // gow3: publish the vendor so code without an Instance (buffer memory placement) can use it.
+    SetGow3GpuVendorId(properties.vendorID);
 
     const std::string model_name{GetModelName()};
     const std::string driver_version = GetDriverVersionName();

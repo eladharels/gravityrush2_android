@@ -35,6 +35,42 @@ def native_package(name='fixture-native', binding_address=4112, binding_kind=1,
 
 @unittest.skipUnless(EXE.exists(), 'build native probe first')
 class LoaderTests(unittest.TestCase):
+    def run_patched(self, data, writes=(), blob=None):
+        from patches import patch_blob
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'patches.bin'
+            path.write_bytes(patch_blob(writes) if blob is None else blob)
+            return self.run_image(data, '--patches', str(path))
+
+    def test_patch_is_applied_before_guest_execution(self):
+        code = b'\x0f\x0b' + b'\x90' * 6 + b'\0' * 8
+        data = package(code, [(8, 1, 0, 0)], ['patched-entry'])
+        result = self.run_patched(data, [(0, b'\xff\x25\x02\0\0\0')])
+        self.assertEqual(result.returncode, 20, result.stderr)
+        self.assertIn('Patches: 1 writes, 6 bytes applied', result.stdout)
+        self.assertIn('first unsupported PS4 import: patched-entry', result.stdout)
+
+    def test_empty_patch_keeps_original_entry(self):
+        data = package(b'\xff\x25\x02\0\0\0\x90\x90', [(8, 1, 0, 0)], ['original-entry'])
+        result = self.run_patched(data)
+        self.assertEqual(result.returncode, 20, result.stderr)
+        self.assertIn('Patches: 0 writes, 0 bytes applied', result.stdout)
+        self.assertIn('first unsupported PS4 import: original-entry', result.stdout)
+
+    def test_invalid_patch_stops_before_guest_entry(self):
+        from patches import patch_blob
+        data = package(b'\xc3', [(8, 1, 0, 0)], ['unused'])
+        for blob, message in [(b'broken', 'invalid patch file'),
+                              (patch_blob([(4095, b'xx')]), 'bad patch entry'),
+                              (patch_blob([(8, b'\0' * 8)]), 'patch overlaps a relocation'),
+                              (patch_blob([]) + b'trailing', 'trailing data in patch file'),
+                              (patch_blob([(0, b'xx')])[:-1], 'bad patch entry')]:
+            with self.subTest(message=message):
+                result = self.run_patched(data, blob=blob)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn('Entering original', result.stdout)
+
     def test_invalid_content_profile_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'content.bin'

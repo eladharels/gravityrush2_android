@@ -46,6 +46,9 @@ public:
     bool IsStorageImageWriteWithoutFormatEnabled() const {
         return features.shaderStorageImageWriteWithoutFormat;
     }
+    bool IsMultisampleStorageImageSupported() const {
+        return features.shaderStorageImageMultisample;
+    }
     bool IsShaderFloat16Enabled() const {
         return vk12_features.shaderFloat16;
     }
@@ -94,6 +97,10 @@ public:
         return graphics_queue;
     }
 
+    vk::Queue GetSparseQueue() const {
+        return sparse_queue;
+    }
+
     vk::Queue GetPresentQueue() const {
         return present_queue;
     }
@@ -120,6 +127,16 @@ public:
     /// Returns true if depth bounds testing is supported
     bool IsDepthBoundsSupported() const {
         return features.depthBounds;
+    }
+
+    /// gow3: true when query pools can be reset from the host (vkResetQueryPool).
+    bool IsHostQueryResetSupported() const {
+        return vk12_features.hostQueryReset;
+    }
+
+    /// gow3: true when VK_EXT_conditional_rendering is enabled (IT_SET_PREDICATION).
+    bool IsConditionalRenderingSupported() const {
+        return conditional_rendering;
     }
 
     /// Returns true if 16-bit floats are supported in shaders
@@ -289,6 +306,11 @@ public:
     /// Returns true if VK_AMD_mixed_attachment_samples is supported
     bool IsMixedAnySamplesSupported() const {
         return amd_mixed_attachment_samples;
+    }
+
+    /// VK_AMD_buffer_marker 是否可用（GPU breadcrumbs 的标记写入机制）
+    bool IsBufferMarkerSupported() const {
+        return buffer_marker;
     }
 
     /// Returns true when geometry shaders are supported by the device
@@ -566,6 +588,7 @@ private:
     vk::Queue graphics_queue;
     vk::Queue side_queue;
     u32 side_queue_family{~0u};
+    vk::Queue sparse_queue;
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;
     std::unordered_map<vk::Format, vk::FormatProperties3> format_properties;
@@ -587,6 +610,7 @@ private:
     bool amd_shader_trinary_minmax{};
     bool nv_framebuffer_mixed_samples{};
     bool amd_mixed_attachment_samples{};
+    bool buffer_marker{};
     bool shader_atomic_float{};
     bool shader_atomic_float2{};
     bool workgroup_memory_explicit_layout{};
@@ -601,6 +625,7 @@ private:
     bool shader_clock{};
     bool compute_shader_derivatives{};
     bool mixed_float_dot_product{}; // gow3: VK_VALVE_shader_mixed_float_dot_product (FSR 4.1.1)
+    bool conditional_rendering{};   // gow3: VK_EXT_conditional_rendering (IT_SET_PREDICATION)
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
     u64 total_memory_budget{};

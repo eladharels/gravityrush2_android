@@ -1,0 +1,86 @@
+{
+ "schema_version": 1,
+ "profile": "release-bionic",
+ "application_id": "com.uncharted.android",
+ "java_package": "com.gow3.android.game",
+ "target_sdk": 28,
+ "abi": "arm64-v8a",
+ "files_dir": "/data/user/0/{application_id}/files",
+ "runtime_root": "gow3port",
+ "port_root": "gow3port",
+ "port_arch_root": "gow3port/bionic",
+ "home_root": "home",
+ "top_level_roots": [
+  "gow3port",
+  "home"
+ ],
+ "required_directories": [
+  "home/gow3port"
+ ],
+ "loader": "gow3port/bionic/bin/gow3-probe",
+ "loader_strategy": "android-bionic-linker64",
+ "entrypoints": [
+  {
+   "path": "gow3port/bionic/bin/gow3-probe",
+   "owner": "run-bionic.sh",
+   "kind": "arm64-elf",
+   "launch_via_loader": false,
+   "args": [
+    "--vulkan-only",
+    "--cpu-only"
+   ]
+  },
+  {
+   "path": "gow3port/bionic/bin/kgsl-chip-id",
+   "owner": "run-bionic.sh",
+   "kind": "arm64-elf",
+   "launch_via_loader": false,
+   "args": []
+  },
+  {
+   "path": "gow3port/run-bionic.sh",
+   "owner": "java",
+   "kind": "shell",
+   "launch_via_loader": false,
+   "args": [
+    "game",
+    "vulkan"
+   ]
+  }
+ ],
+ "required_paths": [
+  {
+   "path": "gow3port/bionic/bin/gow3-probe",
+   "type": "executable"
+  },
+  {
+   "path": "gow3port/bionic/bin/kgsl-chip-id",
+   "type": "executable"
+  },
+  {
+   "path": "gow3port/bionic/lib/libgow3cpu.so",
+   "type": "shared-library"
+  },
+  {
+   "path": "gow3port/bionic/lib/libgow3gpu.so",
+   "type": "shared-library"
+  },
+  {
+   "path": "gow3port/bionic/lib/libbloodframe.so",
+   "type": "shared-library"
+  },
+  {
+   "path": "gow3port/bionic/lib/libc++_shared.so",
+   "type": "shared-library"
+  },
+  {
+   "path": "gow3port/bionic/lib/libSDL3.so",
+   "type": "shared-library"
+  },
+  {
+   "path": "gow3port/run-bionic.sh",
+   "type": "executable"
+  }
+ ],
+ "turnip_variants": []
+}

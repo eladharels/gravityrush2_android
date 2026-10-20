@@ -93,27 +93,17 @@ int main(int argc, char **argv) {
         vkDestroyInstance(instance, NULL);
         return 1;
     }
-    if (argc > 1 && !strcmp(argv[1], "--list")) {
-        /* The launcher's GPU choice: index (as GOW3_GPU_ID), name, type. */
-        for (uint32_t i = 0; i < count; ++i) {
-            VkPhysicalDeviceProperties props;
-            vkGetPhysicalDeviceProperties(devices[i], &props);
-            printf("%u\t%s\t%s\n", i, props.deviceName,
-                   props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU     ? "discrete"
-                   : props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated"
-                                                                                 : "other");
-        }
-        free(devices);
-        vkDestroyInstance(instance, NULL);
-        return 0;
-    }
-    /* Match vk_instance.cpp: its default ranking, or the GOW3_GPU_ID index while it exists. */
+    /* Match vk_instance.cpp's default ranking or its explicit GOW3_GPU_ID index. */
     VkPhysicalDevice selected = devices[0];
     const char *gpu_id = getenv("GOW3_GPU_ID");
-    const unsigned long index = gpu_id && atoi(gpu_id) >= 0 ? strtoul(gpu_id, NULL, 10) : count;
-    if (gpu_id && atoi(gpu_id) >= 0 && index >= count)
-        fputs("GPU: GOW3_GPU_ID is outside the device list; choosing automatically\n", stderr);
-    if (index < count) {
+    if (gpu_id && atoi(gpu_id) >= 0) {
+        const unsigned long index = strtoul(gpu_id, NULL, 10);
+        if (index >= count) {
+            fputs("GPU scene scaling: GOW3_GPU_ID is outside the device list\n", stderr);
+            free(devices);
+            vkDestroyInstance(instance, NULL);
+            return 1;
+        }
         selected = devices[index];
     } else {
         for (uint32_t i = 1; i < count; ++i)

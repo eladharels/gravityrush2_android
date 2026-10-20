@@ -1,0 +1,401 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">God of War III</string>
+
+    <!-- 品牌与关键动作按钮：双语同值，不翻译 -->
+    <string name="title_god_of_war_iii">GOD OF WAR III</string>
+    <string name="title_remastered">REMASTERED</string>
+    <string name="launch_button">LAUNCH</string>
+    <string name="start_game_button">START GAME</string>
+
+    <!-- 导航 -->
+    <string name="nav_home">首页</string>
+    <string name="nav_settings">设置</string>
+    <string name="nav_about">关于</string>
+
+    <!-- Home 页 -->
+    <string name="settings_save_failed">设置无法保存</string>
+    <string name="home_imported_fmt">已导入 %1$s（%2$s）</string>
+    <string name="home_removed_game_folder_copy">已移除启动器内的副本。游戏目录旁的 Lossless.dll 由你自行删除。</string>
+    <string name="home_removed_fmt">已移除 %1$s</string>
+
+    <!-- 启动参数 -->
+    <string name="launch_setup_title">启动配置</string>
+    <string name="game_folder_label">游戏目录</string>
+    <string name="game_folder_not_selected">未选择</string>
+    <string name="game_folder_hint">点击选择其他目录</string>
+    <string name="update_folder_label">升级补丁目录</string>
+    <string name="update_folder_not_set">未设置（使用游戏目录原样）</string>
+    <string name="update_folder_description">可选：游戏的升级（补丁）目录，例如 CUSA01740-patch。启动时叠加到游戏上。</string>
+    <string name="change_button">更改  ›</string>
+    <string name="launch_parameters_footer">改动会立即保存到 gow3.ini，并在下次启动时生效。</string>
+    <string name="dialog_ok">确定</string>
+
+    <!-- 启动参数：参数名 -->
+    <string name="param_upscaler">超分</string>
+    <string name="param_resolution">分辨率</string>
+    <string name="param_anisotropy">各向异性过滤</string>
+    <string name="param_vibration">振动</string>
+    <string name="param_fps_limit">帧率上限</string>
+    <string name="param_engine_fps">引擎帧率</string>
+    <string name="param_vsync">垂直同步</string>
+    <string name="param_frames_queued">排队帧数</string>
+    <string name="param_sharpen">锐化</string>
+    <string name="param_sharpness">锐化强度</string>
+    <string name="param_display_stretch">画面铺满</string>
+
+    <!-- 启动参数：选项名 -->
+    <string name="param_option_off_720p">关闭（以 1280×720 渲染）</string>
+    <string name="param_option_gsr2">骁龙 GSR 2</string>
+    <string name="param_option_fsr31">FSR 3.1</string>
+    <string name="param_option_native">原生</string>
+    <string name="param_option_480p">854×480</string>
+    <string name="param_option_540p">960×540</string>
+    <string name="param_option_720p">1280×720</string>
+    <string name="param_option_900p">1600×900</string>
+    <string name="param_option_1080p">1920×1080</string>
+    <string name="param_option_1440p">2560×1440</string>
+    <string name="param_option_1800p">3200×1800</string>
+    <string name="param_option_4k">3840×2160</string>
+    <string name="param_option_game_default">游戏默认</string>
+    <string name="param_option_30">30</string>
+    <string name="param_option_60">60</string>
+    <string name="param_option_120">120</string>
+    <string name="param_option_240">240</string>
+    <string name="param_option_unlimited">不限</string>
+    <string name="param_option_engine_60">60（游戏原生）</string>
+    <string name="param_option_on">开</string>
+    <string name="param_option_off">关</string>
+    <string name="param_option_display_fit">适配（留黑边）</string>
+    <string name="param_option_display_stretch">拉伸铺满（变形）</string>
+    <string name="param_option_display_crop">裁切铺满</string>
+    <string name="param_option_frames_1">1（最低延迟）</string>
+    <string name="param_option_frames_2">2</string>
+
+    <!-- 启动参数：说明 -->
+    <string name="param_desc_upscaler">用所选的时间域超分算法重建画面（默认为骁龙 GSR 2，为 Adreno GPU 设计；保留 FSR 3.1 可选）。游戏分辨率由「分辨率」选项单独控制；关闭超分不会关闭分辨率补丁。</string>
+    <string name="param_desc_render_patch">通过补丁调整游戏分辨率，档位按实际像素尺寸显示。可选档位随当前游戏及版本变化，与补丁页同步。「原生」表示关闭分辨率补丁。下次启动生效。</string>
+    <string name="param_desc_engine_fps">60 是游戏原生引擎帧率。更高档位需要对应的游戏补丁，仅在当前版本有补丁时显示。与补丁页同步，下次启动生效。</string>
+    <string name="param_desc_fps_limit">最大帧率受设置/性能/引擎帧率限制</string>
+    <string name="home_patch_identity">补丁选项：%1$s · %2$s · 更多开关在补丁页</string>
+    <string name="home_patch_unavailable">未匹配到补丁目录。请检查游戏与升级目录后再调整分辨率和引擎帧率，具体原因可在补丁页查看。</string>
+    <string name="home_patch_unavailable_value">%1$s（当前版本不可用）</string>
+    <string name="mobile_preset_title">默认配置</string>
+    <string name="mobile_preset_480p">480p · 极速省资源</string>
+    <string name="mobile_preset_light">540p · 轻量省资源</string>
+    <string name="mobile_preset_balanced">720p · 均衡</string>
+    <string name="mobile_preset_clear">900p · 清晰优先</string>
+    <string name="mobile_preset_hd">1080p · 高性能手机尝试</string>
+    <string name="mobile_preset_custom">自定义</string>
+    <string name="mobile_preset_unavailable">暂无兼容配置</string>
+    <string name="mobile_preset_description">点击后同步设置分辨率、60 帧目标和移动端图形默认值，关闭环境光遮蔽、运动模糊、景深、泛光、柔和粒子和动态阴影，并开启跳过开场与按 X 跳过视频。之后仍可在此处或补丁页单独调整。预设为实验性组合，实际效果取决于手机，下次启动生效。</string>
+
+    <!-- 首页游戏身份卡（redesign-android-launcher-home） -->
+    <string name="home_identity_patches_loaded_fmt">补丁已加载 · %1$d 项可用</string>
+    <string name="home_identity_problem_title">无法读取游戏信息</string>
+    <string name="home_problem_no_game">请先在 设置 → 常规 中选择游戏目录。</string>
+    <string name="home_problem_invalid_game">所选目录缺少 eboot.bin 或游戏信息不可读。</string>
+    <string name="home_problem_invalid_update">升级补丁目录无效或与游戏不匹配。</string>
+    <string name="home_problem_unsupported">暂不支持该游戏（TITLE ID）版本。</string>
+    <string name="home_problem_version">游戏版本与补丁目录不匹配。</string>
+    <string name="home_problem_read_failed">读取游戏目录失败，请检查路径与存储权限。</string>
+    <string name="home_identity_open_storage">打开设置 · 常规  ›</string>
+
+    <!-- 首页预设分段选择器 -->
+    <string name="preset_caption_custom">已自定义 · 当前参数不匹配任何预设</string>
+    <string name="preset_disabled_no_catalog">暂无可用预设——请先在 设置 → 常规 中检查游戏与补丁目录。</string>
+
+    <!-- 首页 GPU 驱动底部面板 -->
+    <string name="driver_sheet_title">GPU 驱动</string>
+    <string name="driver_sheet_manage">管理驱动（下载 / 删除）  ›</string>
+
+    <!-- 首页用户/存档区（占位：多用户能力随 add-android-launcher-user-profiles 落地） -->
+    <string name="user_zone_title">玩家</string>
+    <string name="user_zone_default_name">Hunter</string>
+    <string name="user_zone_saves_ready">存档已就绪</string>
+    <string name="user_zone_saves_empty">暂无存档</string>
+    <string name="user_zone_note">多用户与存档管理将在后续版本提供。</string>
+
+    <!-- 首启游戏选择页（一次性硬门控） -->
+    <string name="first_run_title">选择你的游戏</string>
+    <string name="first_run_subtitle">选择游戏文件所在目录即可开始。</string>
+    <string name="first_run_game_folder">游戏目录</string>
+    <string name="first_run_update_folder">升级补丁目录</string>
+    <string name="first_run_required">必选</string>
+    <string name="first_run_optional">可选</string>
+    <string name="first_run_tap_to_select">点击选择</string>
+    <string name="first_run_update_desc">可选：游戏的升级补丁目录（如 CUSA01740-patch），启动时叠加到主游戏。</string>
+    <string name="first_run_confirm">确认</string>
+    <string name="first_run_confirm_locked">请先选择游戏目录</string>
+
+    <!-- 设置常规分类（原存储分类；首启之后目录修改的常驻位置） -->
+    <string name="storage_section_title">游戏目录</string>
+    <string name="storage_valid">有效</string>
+    <string name="storage_game_desc">点击选择解包后的游戏目录（须包含 eboot.bin）。</string>
+    <string name="storage_update_desc">可选：启动时叠加到主游戏上的升级补丁目录。</string>
+    <string name="param_desc_vsync">将游戏帧与屏幕刷新率同步，避免画面撕裂。除非出现撕裂或卡顿，否则保持开启。</string>
+    <string name="param_desc_frames_queued">游戏在屏幕上显示之前预先准备多少帧。数值越低越能降低输入延迟；数值越高在较弱的硬件上可能更流畅。</string>
+    <string name="param_desc_anisotropy">让斜视角下的地板与墙面纹理更清晰。数值越高可能多占用一点 GPU 带宽。下次启动生效。</string>
+    <string name="param_desc_vibration">按比例调节手柄振动强度，0% 表示关闭振动。游戏运行时立即生效。</string>
+    <string name="param_desc_sharpen">锐化升采样后的画面（全部强度档位对所有超分算法生效）。超分为 OFF 时无效果。</string>
+    <string name="param_desc_sharpness">锐化强度（0.00–2.00）。仅在锐化开启时生效。</string>
+    <string name="param_desc_display_stretch">画面铺满屏幕的方式：适配=保持宽高比居中（留黑边）；拉伸铺满=强制拉满整屏（画面会变形）；裁切铺满=保持宽高比放大到覆盖整屏、居中裁掉溢出（无黑边、无变形，边缘视野略有裁切）。下次启动生效。</string>
+    <string name="param_skip_animations">跳过动画</string>
+    <string name="param_desc_skip_animations">跳过开场 logo 与开场动画，并允许在游戏中按 X 跳过任意视频。与补丁页是同一组开关。</string>
+
+    <!-- Settings 页分类 -->
+    <string name="param_category_general">常规</string>
+    <string name="param_category_graphics">图形</string>
+    <string name="param_category_performance">性能</string>
+    <string name="param_category_controls">操作</string>
+
+    <!-- 按键映射卡片与页面（add-pad-button-mapping；PS 按钮名符号用 Unicode） -->
+    <string name="pad_mapping_title">按键映射</string>
+    <string name="pad_mapping_desc">自定义物理手柄按键到游戏按钮的绑定，下次进入游戏时生效。</string>
+    <string name="pad_mapping_custom">自定义</string>
+    <string name="pad_mapping_hint_idle">点选一个游戏按钮，再按下手柄按键或扳机完成绑定。点此可取消。</string>
+    <string name="pad_mapping_hint_capture">按下手柄按键或扳机…点此取消</string>
+    <string name="pad_mapping_restore">恢复默认</string>
+    <string name="pad_mapping_done">完成</string>
+    <string name="pad_mapping_restored">按键映射已恢复默认</string>
+    <string name="pad_mapping_default_fmt">默认：%1$s</string>
+    <string name="pad_mapping_unbound">未绑定</string>
+    <string name="pad_button_cross">✕ 叉</string>
+    <string name="pad_button_circle">○ 圈</string>
+    <string name="pad_button_square">□ 方块</string>
+    <string name="pad_button_triangle">△ 三角</string>
+    <string name="pad_button_l1">L1</string>
+    <string name="pad_button_r1">R1</string>
+    <string name="pad_button_l2">L2</string>
+    <string name="pad_button_r2">R2</string>
+    <string name="pad_button_l3">L3</string>
+    <string name="pad_button_r3">R3</string>
+    <string name="pad_button_options">OPTIONS</string>
+    <string name="pad_button_touchpad">触摸板</string>
+    <string name="pad_button_up">十字键 上</string>
+    <string name="pad_button_down">十字键 下</string>
+    <string name="pad_button_left">十字键 左</string>
+    <string name="pad_button_right">十字键 右</string>
+    <string name="param_category_audio">音频</string>
+    <string name="param_category_driver">驱动</string>
+
+    <!-- Settings 页 -->
+    <string name="settings_title">设置</string>
+    <string name="settings_subtitle">图形、性能、操作、音频与驱动设置。</string>
+    <string name="settings_no_settings">该分类暂无配置项。更多分类将在后续版本提供。</string>
+
+    <!-- 帧生成卡片 -->
+    <string name="frame_gen_title">帧生成</string>
+    <string name="frame_gen_not_installed">未安装</string>
+    <string name="frame_gen_needs_dll">帧生成需要你自备的 Lossless Scaling 中的 Lossless.dll。在此导入该文件，或从 Steam 获取。</string>
+    <string name="frame_gen_source_game_folder">位于游戏目录旁——请在那里自行删除</string>
+    <string name="frame_gen_source_app_private">位于启动器自己的文件夹内</string>
+    <string name="frame_gen_import_dll">导入 .DLL</string>
+    <string name="frame_gen_get_from_steam">从 Steam 获取</string>
+    <string name="frame_gen_remove">移除</string>
+    <string name="frame_gen_footer">导入的文件保存在应用私有目录内，下次启动游戏时生效。没有 Steam 时同样可以「导入 .DLL」。</string>
+    <string name="frame_gen_toggle_off">关闭</string>
+    <string name="frame_gen_save_failed">设置保存失败。</string>
+    <string name="frame_gen_drawer_need_dll">需要 Lossless.dll（设置 → 常规 导入）</string>
+    <string name="lossless_row_import">导入</string>
+    <string name="lossless_row_missing">未导入——帧生成保持关闭</string>
+    <string name="lossless_row_installed">已导入——帧生成可用</string>
+    <string name="lossless_row_title">LOSSLESS.DLL（帧生成）</string>
+    <string name="frame_gen_import_done">Lossless.dll 已导入</string>
+    <string name="frame_gen_import_hint">需要你自备的 Lossless.dll——请前往 设置 → 常规 导入。</string>
+    <string name="frame_gen_toggle_on">开启</string>
+
+    <!-- About 页 -->
+    <string name="about_title">God of War III Android</string>
+    <string name="about_version_fmt">版本 %1$s</string>
+    <string name="about_description">一个通过模拟将《战神 III 重制版》体验带到 Android 的社区启动器。</string>
+    <string name="about_third_party_licenses">第三方许可</string>
+    <string name="update_check_title">检测更新</string>
+    <string name="update_check_action">检查</string>
+    <string name="update_check_checking">正在检查更新…</string>
+    <string name="update_check_up_to_date_fmt">已是最新版本（%1$s）。</string>
+    <string name="update_check_newer_fmt">发现新版本 %1$s。</string>
+    <string name="update_check_download">下载</string>
+    <string name="update_check_not_comparable_installed_fmt">当前版本 %1$s 是本地构建，无法与发布版本比较。</string>
+    <string name="update_check_not_comparable_latest_fmt">最新 release（%1$s）不是 Android 发布，无法比较。</string>
+    <string name="update_check_failed_network">无法连接 GitHub，请检查网络后重试。</string>
+    <string name="update_check_failed_timeout">检查超时，请稍后重试。</string>
+    <string name="update_check_failed_rate_limit">当前网络的检查请求过于频繁，请稍后重试。</string>
+    <string name="update_check_failed_http">检查失败（HTTP %1$d），请稍后重试。</string>
+    <string name="update_check_failed_response">无法解析发布信息，请稍后重试。</string>
+    <string name="language_setting">语言</string>
+    <string name="language_follow_system">跟随系统</string>
+    <string name="language_zh">简体中文</string>
+    <string name="language_en">English</string>
+
+    <!-- 存档卡片 -->
+    <string name="save_data_title">存档数据</string>
+    <string name="saves_found">发现存档</string>
+    <string name="no_saves_yet">暂无存档</string>
+    <string name="save_data_description">将你的《战神 III》存档备份为 .zip 文件，或恢复某个备份。游戏存档保存在应用私有目录内。</string>
+    <string name="save_export">导出存档</string>
+    <string name="save_import">导入存档</string>
+    <string name="save_import_footer">导入会替换当前存档，但已有存档会先备份到应用私有目录内。</string>
+
+    <!-- 日志卡片 -->
+    <string name="log_runtime_logs">运行时日志</string>
+    <string name="logs_found">发现日志</string>
+    <string name="no_logs_yet">暂无日志</string>
+    <string name="log_description">将《战神 III》运行时日志导出为 .zip 文件用于排查问题。游戏日志（android-game.log）保存在应用私有目录内。</string>
+    <string name="log_export">导出日志</string>
+    <string name="log_export_footer">导出只读取运行时日志文件，绝不会修改它们或抓取系统 logcat。</string>
+
+    <!-- 联系卡片 -->
+    <string name="contact_title">作者与支持</string>
+    <string name="contact_author_label">作者</string>
+    <string name="contact_qq_label">QQ 群</string>
+    <string name="contact_telegram_label">Telegram</string>
+    <string name="contact_open">打开</string>
+    <string name="copied_fmt">已复制 %1$s</string>
+    <string name="contact_qq_not_installed">未安装 QQ，群号已复制</string>
+    <string name="contact_no_app_fmt">没有应用可以打开 %1$s</string>
+    <string name="contact_description">欢迎提交 bug 反馈、崩溃报告与功能建议——反馈问题时请附上导出的日志，以便复现。</string>
+
+    <!-- GitHub 卡片 -->
+    <string name="github_title">GitHub</string>
+    <string name="github_star_label">求 Star</string>
+    <string name="github_star_description">喜欢这个项目？点个 Star 支持一下吧。</string>
+    <string name="github_issue_label">问题与反馈</string>
+    <string name="github_issue_description">遇到 bug、崩溃或有功能建议，请到 Issues 页面提交。</string>
+    <string name="github_open">打开</string>
+
+    <!-- Mods 页 -->
+    <string name="mods_title">MOD 与补丁</string>
+    <string name="mods_description">按当前游戏选择补丁，修改会在下次启动游戏时生效。</string>
+    <string name="mods_empty_title">未安装任何 MOD</string>
+    <string name="mods_empty_description">你的 MOD 与补丁列表将显示在这里。</string>
+
+    <!-- 数据层消息 -->
+    <string name="no_file_picker_fmt">此设备上没有可用的文件选择器（%1$s）。</string>
+    <string name="unknown_error">未知错误</string>
+    <string name="selected_location">所选位置</string>
+    <string name="log_no_logs">暂无日志可导出</string>
+    <string name="log_write_failed">无法写入所选位置，日志未被修改。</string>
+    <string name="log_exported_fmt">日志已导出：%1$s</string>
+    <string name="log_export_failed_fmt">日志导出失败：%1$s</string>
+    <string name="save_no_saves">暂无存档可导出</string>
+    <string name="save_write_failed">无法写入所选位置，未改动任何存档。</string>
+    <string name="save_exported_fmt">存档已导出：%1$s</string>
+    <string name="save_export_failed_fmt">存档导出失败：%1$s</string>
+    <string name="save_read_failed">无法读取所选文件。</string>
+    <string name="save_imported_with_backup_fmt">存档导入成功，导入前的存档已备份到 %1$s。</string>
+    <string name="save_imported">存档导入成功。</string>
+    <string name="save_import_failed_fmt">存档导入失败：%1$s</string>
+    <string name="save_archive_not_zip">所选文件不是有效的 zip 归档</string>
+    <string name="save_archive_no_content">归档中没有可导入的存档内容</string>
+    <string name="save_archive_unsafe_path_fmt">归档包含非法路径：%1$s</string>
+    <string name="save_archive_duplicate_fmt">归档包含重复路径：%1$s</string>
+    <string name="save_archive_wrong_layout_fmt">归档结构不是存档布局：%1$s</string>
+    <string name="save_archive_title_fmt">归档标题与 God of War III（%2$s）不匹配：%1$s</string>
+    <string name="lossless_no_readable_name">该文件没有可读的文件名。</string>
+    <string name="lossless_wrong_file_fmt">这不是 %1$s（所选：%2$s）。</string>
+    <string name="lossless_empty_fmt">%1$s 是空文件。</string>
+    <string name="lossless_write_failed_fmt">无法写入 %1$s，未改动任何内容。</string>
+    <string name="lossless_remove_failed_fmt">无法移除 %1$s。</string>
+
+    <!-- 游戏目录管理器 -->
+    <string name="storage_permission_title">需要存储权限</string>
+    <string name="storage_permission_message">《战神 III》需要存储权限以读取游戏目录。</string>
+    <string name="not_a_game_folder">不是《战神 III》的目录</string>
+    <string name="not_a_game_update_folder">不是《战神 III》的升级补丁目录</string>
+    <string name="choose_again">重新选择</string>
+    <string name="no_eboot">该位置没有 eboot.bin。</string>
+    <string name="no_eboot_path_fmt">%1$s 没有 eboot.bin。</string>
+    <string name="update_same_as_game">请选择与游戏目录不同的目录，或清除升级补丁。</string>
+    <string name="folder_eyebrow_game">游戏设置</string>
+    <string name="folder_eyebrow_update">游戏升级补丁</string>
+    <string name="folder_title_game">选择你的游戏目录</string>
+    <string name="folder_title_update">选择游戏升级补丁目录</string>
+    <string name="folder_message_update">可选：游戏的升级（补丁）目录，例如 CUSA01740-patch。启动时它的 eboot.bin 与 sce_sys 会叠加到游戏上；游戏文件不会被改动。留空则使用游戏目录原样。</string>
+    <string name="folder_message_game">选择解压后的《战神 III》目录（例如 CUSA01740）或其父目录。所选位置必须包含 eboot.bin。</string>
+    <string name="folder_current_selection_fmt">\n\n当前选择：\n%1$s</string>
+    <string name="folder_choose_update">选择升级补丁目录</string>
+    <string name="folder_choose_game">选择游戏目录</string>
+    <string name="no_folder_picker_fmt">没有目录选择器：%1$s</string>
+    <string name="nav_mods">补丁</string>
+    <string name="mods_loading">正在读取游戏和补丁目录…</string>
+    <string name="mods_saved">已保存，下次启动生效。</string>
+    <string name="mods_no_game">请先在首页选择游戏目录。</string>
+    <string name="mods_invalid_game">无法读取游戏程序或版本信息，请检查目录和存储权限。</string>
+    <string name="mods_invalid_update">升级目录无效或不属于同一游戏，请在首页检查升级目录。</string>
+    <string name="mods_unsupported">尚无对应此游戏 ID 的补丁目录。</string>
+    <string name="mods_version">当前游戏版本没有对应的补丁目录，请检查游戏和升级目录。</string>
+    <string name="mods_read_failed">无法读取补丁目录，请重试。</string>
+    <string name="mods_unavailable">暂时无法显示补丁</string>
+    <string name="mods_retry">重新读取</string>
+    <string name="mods_count">共 %1$d 项补丁 · 已选择 %2$d 项</string>
+    <string name="mods_next_launch">选择不会立即修改正在运行的游戏。启动时会逐项校验补丁；分辨率和帧率与首页设置同步。</string>
+    <string name="mods_group_resolution">分辨率</string>
+    <string name="mods_group_fps">引擎帧率</string>
+    <string name="mods_group_video">视频跳过</string>
+    <string name="mods_group_fixes">修复</string>
+    <string name="mods_group_effects">关闭画面特效</string>
+    <string name="mods_exclusive">同组只能开启一项，关闭后恢复原生档位。</string>
+    <string name="mods_verified_device">已有实机输出验证</string>
+    <string name="mods_verified_offline">离线校验通过 · 实机待测</string>
+    <string name="mods_pending_sample">对应版本样本待验证</string>
+    <string name="mods_legacy">既有补丁 · 启动时再次校验</string>
+    <string name="mods_details">查看说明</string>
+    <string name="mods_hide_details">收起说明</string>
+    <string name="mods_author">作者：%1$s</string>
+
+    <!-- 驱动管理卡片（Home 选择 + Settings DRIVER 分类） -->
+    <string name="driver_card_title">GPU 驱动</string>
+    <string name="driver_card_system">系统驱动</string>
+    <string name="driver_card_footer">切换在下次启动游戏时生效。更多驱动可在 设置 → 驱动 中下载。</string>
+    <string name="driver_card_needs_game_folder">请先选择游戏目录，之后才能切换驱动。</string>
+    <string name="driver_pick_selected_fmt">已选择 %1$s，下次启动游戏时生效。</string>
+
+    <string name="driver_manager_title">GPU 驱动</string>
+    <string name="driver_manager_system_fmt">系统驱动（%1$s）</string>
+    <string name="driver_manager_stock">自带</string>
+    <string name="driver_manager_version_fmt">版本 %1$s</string>
+    <string name="driver_manager_author_fmt">作者：%1$s</string>
+    <string name="driver_manager_library_fmt">驱动库：%1$s</string>
+    <string name="driver_manager_invalid">不可用——缺少驱动库文件</string>
+    <string name="driver_manager_delete">删除</string>
+    <string name="driver_manager_confirm_delete_fmt">删除 %1$s？该驱动包将从应用私有目录中移除。</string>
+    <string name="driver_manager_deleted_fmt">已删除 %1$s。</string>
+    <string name="driver_manager_deleted_fallback_fmt">已删除 %1$s，并回退到系统驱动。</string>
+    <string name="dialog_cancel">取消</string>
+    <string name="driver_manager_download">下载驱动</string>
+    <string name="driver_manager_import">导入驱动</string>
+    <string name="driver_manager_network">下载加速</string>
+    <string name="driver_manager_needs_game_folder">请先选择游戏目录，之后才能更改驱动。</string>
+    <string name="driver_manager_footer">驱动包保存在应用私有目录，运行链在下次启动时经 gow3.ini 解析加载。</string>
+
+    <string name="driver_dl_title">下载驱动</string>
+    <string name="driver_dl_sources_unavailable">内置驱动源列表无法加载。</string>
+    <string name="driver_dl_loading">加载中…</string>
+    <string name="driver_dl_empty">该源下没有可下载的驱动包。</string>
+    <string name="driver_dl_failed_network">无法连接 GitHub，请检查网络后重试。</string>
+    <string name="driver_dl_failed_rate_limit">GitHub 访问频率受限，请稍后再试。</string>
+    <string name="driver_dl_failed_http_fmt">请求失败（HTTP %1$d）。</string>
+    <string name="driver_dl_retry">重试</string>
+    <string name="driver_dl_downloaded">已下载</string>
+    <string name="driver_dl_download">下载</string>
+    <string name="driver_dl_downloading_fmt">正在下载 %1$s… %2$s / %3$s</string>
+    <string name="driver_dl_unknown_size">大小未知</string>
+    <string name="driver_dl_cancel">取消</string>
+    <string name="driver_dl_done_fmt">已安装 %1$s，它已出现在驱动列表中。</string>
+    <string name="driver_dl_failed_install">下载的包不是可用的驱动包，已丢弃。</string>
+    <string name="driver_dl_failed_download">下载失败，请重试。</string>
+    <string name="driver_dl_close">关闭</string>
+
+    <string name="driver_px_title">下载加速</string>
+    <string name="driver_px_direct">直连</string>
+    <string name="driver_px_custom">自定义镜像前缀</string>
+    <string name="driver_px_active_fmt">生效：%1$s</string>
+    <string name="driver_px_direct_label">直连</string>
+    <string name="driver_px_save">保存</string>
+    <string name="driver_px_speedtest">测速</string>
+    <string name="driver_px_testing">测速中…</string>
+    <string name="driver_px_ms_fmt">%1$d 毫秒</string>
+    <string name="driver_px_failed">失败</string>
+    <string name="driver_px_note">始终先直连 GitHub；失败且已配置镜像时，自动经该镜像重试一次。测速仅衡量各内置镜像的延迟。</string>
+</resources>

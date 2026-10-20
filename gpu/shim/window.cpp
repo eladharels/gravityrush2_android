@@ -1,4 +1,5 @@
-// gow3: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+// gow3: SDL3 window for the Vulkan swapchain (X11 or Wayland). Not built on Android (window_android.cpp).
+#ifndef __ANDROID__
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -9,6 +10,7 @@
 #include "common/logging/log.h"
 #include "sdl_window.h"
 #include "gow3_overlay.h"
+#include "gow3_pad_input.h"
 #include "gow3_graphics.h"
 #include "gow3_settings.h"
 
@@ -54,15 +56,39 @@ namespace Frontend {
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
-    if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
+    // 在 Android app 里(GOW3_ANDROID_INPUT=1)所有手柄都由 PadBridge 交给 runtime_pad.c
+    // (GOW3_PAD_FILE),SDL 找不到任何手柄:它每秒的热插拔扫描会加载 libudev,而 app 沙箱拒绝
+    // 该操作,于是每秒刷出一串 SELinux denial,ColorOS 上会被当成攻击行为上报。
+    const char* android_input = std::getenv("GOW3_ANDROID_INPUT");
+    const bool sdl_pads = !(android_input && android_input[0] == '1');
+    if (!SDL_InitSubSystem(SDL_INIT_VIDEO | (sdl_pads ? SDL_INIT_GAMEPAD : 0))) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
     SDL_PropertiesID props = SDL_CreateProperties();
+    // gow3: the Android display bridge copies each frame into the surface 1:1 and crops the
+    // overflow, so the window must not be larger than the display it is presented on.
+    int display_w = 0, display_h = 0;
+    const SDL_DisplayMode* display = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+    if (display) {
+        display_w = display->w;
+        display_h = display->h;
+    }
+    const Gow3Graphics::Size wanted{width_, height_};
+    const Gow3Graphics::Size window_size =
+        Gow3Graphics::ResolveWindowSize(wanted, Gow3Graphics::Size{display_w, display_h});
+    if (display_w <= 0 || display_h <= 0) {
+        LOG_WARNING(Frontend, "Display size {}x{} unusable ({}); window {}x{} -> {}x{}", display_w,
+                    display_h, display ? "reported by SDL" : SDL_GetError(), wanted.width,
+                    wanted.height, window_size.width, window_size.height);
+    } else if (window_size.width != wanted.width || window_size.height != wanted.height) {
+        LOG_INFO(Frontend, "Window {}x{} does not fit the display {}x{}; creating {}x{}", wanted.width,
+                 wanted.height, display_w, display_h, window_size.width, window_size.height);
+    }
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width_);
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, window_size.width);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, window_size.height);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
     base_title = title;
@@ -263,7 +289,36 @@ bool WindowSDL::PollEvents() {
             break;
         }
     }
+    // Android 的屏幕手柄不产生 SDL 事件,文本框在这里消费 runtime_pad.c 发布的边沿:
+    // Cross 确认、Circle 取消,与上面 SDL 手柄分支的语义相同。桌面没有 pad 文件,边沿恒为 0。
+    if (text_active) {
+        int move = 0, finish = 0;
+        Gow3Pad::Map(Gow3Overlay::PadEdges(), move, finish);
+        if (finish) {
+            std::scoped_lock lock{text_mutex};
+            text_state = finish;
+            text_active = false;
+            SDL_StopTextInput(window);
+            UpdateTextTitle();
+        }
+    }
+    UpdateCursor();
     return is_open;
 }
 
+// The X11 window fills the display, so only the window cursor is visible; SDL_HideCursor()
+// gives the window an empty cursor. Debounced: SDL APIs are called only on state changes.
+void WindowSDL::UpdateCursor() {
+    const bool hide = !Gow3Settings::Get().overlay_mouse.load();
+    if (hide != cursor_hidden) {
+        if (hide) {
+            SDL_HideCursor();
+        } else {
+            SDL_ShowCursor();
+        }
+        cursor_hidden = hide;
+    }
+}
+
 } // namespace Frontend
+#endif // __ANDROID__

@@ -1,0 +1,52 @@
+{
+  "sources": [
+    {
+      "id": "banners-turnip",
+      "name": "Banners Turnip",
+      "description": "The412Banner 的 Turnip 社区构建，更新频繁，覆盖 Adreno 6xx-8xx。",
+      "apiUrl": "https://api.github.com/repos/The412Banner/Banners-Turnip/releases",
+      "repoUrl": "https://github.com/The412Banner/Banners-Turnip",
+      "gpuVendor": "qualcomm"
+    },
+    {
+      "id": "purple-turnip",
+      "name": "Purple Turnip",
+      "description": "MrPurple666 维护的 Turnip 构建，以稳定性和兼容性取向为主。",
+      "apiUrl": "https://api.github.com/repos/MrPurple666/purple-turnip/releases",
+      "repoUrl": "https://github.com/MrPurple666/purple-turnip",
+      "gpuVendor": "qualcomm"
+    },
+    {
+      "id": "k11mch1-adrenotools",
+      "name": "K11MCH1 AdrenoTools Drivers",
+      "description": "K11MCH1 的 AdrenoTools 驱动合集，含面向老机型的分支。",
+      "apiUrl": "https://api.github.com/repos/K11MCH1/AdrenoToolsDrivers/releases",
+      "repoUrl": "https://github.com/K11MCH1/AdrenoToolsDrivers",
+      "gpuVendor": "qualcomm"
+    },
+    {
+      "id": "stevenmxz-adrenotools",
+      "name": "StevenMXZ Adreno Tools Drivers",
+      "description": "StevenMXZ 的 Turnip 构建，跟进 Mesa 上游较快的日更系。",
+      "apiUrl": "https://api.github.com/repos/StevenMXZ/Adreno-Tools-Drivers/releases",
+      "repoUrl": "https://github.com/StevenMXZ/Adreno-Tools-Drivers",
+      "gpuVendor": "qualcomm"
+    },
+    {
+      "id": "whitebelyash-adrenotools",
+      "name": "whitebelyash AdrenoTools Drivers",
+      "description": "whitebelyash 维护的 Turnip 构建合集，提供多版本选择。",
+      "apiUrl": "https://api.github.com/repos/whitebelyash/AdrenoToolsDrivers/releases",
+      "repoUrl": "https://github.com/whitebelyash/AdrenoToolsDrivers",
+      "gpuVendor": "qualcomm"
+    },
+    {
+      "id": "diskdvd-turnip-a8xx",
+      "name": "Turnip A8XX",
+      "description": "DiskDVD 面向 Adreno 8xx（含 840 KGSL patch id 场景）的 Turnip 变体。",
+      "apiUrl": "https://api.github.com/repos/DiskDVD/TurniptoolsA8XX/releases",
+      "repoUrl": "https://github.com/DiskDVD/TurniptoolsA8XX",
+      "gpuVendor": "qualcomm"
+    }
+  ]
+}

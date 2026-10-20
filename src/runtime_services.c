@@ -15,8 +15,10 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <io.h>
 #else
 #include <arpa/inet.h>
+#include <unistd.h>
 #endif
 
 #define USER_ID 1
@@ -259,12 +261,82 @@ static ABI int32_t msg_result(unsigned char *out) { return dialog_result(1,out,0
  * first listed save. The result names the chosen save ("" = the new item). */
 #define SAVE_MODE_LIST 1
 #define SAVE_RESULT_CANCELED 1
+#define SAVE_BRIDGE_NONE 0    /* 不使用桥(ImGui 列表或交接超时回退后) */
+#define SAVE_BRIDGE_HANDOFF 1 /* 请求已写出,等 launcher 删请求文件(交接) */
+#define SAVE_BRIDGE_ANSWER 2  /* 已交接,等 <path>.result 应答 */
 static struct {
     uint32_t mode, result;
     void *user_data;
     char dirs[32][32];
     int dir_count, has_new, choosing;
+    int64_t shown_at;  /* GOW3_SAVE_LIST_TIMEOUT 秒内没有任何输入就当取消 */
+    uint32_t type;     /* 列表类型 1 保存 / 2 读取 / 3 删除,交接超时回退时还要用它出标题 */
+    int bridge;        /* SAVE_BRIDGE_* */
 } save_dialog;
+static int64_t now_seconds(void) {
+    struct timespec ts;
+#ifdef _WIN32
+    return (int64_t)time(NULL);
+#else
+    clock_gettime(CLOCK_MONOTONIC,&ts);
+    return (int64_t)ts.tv_sec;
+#endif
+}
+/* 存档列表没有超时就会被无限期地等下去:采样 pad 文件的是游戏线程(scePadReadState),一旦游戏
+ * 在这里不再轮询,屏幕上的一切输入都到不了列表。默认 300 秒,足够慢到不会打断正常的犹豫。 */
+static int64_t save_list_timeout(void) {
+    const char *env = getenv("GOW3_SAVE_LIST_TIMEOUT");
+    int64_t seconds = env && *env ? atoll(env) : 300;
+    return seconds > 0 ? seconds : 300;
+}
+/* Param.title / Param.subtitle 的定长字段宽度(runtime_savedata.c 的 OrbisSaveDataParam 布局)。 */
+#define SAVE_TEXT_FIELD 128
+/* 存档对话框只显示前 60 字节,再多会挤掉存档图片那一列。 */
+#define SAVE_TEXT_SHOWN 60
+/* 存档的标题和副标题由游戏按它自己的语言写入这些定长字段,可能是 UTF-8,也可能是别的编码或
+ * 干脆是二进制。渲染层按 UTF-8 解释字节,遇到非法序列只会显示方块或空白。这里只判定合法性,
+ * 不做转码:猜错编码会把一段可读文本换成另一段错误文本,比回退更难排查。 */
+static int utf8_field_ok(const char *field, size_t limit) {
+    const unsigned char *p = (const unsigned char *)field;
+    for (size_t i = 0; i < limit && p[i]; ) {
+        unsigned char c = p[i], lo = 0x80, hi = 0xBF;   /* 第二个字节的合法区间 */
+        size_t need;
+        if (c < 0x80) { ++i; continue; }
+        else if (c >= 0xC2 && c <= 0xDF) need = 1;
+        else if (c == 0xE0) { need = 2; lo = 0xA0; }                    /* 排除过长编码 */
+        else if (c == 0xED) { need = 2; hi = 0x9F; }                    /* 排除代理区 U+D800..DFFF */
+        else if (c >= 0xE1 && c <= 0xEF) need = 2;
+        else if (c == 0xF0) { need = 3; lo = 0x90; }                    /* 排除过长编码 */
+        else if (c == 0xF4) { need = 3; hi = 0x8F; }                    /* 排除超过 U+10FFFF */
+        else if (c >= 0xF1 && c <= 0xF3) need = 3;
+        else return 0;                                /* 孤立续字节、C0/C1、F5..FF */
+        if (i + need >= limit) return 0;              /* 序列超出字段边界 */
+        if (p[i+1] < lo || p[i+1] > hi) return 0;
+        for (size_t k = 2; k <= need; ++k) if (p[i+k] < 0x80 || p[i+k] > 0xBF) return 0;
+        i += need + 1;
+    }
+    return 1;
+}
+/* 已通过 utf8_field_ok 的文本里,不超过 limit 字节、且不切开多字节序列的最长前缀。 */
+static size_t utf8_prefix(const char *text, size_t limit) {
+    const unsigned char *p = (const unsigned char *)text;
+    size_t i = 0;
+    while (i < limit && p[i]) {
+        unsigned char c = p[i];
+        size_t need = c < 0x80 ? 0 : c < 0xE0 ? 1 : c < 0xF0 ? 2 : 3;
+        if (i + need >= limit) break;                 /* 放不下整个字符就停在这里 */
+        i += need + 1;
+    }
+    return i;
+}
+/* 渲染层因此永远只拿到合法 UTF-8:空字段或非法时退回目录名(副标题退回空串)。 */
+static void save_text(char *out, size_t size, const char *name, const char *field,
+                      const char *dir, const char *fallback) {
+    if (!field[0]) { snprintf(out,size,"%s",fallback); return; }
+    if (utf8_field_ok(field,SAVE_TEXT_FIELD)) { snprintf(out,size,"%.*s",(int)(SAVE_TEXT_FIELD-1),field); return; }
+    printf("Runtime: SaveDataDialog: %s of %s is not valid UTF-8, using the directory name\n",name,dir);
+    snprintf(out,size,"%s",fallback);
+}
 static char save_labels[33][200], save_icons[33][720];
 static void save_label(char *out, size_t size, const char *dir) {
     unsigned char param[RUNTIME_SAVE_PARAM_SIZE];
@@ -277,9 +349,112 @@ static void save_label(char *out, size_t size, const char *dir) {
     localtime_r(&t,&tm);
 #endif
     char when[32]; strftime(when,sizeof(when),"%Y-%m-%d %H:%M",&tm);
-    const char *title=(const char *)param, *subtitle=(const char *)param+128;
-    /* Title, subtitle and date on their own lines, beside the save's picture. */
-    snprintf(out,size,"%.60s\n%.60s%s%s",title[0] ? title : dir,subtitle,subtitle[0] ? "\n" : "",when);
+    char title[SAVE_TEXT_FIELD], subtitle[SAVE_TEXT_FIELD];
+    save_text(title,sizeof(title),"title",(const char *)param,dir,dir);
+    save_text(subtitle,sizeof(subtitle),"subtitle",(const char *)param+SAVE_TEXT_FIELD,dir,"");
+    /* Title, subtitle and date on their own lines, beside the save's picture.
+     * 截断点必须落在字符边界上,否则 %.*s 会从中间切开多字节序列,校验过的文本又变回非法。 */
+    size_t head=utf8_prefix(title,SAVE_TEXT_SHOWN), tail=utf8_prefix(subtitle,SAVE_TEXT_SHOWN);
+    snprintf(out,size,"%.*s\n%.*s%s%s",(int)head,title,(int)tail,subtitle,tail ? "\n" : "",when);
+}
+/* GOW3_SAVE_DIALOG_FILE (Android 前端):存档/读档/删除列表改由 app 用原生对话框呈现。
+ * 请求文件每行依次写类型(1 保存 / 2 读取 / 3 删除)、条目数,之后每条目 3 行(标题/副标题/
+ * 日期,均已 one_line 去换行);app 在 <path>.result 里回一行 "ok <索引>" 或 "cancel"。
+ * 缩略图按原始 PNG 字节写到 <path>.p<索引>,无图不写。文本文件先整体写到临时名再 rename,
+ * 任何一侧都不会读到半个文件——与 GOW3_IME_FILE 同一条已经跑通的模式。 */
+static const char *save_dialog_bridge(void) {
+    const char *path=getenv("GOW3_SAVE_DIALOG_FILE");
+    return path && *path ? path : NULL;
+}
+static void one_line(char *text); /* 定义在下方 ImeDialog 段落;这里先声明供请求写入用 */
+static void save_dialog_bridge_icon(const char *path, int index, const char *icon) {
+    char out[700];
+    snprintf(out,sizeof(out),"%s.p%d",path,index);
+    FILE *in=fopen(icon,"rb"), *f=fopen(out,"wb");
+    if (!in || !f) { if (in) fclose(in); if (f) fclose(f); return; }
+    char buf[4096]; size_t n;
+    while ((n=fread(buf,1,sizeof(buf),in))>0) fwrite(buf,1,n,f);
+    fclose(in); fclose(f);
+}
+/* 0 失败 / 1 成功。图片先落盘再写请求:launcher 看到请求文件时缩略图已经都在。 */
+static int save_dialog_bridge_request(const char *path, uint32_t type, const char *const *labels,
+                                      const char *const *icons, int count) {
+    char result[700], temporary[700];
+    snprintf(result,sizeof(result),"%s.result",path);
+    snprintf(temporary,sizeof(temporary),"%s.tmp",path);
+    for (int i=0;i<count;++i) if (icons[i]) save_dialog_bridge_icon(path,i,icons[i]);
+    unlink(result); /* 上一个被放弃的对话框留下的应答 */
+    FILE *f=fopen(temporary,"w");
+    if (!f) return 0;
+    fprintf(f,"ok\n%u\n%d\n",type,count);
+    for (int i=0;i<count;++i) {
+        /* save_label 产出的正是「标题\n副标题\n日期」三行,按 \n 拆开,再 one_line 兜底。 */
+        char line[512];
+        snprintf(line,sizeof(line),"%s",labels[i]);
+        char *title=line, *nl1=strchr(line,'\n');
+        if (nl1) *nl1=0;
+        char *subtitle=nl1 ? nl1+1 : "";
+        char *nl2=subtitle[0] ? strchr(subtitle,'\n') : NULL;
+        if (nl2) *nl2=0;
+        char *date=nl2 ? nl2+1 : "";
+        one_line(title); one_line(subtitle); one_line(date);
+        fprintf(f,"%s\n%s\n%s\n",title,subtitle,date);
+    }
+    if (fclose(f) || rename(temporary,path)) { unlink(temporary); return 0; }
+    return 1;
+}
+/* 0 尚无应答 / 1 已确认(ok <索引>,*index 带回) / 2 已取消。读到后删应答文件。 */
+static int save_dialog_bridge_poll(const char *path, int *index) {
+    char result[700], line[64];
+    snprintf(result,sizeof(result),"%s.result",path);
+    FILE *f=fopen(result,"r");
+    if (!f) return 0;
+    if (!fgets(line,sizeof(line),f)) line[0]=0;
+    fclose(f);
+    unlink(result);
+    if (strncmp(line,"ok",2)) return 2; /* cancel */
+    if (index) *index=atoi(line+2);
+    return 1;
+}
+/* 请求文件还在 = launcher 没接手;被 launcher 删掉 = 已接手(design D2)。 */
+static int save_dialog_bridge_request_pending(const char *path) {
+#ifdef _WIN32
+    return _access(path,0)==0;
+#else
+    return access(path,F_OK)==0;
+#endif
+}
+static int64_t save_dialog_handoff_timeout(void) {
+    const char *env=getenv("GOW3_SAVE_DIALOG_HANDOFF_TIMEOUT");
+    int64_t seconds=env && *env ? atoll(env) : 5;
+    return seconds>0 ? seconds : 5;
+}
+/* 从 save_dialog 当前状态重建列表条目(save_open 与交接超时回退共用)。 */
+static int save_choice_build(const char **labels, const char **icons) {
+    int n=0;
+    if (save_dialog.has_new) { snprintf(save_labels[n],sizeof(save_labels[n]),"New save"); labels[n]=save_labels[n]; icons[n]=NULL; ++n; }
+    for (int i=0;i<save_dialog.dir_count;++i) {
+        save_label(save_labels[n],sizeof(save_labels[n]),save_dialog.dirs[i]); labels[n]=save_labels[n];
+        icons[n]=runtime_savedata_icon(USER_ID,save_dialog.dirs[i],save_icons[n],sizeof(save_icons[n])) ? NULL : save_icons[n];
+        ++n;
+    }
+    return n;
+}
+static const char *save_dialog_title(void) {
+    return save_dialog.type==1 ? "Save game" : save_dialog.type==2 ? "Load game" : "Delete save";
+}
+static void save_dialog_cancel(void) {
+    save_dialog.result=SAVE_RESULT_CANCELED;
+    save_dialog.choosing=0;
+    dialogs[2].status=DIALOG_FINISHED; dialogs[2].button=0;
+}
+static void save_dialog_choose(int index) {
+    int dir=index-save_dialog.has_new;
+    /* The chosen save goes first; the new item has no name. */
+    if (dir>=0) memcpy(save_dialog.dirs[0],save_dialog.dirs[dir],32);
+    else save_dialog.dirs[0][0]=0;
+    save_dialog.dir_count=dir>=0 || save_dialog.dir_count ? 1 : 0;
+    dialogs[2].button=1;
 }
 static ABI int32_t save_init(void) { return dialog_init(2); }
 static ABI int32_t save_open(const unsigned char *p) {
@@ -297,41 +472,102 @@ static ABI int32_t save_open(const unsigned char *p) {
         save_dialog.has_new=new_item!=NULL;
     }
     if (save_dialog.mode!=SAVE_MODE_LIST) return dialog_open_mode(2,p,52,5);
-    const char *labels[33], *icons[33]; int n=0;
-    if (save_dialog.has_new) { snprintf(save_labels[n],sizeof(save_labels[n]),"New save"); labels[n]=save_labels[n]; icons[n]=NULL; ++n; }
-    for (int i=0;i<save_dialog.dir_count;++i) {
-        save_label(save_labels[n],sizeof(save_labels[n]),save_dialog.dirs[i]); labels[n]=save_labels[n];
-        icons[n]=runtime_savedata_icon(USER_ID,save_dialog.dirs[i],save_icons[n],sizeof(save_icons[n])) ? NULL : save_icons[n];
-        ++n;
-    }
-    uint32_t type; memcpy(&type,p+56,4);
-    const char *title=type==1 ? "Save game" : type==2 ? "Load game" : "Delete save";
-    if (!n || !gow3gpu_choice_begin(title,labels,icons,n,0)) {
-        printf("Runtime: SaveDataDialog list (%s): %s\n",title,n ? "no window, cancelled" : "no saves, cancelled");
-        save_dialog.result=SAVE_RESULT_CANCELED;
-        dialogs[2].status=DIALOG_FINISHED; dialogs[2].button=0;
+    memcpy(&save_dialog.type,p+56,4);
+    const char *bridge=save_dialog_bridge();
+    const char *labels[33], *icons[33];
+    int n=save_choice_build(labels,icons);
+    /* 原生路径:桥配置了、有条目、且请求(含缩略图)写成功,就交给 launcher 呈现。 */
+    if (n && bridge && save_dialog_bridge_request(bridge,save_dialog.type,labels,icons,n)) {
+        printf("Runtime: SaveDataDialog list (%s): %d entries sent to the launcher\n",
+               save_dialog_title(),n);
+        save_dialog.bridge=SAVE_BRIDGE_HANDOFF;
+        save_dialog.choosing=1;
+        save_dialog.shown_at=now_seconds();
+        dialogs[2].status=DIALOG_RUNNING;
         return 0;
     }
-    printf("Runtime: SaveDataDialog list (%s): %d entries shown\n",title,n);
+    if (!n || !gow3gpu_choice_begin(save_dialog_title(),labels,icons,n,0)) {
+        printf("Runtime: SaveDataDialog list (%s): %s\n",save_dialog_title(),
+               n ? "no window, cancelled" : "no saves, cancelled");
+        save_dialog_cancel();
+        return 0;
+    }
+    printf("Runtime: SaveDataDialog list (%s): %d entries shown\n",save_dialog_title(),n);
     save_dialog.choosing=1;
+    save_dialog.shown_at=now_seconds();
     dialogs[2].status=DIALOG_RUNNING;
     return 0;
 }
 static ABI int32_t save_status(void) {
     if (save_dialog.choosing) {
+        const char *bridge=save_dialog_bridge();
+        if (save_dialog.bridge==SAVE_BRIDGE_HANDOFF) {
+            if (bridge && !save_dialog_bridge_request_pending(bridge)) {
+                /* 请求文件被 launcher 删掉 = 已接手,进入应答阶段并重新计时。 */
+                save_dialog.bridge=SAVE_BRIDGE_ANSWER;
+                save_dialog.shown_at=now_seconds();
+                printf("Runtime: SaveDataDialog list: the launcher took over the request\n");
+            } else if (now_seconds()-save_dialog.shown_at>=save_dialog_handoff_timeout()) {
+                /* 交接超时:没有任何 launcher 接手,回退到 overlay 列表,选择并入原有分支。
+                 * 顺手删掉请求文件,否则迟到的 launcher 会在 ImGui 列表上再叠一个原生对话框。 */
+                printf("Runtime: SaveDataDialog list: no launcher handoff within %lld s, "
+                       "falling back to the overlay\n",(long long)save_dialog_handoff_timeout());
+                if (bridge) unlink(bridge);
+                const char *labels[33], *icons[33];
+                int n=save_choice_build(labels,icons);
+                save_dialog.bridge=SAVE_BRIDGE_NONE;
+                save_dialog.shown_at=now_seconds();
+                if (!n || !gow3gpu_choice_begin(save_dialog_title(),labels,icons,n,0)) {
+                    printf("Runtime: SaveDataDialog list (%s): fallback failed, cancelling\n",
+                           save_dialog_title());
+                    save_dialog_cancel();
+                    return dialog_status(2);
+                }
+            } else {
+                return dialog_status(2); /* 还在等交接 */
+            }
+        }
+        if (save_dialog.bridge==SAVE_BRIDGE_ANSWER) {
+            /* 已交接:等 launcher 应答;launcher 消失用 save_list_timeout 兜底,不能永久等。 */
+            int index=-1;
+            int state=bridge ? save_dialog_bridge_poll(bridge,&index) : 0;
+            if (!state) {
+                if (now_seconds()-save_dialog.shown_at>=save_list_timeout()) {
+                    printf("Runtime: SaveDataDialog list: the launcher did not answer within "
+                           "%lld s, cancelling\n",(long long)save_list_timeout());
+                    save_dialog_cancel();
+                }
+                return dialog_status(2);
+            }
+            save_dialog.choosing=0;
+            dialogs[2].status=DIALOG_FINISHED;
+            /* 应答索引是跨进程外部输入:必须落在本列表的条目范围内,否则按取消处理并记日志,
+             * 不能拿它去 memcpy dirs[索引] 越界读。 */
+            int entries=save_dialog.dir_count+save_dialog.has_new;
+            int invalid=(state==2 || index<0 || index>=entries);
+            if (invalid && index>=0)
+                printf("Runtime: SaveDataDialog list: out-of-range index %d of %d entries, cancelling\n",
+                       index,entries);
+            if (invalid) { save_dialog.result=SAVE_RESULT_CANCELED; dialogs[2].button=0; }
+            else save_dialog_choose(index);
+            printf("Runtime: SaveDataDialog list: %s%s\n",invalid ? "cancelled" : "chose ",
+                   invalid ? "" : save_dialog.dirs[0][0] ? save_dialog.dirs[0] : "new save");
+            return dialog_status(2);
+        }
         int choice=gow3gpu_choice_poll();
+        if (choice==-1 && now_seconds()-save_dialog.shown_at>=save_list_timeout()) {
+            /* 没有任何输入源能到达列表(见 save_list_timeout)。关掉列表再当作取消交还控制权,
+             * 否则它会继续绘制并继续扣住游戏的输入。 */
+            printf("Runtime: SaveDataDialog list: timed out after %lld s with no input, cancelling\n",
+                   (long long)save_list_timeout());
+            gow3gpu_choice_cancel();
+            choice=-2;
+        }
         if (choice!=-1) {
             save_dialog.choosing=0;
             dialogs[2].status=DIALOG_FINISHED;
             if (choice<0) { save_dialog.result=SAVE_RESULT_CANCELED; dialogs[2].button=0; }
-            else {
-                int dir=choice-save_dialog.has_new;
-                /* The chosen save goes first; the new item has no name. */
-                if (dir>=0) memcpy(save_dialog.dirs[0],save_dialog.dirs[dir],32);
-                else save_dialog.dirs[0][0]=0;
-                save_dialog.dir_count=dir>=0 || save_dialog.dir_count ? 1 : 0;
-                dialogs[2].button=1;
-            }
+            else save_dialog_choose(choice);
             printf("Runtime: SaveDataDialog list: %s%s\n",choice<0 ? "cancelled" : "chose ",
                    choice<0 ? "" : save_dialog.dirs[0][0] ? save_dialog.dirs[0] : "new save");
         }
@@ -401,6 +637,44 @@ static void utf8_to_utf16(const char *in, uint16_t *out, uint32_t max) {
     }
     out[n<max ? n : max]=0;
 }
+/* GOW3_IME_FILE (Android 前端):对话框由 app 用触摸键盘显示。请求文件每行依次写最大长度
+ * (UTF-16 单元)、标题和当前文本;app 在 <GOW3_IME_FILE>.result 里回 "ok" 或 "cancel",
+ * 下一行是文本。两个文件都先整体写到临时名再 rename,任何一侧都不会读到半个文件。
+ * 移植自 Bloodborne-Android/src/runtime_services.c。 */
+static const char *ime_bridge(void) {
+    const char *path=getenv("GOW3_IME_FILE");
+    return path && *path ? path : NULL;
+}
+static void one_line(char *text) { for (char *p=text; *p; ++p) if (*p=='\n' || *p=='\r') *p=' '; }
+static int ime_bridge_request(const char *path, const char *initial, const char *title, uint32_t max_length) {
+    char result[600], temporary[600];
+    snprintf(result,sizeof(result),"%s.result",path);
+    snprintf(temporary,sizeof(temporary),"%s.tmp",path);
+    unlink(result); /* 上一个被放弃的对话框留下的应答 */
+    char first[512], prompt[256];
+    snprintf(first,sizeof(first),"%s",initial); snprintf(prompt,sizeof(prompt),"%s",title);
+    one_line(first); one_line(prompt);
+    FILE *f=fopen(temporary,"w");
+    if (!f) return 0;
+    fprintf(f,"%u\n%s\n%s\n",max_length,prompt,first);
+    if (fclose(f) || rename(temporary,path)) { unlink(temporary); return 0; }
+    return 1;
+}
+/* 0:还没有应答;1:已确认(文本已写入);2:已取消。 */
+static int ime_bridge_poll(const char *path, char *text, size_t size) {
+    char result[600];
+    snprintf(result,sizeof(result),"%s.result",path);
+    FILE *f=fopen(result,"r");
+    if (!f) return 0;
+    char status[16]="";
+    text[0]=0;
+    if (!fgets(status,sizeof(status),f)) status[0]=0;
+    if (!fgets(text,(int)size,f)) text[0]=0;
+    fclose(f);
+    unlink(result);
+    text[strcspn(text,"\r\n")]=0;
+    return strncmp(status,"ok",2) ? 2 : 1;
+}
 static void ime_complete(int end_status, const char *text) {
     if (!end_status && ime.buffer && ime.max_length) utf8_to_utf16(text,ime.buffer,ime.max_length);
     ime.end_status=end_status; ime.finished=1; ime.running=0;
@@ -417,10 +691,14 @@ static ABI int32_t ime_init(const ImeParam *param, const void *extended) {
     utf16_to_utf8(param->title,128,prompt,sizeof(prompt));
     const char *preset=getenv("GOW3_IME_TEXT");
     if (preset) { ime_complete(0,preset); return 0; }
-    /* An empty field starts with the player name (launcher) or "Hunter": a controller alone
-     * can accept it (the port has no on-screen keyboard). */
+    /* 命中文件桥就直接返回:Android 上不要落到 SDL 文本输入,那条路收不到 EditText 的内容。 */
+    if (ime_bridge() && ime_bridge_request(ime_bridge(),initial,prompt[0] ? prompt : "Text",param->max_length)) {
+        printf("Runtime: ImeDialog opened: the app shows the touch keyboard\n");
+        return 0;
+    }
+    /* 空字段先填玩家名(launcher 提供)或 "Kratos":光靠手柄也能确认(移植版没有屏幕键盘)。 */
     const char *name=getenv("GOW3_USER_NAME");
-    const char *start=initial[0] ? initial : name && *name ? name : "Hunter";
+    const char *start=initial[0] ? initial : name && *name ? name : "Kratos";
     if (!gow3gpu_text_input_begin(start,prompt[0] ? prompt : "Text")) ime_complete(0,start);
     else printf("Runtime: ImeDialog opened: shown on screen; keyboard Enter or Cross accepts, Esc or Circle cancels\n");
     return 0;
@@ -428,7 +706,8 @@ static ABI int32_t ime_init(const ImeParam *param, const void *extended) {
 static ABI int32_t ime_status(void) {
     if (ime.running) {
         char text[512];
-        int state=gow3gpu_text_input_poll(text,sizeof(text));
+        int state=ime_bridge() ? ime_bridge_poll(ime_bridge(),text,sizeof(text))
+                               : gow3gpu_text_input_poll(text,sizeof(text));
         if (state) ime_complete(state==1 ? 0 : 1,text);
     }
     return ime.running ? 1 : ime.finished ? 2 : 0; /* Running / Finished / None */

@@ -2,12 +2,13 @@
 #include <assert.h>
 #include <unistd.h>
 #include "../src/runtime_pad.c"
-#ifdef _WIN32
-#define setenv(name, value, overwrite) _putenv_s(name, value)
-#endif
 
 static int capture;
+static uint32_t published;
+static int vibration_percent=100;
 int gow3gpu_overlay_captures_input(void) { return capture; }
+void gow3gpu_pad_publish(uint32_t buttons) { published=buttons; }
+int gow3gpu_vibration_percent(void) { return vibration_percent; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;
@@ -20,21 +21,14 @@ static void inject(const char *path, const char *tokens) {
     fclose(f);
     usleep(25000);
 }
-static PadData read_pad(void) {
-    PadData d;
-    assert(pad_read_state(1,&d)==0);
-    return d;
-}
-/* One finger in the middle of the left (480) or right (1440) half of the touchpad. */
-static int touch_at(const PadData *d, int x) {
-    return d->touch_count==1 && d->touches[0].x==x && d->touches[0].y==471;
-}
-static void pump(void) { SDL_UpdateJoysticks(); SDL_UpdateGamepads(); }
 
 int main(void) {
-    const char *tmp=getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
-    char path[1024];
-    snprintf(path,sizeof(path),"%s/gow3-pad-test-XXXXXX",tmp);
+    assert(scale_vibration(255, 100) == 65535);
+    assert(scale_vibration(255, 50) == 32767);
+    assert(scale_vibration(255, 0) == 0);
+    assert(scale_vibration(255, 150) == 65535);
+
+    char path[]="/tmp/gow3-pad-test-XXXXXX";
     int fd=mkstemp(path);
     assert(fd>=0);
     close(fd);
@@ -44,73 +38,80 @@ int main(void) {
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189");
     assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD));
     assert(pad_init()==0 && pad_open(1,0,0,NULL)==1);
-
-    /* A click without a touch surface (Back, Tab, Backspace, the pad file) plays like a finger:
-     * the touch comes first, the button CLICK_LEAD_US later, and the touch stays CLICK_TAIL_US
-     * after the release. God of War III opens photo mode on the release of a left click with
-     * the finger still down; a touch that appears and vanishes with the button is ignored. */
+    PadData data;
     inject(path,"cross l3 touchpad_left");
-    PadData data=read_pad();
-    assert((data.buttons & (BTN_CROSS|BTN_L3))==(BTN_CROSS|BTN_L3));
-    assert(!(data.buttons & BTN_TOUCHPAD) && touch_at(&data,480));
-    usleep(60000);
-    data=read_pad();
-    assert((data.buttons & BTN_TOUCHPAD) && touch_at(&data,480));
-    usleep(60000);
-    inject(path,"");
-    data=read_pad();
-    assert(data.buttons==0 && touch_at(&data,480)); /* released: the finger lingers */
-    usleep(220000);
-    data=read_pad();
-    assert(data.buttons==0 && data.touch_count==0);
-
-    /* A tap shorter than the lead still clicks, for CLICK_HOLD_US. */
+    assert(pad_read_state(1,&data)==0);
+    assert((data.buttons & (BTN_CROSS|BTN_L3|BTN_TOUCHPAD))==(BTN_CROSS|BTN_L3|BTN_TOUCHPAD));
+    assert(data.touch_count==1 && data.touches[0].x==480 && data.touches[0].y==471);
     inject(path,"touchpad_right");
-    data=read_pad();
-    assert(!(data.buttons & BTN_TOUCHPAD) && touch_at(&data,1440));
+    assert(pad_read_state(1,&data)==0 && data.touch_count==1 && data.touches[0].x==1440);
+    assert((data.buttons & BTN_TOUCHPAD));
+    /* 裸 touchpad 仍默认左侧点击(x=480),与 touchpad_left 一致。 */
+    inject(path,"touchpad");
+    assert(pad_read_state(1,&data)==0 && data.touch_count==1 && data.touches[0].x==480);
+    assert((data.buttons & BTN_TOUCHPAD));
     inject(path,"");
-    data=read_pad();
-    assert(!(data.buttons & BTN_TOUCHPAD) && touch_at(&data,1440));
-    usleep(60000);
-    data=read_pad();
-    assert((data.buttons & BTN_TOUCHPAD) && touch_at(&data,1440));
-    usleep(60000);
-    data=read_pad();
-    assert(!(data.buttons & BTN_TOUCHPAD) && touch_at(&data,1440));
-    usleep(220000);
-    data=read_pad();
-    assert(data.buttons==0 && data.touch_count==0);
+    assert(pad_read_state(1,&data)==0 && data.buttons==0 && data.touch_count==0);
 
-    /* L1 + the right click is a left click (photo mode on a pad without a touchpad). The side
-     * is chosen when the click starts and kept until it ends. */
-    inject(path,"l1 touchpad_right");
-    data=read_pad();
-    assert((data.buttons & BTN_L1) && touch_at(&data,480));
-    inject(path,"touchpad_right");
-    data=read_pad();
-    assert(!(data.buttons & BTN_L1) && touch_at(&data,480));
+    /* The pad file carries the triggers as numbers: PadBridge omits the l2/r2 tokens whenever the
+     * value is above 0, so a file with only l2=/r2= still has to move the analogue axes. */
+    inject(path,"l2=128 r2=200");
+    assert(pad_read_state(1,&data)==0 && data.l2==128 && data.r2==200);
+    inject(path,"l2=999 r2=-5");
+    assert(pad_read_state(1,&data)==0 && data.l2==255 && data.r2==0);
+    /* 数值扳机越过 30 阈值时与物理手柄一致:模拟量与数字按键位同时有效。 */
+    inject(path,"l2=255 r2=255");
+    assert(pad_read_state(1,&data)==0 && data.l2==255 && data.r2==255);
+    assert((data.buttons & (BTN_L2|BTN_R2))==(BTN_L2|BTN_R2));
+    /* 阈值边界:30 不置位、31 置位,保护与 sample_host() 一致的 >30 判定。 */
+    inject(path,"l2=30 r2=30");
+    assert(pad_read_state(1,&data)==0 && data.l2==30 && data.r2==30);
+    assert((data.buttons & (BTN_L2|BTN_R2))==0);
+    inject(path,"l2=31 r2=31");
+    assert(pad_read_state(1,&data)==0 && data.l2==31 && data.r2==31);
+    assert((data.buttons & (BTN_L2|BTN_R2))==(BTN_L2|BTN_R2));
+    /* 释放:注入源自身值归零(空文件或 l2=0),注入贡献的模拟量与按键位都被清除。 */
+    inject(path,"l2=255");
+    assert(pad_read_state(1,&data)==0 && data.l2==255 && (data.buttons & BTN_L2));
+    inject(path,"l2=0");
+    assert(pad_read_state(1,&data)==0 && data.l2==0 && !(data.buttons & BTN_L2));
     inject(path,"");
-    data=read_pad(); /* the release is seen here: the tail starts */
-    usleep(220000);
-    data=read_pad();
-    assert(data.buttons==0 && data.touch_count==0);
+    assert(pad_read_state(1,&data)==0 && data.l2==0 && data.r2==0);
+    assert((data.buttons & (BTN_L2|BTN_R2))==0);
+    /* 二进制 token 仍置位按键位并拉满模拟量(既有路径不回归)。 */
+    inject(path,"cross l2 r2");
+    assert(pad_read_state(1,&data)==0 && data.l2==255 && data.r2==255);
+    assert((data.buttons & BTN_CROSS) && (data.buttons & (BTN_L2|BTN_R2))==(BTN_L2|BTN_R2));
+    inject(path,"l2 r2");
+    assert(pad_read_state(1,&data)==0 && data.l2==255 && data.r2==255);
+    assert((data.buttons & (BTN_L2|BTN_R2))==(BTN_L2|BTN_R2));
+    /* overlay 发布只基于 token 按键位:数值注入不进发布,二进制 token 进发布。 */
+    inject(path,"l2=255");
+    assert(pad_read_state(1,&data)==0 && (published & (BTN_L2|BTN_R2))==0);
+    inject(path,"l2");
+    assert(pad_read_state(1,&data)==0 && (published & BTN_L2));
+    inject(path,"");
+    assert(pad_read_state(1,&data)==0 && published==0);
 
-    /* The settings menu takes the input and ends a click; the source starts a new one after. */
-    inject(path,"touchpad_right");
-    usleep(60000);
-    data=read_pad();
-    assert(touch_at(&data,1440));
+    /* While the overlay holds the input the game stays neutral, but the file is still read and
+     * published: on Android that file is the only thing the save list can hear. */
     capture=1;
-    data=read_pad();
-    assert(data.buttons==0 && data.touch_count==0);
-    capture=0;
-    data=read_pad();
-    assert(!(data.buttons & BTN_TOUCHPAD) && touch_at(&data,1440));
+    inject(path,"cross circle");
+    assert(pad_read_state(1,&data)==0);
+    assert(data.buttons==0 && data.left_x==128 && data.left_y==128);
+    assert(published==(BTN_CROSS|BTN_CIRCLE));
     inject(path,"");
-    data=read_pad(); /* the release is seen here: the tail starts */
-    usleep(220000);
-    data=read_pad();
-    assert(data.buttons==0 && data.touch_count==0);
+    assert(pad_read_state(1,&data)==0 && published==0);
+
+    /* Cross accepted the dialog and is still held: the game must not see it until it is released. */
+    inject(path,"cross");
+    assert(pad_read_state(1,&data)==0 && data.buttons==0);
+    capture=0;
+    assert(pad_read_state(1,&data)==0 && data.buttons==0);
+    inject(path,"");
+    assert(pad_read_state(1,&data)==0 && data.buttons==0);
+    inject(path,"cross");
+    assert(pad_read_state(1,&data)==0 && (data.buttons & BTN_CROSS));
 
     SDL_VirtualJoystickTouchpadDesc touch={.nfingers=2};
     SDL_VirtualJoystickDesc desc;
@@ -129,66 +130,29 @@ int main(void) {
     assert(id!=0);
     SDL_Joystick *joystick=SDL_OpenJoystick(id);
     assert(joystick);
-    /* A real touchpad: the fingers and the click go to the game as they are. */
     assert(SDL_SetJoystickVirtualTouchpad(joystick,0,0,true,0.75f,0.5f,1.0f));
     assert(SDL_SetJoystickVirtualTouchpad(joystick,0,1,true,0.25f,1.0f,1.0f));
     assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_TOUCHPAD,true));
-    pump();
-    data=read_pad();
+    SDL_UpdateJoysticks();
+    SDL_UpdateGamepads();
+    assert(pad_read_state(1,&data)==0);
     assert(gamepad && data.touch_count==2 && (data.buttons & BTN_TOUCHPAD));
     assert(data.touches[0].x==1439 && data.touches[0].y==471 && data.touches[0].id==0);
     assert(data.touches[1].x==480 && data.touches[1].y==942 && data.touches[1].id==1);
     capture=1;
-    data=read_pad();
-    assert(data.touch_count==0 && data.buttons==0);
+    assert(pad_read_state(1,&data)==0 && data.touch_count==0 && data.buttons==0);
     capture=0;
-    /* The click without a finger is played as a left click. */
     assert(SDL_SetJoystickVirtualTouchpad(joystick,0,0,false,0,0,0));
     assert(SDL_SetJoystickVirtualTouchpad(joystick,0,1,false,0,0,0));
-    pump();
-    data=read_pad();
-    assert(!(data.buttons & BTN_TOUCHPAD) && touch_at(&data,480));
-    usleep(60000);
-    data=read_pad();
-    assert((data.buttons & BTN_TOUCHPAD) && touch_at(&data,480));
-    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_TOUCHPAD,false));
-    pump();
-    data=read_pad();
-    usleep(220000);
-    data=read_pad();
-    assert(data.buttons==0 && data.touch_count==0);
-    /* Back (Share, View) is the right click: the pause menu. With L1 it is the left click. */
-    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,true));
-    pump();
-    data=read_pad();
-    assert(!(data.buttons & BTN_TOUCHPAD) && touch_at(&data,1440));
-    usleep(60000);
-    data=read_pad();
-    assert((data.buttons & BTN_TOUCHPAD) && touch_at(&data,1440));
-    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false));
-    pump();
-    data=read_pad();
-    usleep(220000);
-    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,true));
-    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,true));
-    pump();
-    data=read_pad();
-    assert((data.buttons & BTN_L1) && !(data.buttons & BTN_TOUCHPAD) && touch_at(&data,480));
-    usleep(60000);
-    data=read_pad();
-    assert((data.buttons & (BTN_L1|BTN_TOUCHPAD))==(BTN_L1|BTN_TOUCHPAD) && touch_at(&data,480));
-    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,false));
-    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false));
-    pump();
-    data=read_pad();
-    usleep(220000);
-    data=read_pad();
-    assert(data.buttons==0 && data.touch_count==0);
+    SDL_UpdateJoysticks();
+    SDL_UpdateGamepads();
+    assert(pad_read_state(1,&data)==0 && data.touch_count==1 && data.touches[0].x==480);
     SDL_CloseJoystick(joystick);
     if (gamepad) SDL_CloseGamepad(gamepad);
     gamepad=NULL;
     assert(SDL_DetachVirtualJoystick(id));
     SDL_Quit();
     unlink(path);
-    puts("PASS: pad ABI, staged left/right clicks, L1 chord, SDL touch coordinates, overlay capture");
+    puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch coordinates, overlay capture, "
+         "pad-file triggers, publish while the overlay holds input, hold-after-capture release");
 }

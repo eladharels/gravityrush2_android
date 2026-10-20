@@ -29,6 +29,7 @@
 #include "video_core/texture_cache/aliasing.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include <vulkan/vulkan_format_traits.hpp>
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
@@ -292,9 +293,29 @@ void TextureCache::CancelReadbacks(VAddr address, u64 size) {
     });
 }
 
+// gow3（上游 b646683，轻量版）：GOW3_PERF_DIAG=1 时每 5 秒打印一次 partial height views
+// 命中数。取 `mutex`：计数由 FindImage 锁内的 ResolveOverlap 递增。
+void TextureCache::ReportPartialViews() {
+    if (partial_views == 0) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - partial_view_report < std::chrono::seconds(5)) {
+        return;
+    }
+    partial_view_report = now;
+    std::scoped_lock lock{mutex};
+    std::printf("Partial height views: %llu in 5 s\n",
+                static_cast<unsigned long long>(partial_views));
+    partial_views = 0;
+}
+
 // gow3: every copy is recorded first and the GPU is waited for once. A wait per image (as
 // before) left the GPU mostly idle in God of War III's gameplay, at about 2 FPS.
 void TextureCache::ProcessDownloadImages() {
+    if (Vulkan::WaitDiagnostics::Enabled()) {
+        ReportPartialViews();
+    }
     if (deferred_readbacks) {
         // Upload workers must finish reading RAM before these pages become inaccessible.
         scheduler.WaitHostCopies();
@@ -646,6 +667,36 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
     });
 }
 
+void TextureCache::NoteBackingWrite(VAddr address, u64 size) {
+    std::scoped_lock lock{backing_writes_mutex};
+    backing_writes.emplace_back(address, size);
+    has_backing_writes.store(true, std::memory_order_release);
+}
+
+void TextureCache::ApplyBackingWrites() {
+    if (!has_backing_writes.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::vector<std::pair<VAddr, u64>> writes;
+    {
+        std::scoped_lock lock{backing_writes_mutex};
+        writes.swap(backing_writes);
+        has_backing_writes.store(false, std::memory_order_release);
+    }
+    // God of War III 的 readback 会通过大 storage image 写回纹理池，绕过页跟踪；
+    // 这里把覆盖范围内的普通缓存纹理标记为 CPU dirty，避免继续使用旧 image。
+    for (const auto& [address, size] : writes) {
+        ForEachImageInRegion(address, size, [&](ImageId image_id, Image& image) {
+            // 与 GPU writer 共享内存的 image 由 SynchronizeAlias 负责同步。
+            if (True(image.flags & (ImageFlagBits::GpuModified | ImageFlagBits::Aliased))) {
+                return;
+            }
+            image.flags |= ImageFlagBits::CpuDirty;
+            UntrackImage(image_id);
+        });
+    }
+}
+
 void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
     // Partial buffer writes still need the image's untouched bytes in guest memory.
     ResolveReadbacks(address, max_size, true, ReadbackSource::GpuPartialWrite);
@@ -815,9 +866,9 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
 std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& image_info,
                                                            BindingType binding,
                                                            ImageId cache_image_id,
-                                                           ImageId merged_image_id) {
+                                                           ImageId merged_image_id,
+                                                           bool native_reads) {
     static constexpr u64 NUM_FRAMES_BEFORE_REMOVAL = 32;
-
     auto& cache_image = slot_images[cache_image_id];
     const bool safe_to_delete =
         scheduler.CurrentTick() - cache_image.tick_accessed_last > NUM_FRAMES_BEFORE_REMOVAL;
@@ -826,6 +877,43 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
     if (image_info.guest_address == cache_image.info.guest_address) {
         const u32 lhs_block_size = image_info.num_bits * image_info.num_samples;
         const u32 rhs_block_size = cache_image.info.num_bits * cache_image.info.num_samples;
+        // gow3（上游 b646683）：同布局缓存镜像的顶部行整数视图。Rage of Sparta、武器特效期间，
+        // 游戏以 R8G8B8A8Uint 逐帧改变高度读取自己的 framebuffer；下面按"pool 分配"处理时，
+        // 每次读取都会新建并上传约 8 MB 的镜像（FPS 120 -> 40）。
+        // - 仅接受"另一格式的整数视图"：此处的同格式请求是真实的 pool 复用（若放开，
+        //   归一化采样会读错行并炸曝光，Hades 场景已复现）。
+        // - 仅限以整数坐标读取的着色器绑定（ImageResource::needs_native）：对更高镜像做
+        //   归一化采样会在错误的行读数并被钳制。
+        // - 已知限制：视图沿用缓存尺寸。尺寸查询会看到它；超出请求范围但落在缓存范围内
+        //   的访问会到达 framebuffer 而不是被丢弃（robustImageAccess2 以更高的镜像为界）。
+        const auto& a = image_info;
+        const auto& b = cache_image.info;
+        const auto is_integer = [](vk::Format format) {
+            const std::string_view numeric = vk::componentNumericFormat(format, 0);
+            return numeric == "UINT" || numeric == "SINT";
+        };
+        // 启动开关：GOW3_PARTIAL_HEIGHT_VIEWS=0 关闭；运行期 A/B 用 toggle 文件（bit 58）。
+        static const bool partial_views_enabled = [] {
+            const char* value = std::getenv("GOW3_PARTIAL_HEIGHT_VIEWS");
+            return !value || value[0] != '0';
+        }();
+        if (partial_views_enabled && !Gow3Toggle::Disabled(Gow3Toggle::PartialHeightViews) &&
+            (binding == BindingType::Texture || binding == BindingType::Storage) && native_reads &&
+            a.pixel_format != b.pixel_format && is_integer(a.pixel_format) &&
+            lhs_block_size == rhs_block_size && a.pitch == b.pitch && a.tile_mode == b.tile_mode &&
+            a.type == b.type && a.size.width <= b.size.width && a.size.height < b.size.height &&
+            a.size.depth == 1 && b.size.depth == 1 && a.resources.levels == 1 &&
+            a.resources.layers == 1 && b.resources.levels == 1 && b.resources.layers == 1 &&
+            !a.props.is_block && !b.props.is_block && !a.props.is_depth && !b.props.is_depth &&
+            IsVulkanFormatCompatible(b.pixel_format, a.pixel_format)) {
+            // 同地址存在此前的 partial 镜像时，FindImage 后续迭代会拿 merged 镜像与更高的
+            // 镜像比较，循环终止在完整镜像上（更高的非整数镜像落入 pool 路径并保留 merged）。
+            // 仅在请求自身的比较上计数（此后 a 就是 merged 镜像）。
+            if (Vulkan::WaitDiagnostics::Enabled() && !merged_image_id) {
+                NotePartialView();
+            }
+            return {cache_image_id, -1, -1};
+        }
         if (image_info.BlockDim() != cache_image.info.BlockDim() ||
             lhs_block_size != rhs_block_size) {
             // Very likely this kind of overlap is caused by allocation from a pool.
@@ -1176,7 +1264,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 
     u64 key_hash = info.guest_address ^ info.guest_size << 17 ^ u64(info.pixel_format) << 40 ^
                    u64(info.size.width) << 24 ^ info.size.height ^ u64(desc.type) << 58 ^
-                   u64(exact_fmt) << 63;
+                   u64(exact_fmt) << 63 ^ u64(desc.needs_native) << 62;
     key_hash = (key_hash ^ key_hash >> 33) * 0xFF51AFD7ED558CCDull;
     key_hash = (key_hash ^ key_hash >> 33) * 0xC4CEB9FE1A85EC53ull;
     key_hash ^= key_hash >> 33;
@@ -1198,6 +1286,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         cached.size == info.guest_size && cached.extent == info.size &&
         cached.format == info.pixel_format && cached.type == info.type &&
         cached.exact_fmt == exact_fmt && cached.binding == desc.type &&
+        cached.needs_native == desc.needs_native &&
         cached.levels == info.resources.levels && cached.layers == info.resources.layers &&
         !Gow3Toggle::Disabled(Gow3Toggle::FindImageCache)) {
         Image& image = slot_images[cached.image_id];
@@ -1285,7 +1374,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 
             const auto& merged_info = image_id ? slot_images[image_id].info : info;
             auto [overlap_image_id, overlap_view_mip, overlap_view_slice] =
-                ResolveOverlap(merged_info, desc.type, cache_id, image_id);
+                ResolveOverlap(merged_info, desc.type, cache_id, image_id, desc.needs_native);
             if (overlap_image_id) {
                 image_id = overlap_image_id;
                 view_mip = overlap_view_mip;
@@ -1355,6 +1444,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         .type = info.type,
         .exact_fmt = exact_fmt,
         .binding = desc.type,
+        .needs_native = desc.needs_native,
         .levels = info.resources.levels,
         .layers = info.resources.layers,
         .generation = registry_generation.load(std::memory_order_relaxed),
@@ -1987,6 +2077,10 @@ void TextureCache::RunGarbageCollector() {
     SCOPE_EXIT {
         ++gc_tick;
     };
+    {
+        std::scoped_lock lock{mutex};
+        ApplyBackingWrites();
+    }
 
     // uc3: GOW3_RELOAD_AT=<s> - diagnostic: once, s seconds after start, re-upload every image
     // the GPU never wrote from guest memory. If a wrong texture turns right, the cache held stale

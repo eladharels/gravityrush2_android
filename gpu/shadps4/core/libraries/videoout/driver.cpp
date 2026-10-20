@@ -10,8 +10,9 @@
 #include <mutex>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <time.h>
-#include <x86intrin.h>
+#include "common/rdtsc.h"
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -20,8 +21,8 @@
 #endif
 #include "common/assert.h"
 #include "gow3_toggles.h"
-#include "gow3_settings.h"
 #include "gow3_graphics.h"
+#include "gow3_settings.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -116,7 +117,16 @@ void VideoOutDriver::SwapThread(std::stop_token token) {
             swap_queue.pop_front();
             swap_busy = true;
         }
-        work();
+        // GOW3_SKIP_PRESENT=1 drops the flip work instead of running it: the game keeps rendering and
+        // submitting draws, but nothing reaches the queue through the present path. Used to tell
+        // "the game's own rendering lost the device" apart from "our present submission did".
+        static const bool skip_present = [] {
+            const char* value = std::getenv("GOW3_SKIP_PRESENT");
+            return value && *value && std::strcmp(value, "1") == 0;
+        }();
+        if (!skip_present) {
+            work();
+        }
     }
 }
 
@@ -375,11 +385,11 @@ void VideoOutDriver::Flip(const Request& req) {
             // gow3 R.9.5: the draw pipe in this frame (stage A drains, stage B busy), mid-frame
             // submissions and the game threads' waits on async read faults.
             static const double cycles_per_ms = [] {
-                const u64 t0 = __rdtsc();
+                const u64 t0 = Common::RawRDTSC();
                 const auto c0 = std::chrono::steady_clock::now();
                 while (std::chrono::steady_clock::now() - c0 < std::chrono::milliseconds(2)) {
                 }
-                return double(__rdtsc() - t0) / 2.0;
+                return double(Common::RawRDTSC() - t0) / 2.0;
             }();
             static u64 last_drain, last_busy, last_eager, last_async_ns, last_async;
             // R.9.7: this flip's packet, decoded (A) and recorded up to (B), measured from the
@@ -868,9 +878,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // and the uncapped presets keep their fixed limit.
     const bool fixed_limit = std::getenv("GOW3_FPS_LIMIT") || EmulatorSettings.GetVblankFrequency() == 480;
     const auto current_limit = [&] {
-        const auto& s = Gow3Settings::Get();
         return fixed_limit ? EmulatorSettings.GetFrameLimit()
-                           : u32(Gow3Graphics::PresentLimit(s.fps_limit, s.applied_engine_fps));
+                           : u32(Gow3Graphics::PresentLimit(Gow3Settings::Get().fps_limit.load(),
+                                                            Gow3Settings::Get().applied_engine_fps.load()));
     };
     u32 frame_limit = current_limit();
     auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
@@ -890,14 +900,17 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     };
 
     // gow3: with a frame limit (uncapped presets) a queued flip is presented as soon as it
-    // arrives and its slot allows, between vblanks, instead of on the next vblank tick.
-    bool immediate_flips = frame_limit != 0;
+    // arrives and its slot allows, between vblanks, instead of on the next vblank tick. Only
+    // when the limit exceeds the vblank rate does that matter; at or below it the outer
+    // vblank-paced flip below already satisfies the limit (and the sub-vblank path stalls the
+    // guest on this port, so keep it off there).
+    bool immediate_flips = frame_limit > EmulatorSettings.GetVblankFrequency();
 
     while (!token.stop_requested()) {
         if (const u32 limit = current_limit(); limit != frame_limit) {
             frame_limit = limit;
             frame_period = limit ? std::chrono::nanoseconds(1000000000 / limit) : std::chrono::nanoseconds(0);
-            immediate_flips = limit != 0;
+            immediate_flips = limit > EmulatorSettings.GetVblankFrequency();
             next_flip = std::chrono::steady_clock::now();
             std::printf("VideoOut: frame limit %u FPS\n", limit);
         }

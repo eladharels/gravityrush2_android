@@ -1,0 +1,418 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 桌面名称（Manifest android:label）。debug 变体经 src/debug 资源覆盖加 Debug 标识。 -->
+    <string name="app_name">Uncharted Collection</string>
+
+    <!-- 品牌与关键动作按钮：双语同值，不翻译 -->
+    <string name="title_god_of_war_iii">GOD OF WAR III</string>
+    <string name="title_remastered">REMASTERED</string>
+    <string name="launch_button">LAUNCH</string>
+    <string name="start_game_button">START GAME</string>
+
+    <!-- 导航 -->
+    <string name="nav_home">HOME</string>
+    <string name="nav_settings">SETTINGS</string>
+    <string name="nav_about">ABOUT</string>
+
+    <!-- Home 页 -->
+    <string name="settings_save_failed">Settings could not be saved</string>
+    <string name="home_imported_fmt">Imported %1$s (%2$s)</string>
+    <string name="home_removed_game_folder_copy">Removed the launcher copy. The Lossless.dll beside the game folder is yours to delete.</string>
+    <string name="home_removed_fmt">%1$s removed</string>
+
+    <!-- 启动参数 -->
+    <string name="launch_setup_title">LAUNCH SETUP</string>
+    <string name="game_folder_label">Game folder</string>
+    <string name="game_folder_not_selected">Not selected</string>
+    <string name="game_folder_hint">Tap to choose a different folder</string>
+    <string name="update_folder_label">Update folder</string>
+    <string name="update_folder_not_set">Not set (use the game folder as-is)</string>
+    <string name="update_folder_description">Optional: the game\'s update (patch) folder, e.g. CUSA01740-patch. Laid over the game at start.</string>
+    <string name="change_button">CHANGE  ›</string>
+    <string name="launch_parameters_footer">Changes are saved to gow3.ini immediately and take effect at the next launch.</string>
+    <string name="dialog_ok">OK</string>
+
+    <!-- 启动参数：参数名 -->
+    <string name="param_upscaler">Upscaler</string>
+    <string name="param_resolution">Resolution</string>
+    <string name="param_anisotropy">Anisotropic filtering</string>
+    <string name="param_vibration">Vibration</string>
+    <string name="param_fps_limit">FPS limit</string>
+    <string name="param_engine_fps">Engine FPS</string>
+    <string name="param_vsync">VSync</string>
+    <string name="param_frames_queued">Frames queued</string>
+    <string name="param_sharpen">Sharpening</string>
+    <string name="param_sharpness">Sharpening strength</string>
+    <string name="param_display_stretch">Fullscreen picture fit</string>
+
+    <!-- 启动参数：选项名 -->
+    <string name="param_option_off_720p">Off (render at 1280×720)</string>
+    <string name="param_option_gsr2">Snapdragon GSR 2</string>
+    <string name="param_option_fsr31">FSR 3.1</string>
+    <string name="param_option_native">Native</string>
+    <string name="param_option_480p">854×480</string>
+    <string name="param_option_540p">960×540</string>
+    <string name="param_option_720p">1280×720</string>
+    <string name="param_option_900p">1600×900</string>
+    <string name="param_option_1080p">1920×1080</string>
+    <string name="param_option_1440p">2560×1440</string>
+    <string name="param_option_1800p">3200×1800</string>
+    <string name="param_option_4k">3840×2160</string>
+    <string name="param_option_game_default">Game default</string>
+    <string name="param_option_2x">2x</string>
+    <string name="param_option_4x">4x</string>
+    <string name="param_option_8x">8x</string>
+    <string name="param_option_16x">16x</string>
+    <string name="param_option_25_percent">25%</string>
+    <string name="param_option_50_percent">50%</string>
+    <string name="param_option_75_percent">75%</string>
+    <string name="param_option_100_percent">100%</string>
+    <string name="param_option_30">30</string>
+    <string name="param_option_60">60</string>
+    <string name="param_option_120">120</string>
+    <string name="param_option_240">240</string>
+    <string name="param_option_unlimited">Unlimited</string>
+    <string name="param_option_engine_60">60 (the game\'s own)</string>
+    <string name="param_option_on">ON</string>
+    <string name="param_option_off">OFF</string>
+    <string name="param_option_display_fit">Fit (black bars)</string>
+    <string name="param_option_display_stretch">Stretch (distorts)</string>
+    <string name="param_option_display_crop">Crop to fill</string>
+    <string name="param_option_frames_1">1 (lowest latency)</string>
+    <string name="param_option_frames_2">2</string>
+    <!-- RCAS 锐化强度离散档位（数值标签，双语同值不翻译） -->
+    <string name="param_option_sharpness_000">0.00</string>
+    <string name="param_option_sharpness_025">0.25</string>
+    <string name="param_option_sharpness_050">0.50</string>
+    <string name="param_option_sharpness_075">0.75</string>
+    <string name="param_option_sharpness_100">1.00</string>
+    <string name="param_option_sharpness_150">1.50</string>
+    <string name="param_option_sharpness_200">2.00</string>
+
+    <!-- 启动参数：说明 -->
+    <string name="param_desc_upscaler">Reconstructs the image with the selected temporal upscaler (Snapdragon GSR 2 by default, designed for Adreno GPUs; FSR 3.1 kept as an option). The game resolution is controlled separately by the resolution setting; turning the upscaler off does not disable the resolution patch.</string>
+    <string name="param_desc_render_patch">Changes the game resolution through a patch; tiers are shown by their actual pixel size. Available options follow the selected game and version and stay in sync with Patches. Native disables the resolution patch. Takes effect on the next launch.</string>
+    <string name="param_desc_engine_fps">60 is the game\'s original engine frame rate. Higher values require a matching game patch and only appear when available. This setting stays in sync with Patches and takes effect on the next launch.</string>
+    <string name="param_desc_fps_limit">The maximum frame rate is limited by this setting, device performance, and the engine frame rate.</string>
+    <string name="home_patch_identity">Patch options for %1$s · %2$s · More switches in Patches</string>
+    <string name="home_patch_unavailable">No matching patch catalog. Check the game and update folders to enable resolution and engine frame rate settings. See Patches for details.</string>
+    <string name="home_patch_unavailable_value">%1$s (unavailable for this version)</string>
+    <string name="mobile_preset_title">DEFAULT PROFILE</string>
+    <string name="mobile_preset_480p">480p · Lowest GPU load</string>
+    <string name="mobile_preset_light">540p · Lower GPU load</string>
+    <string name="mobile_preset_balanced">720p · Balanced</string>
+    <string name="mobile_preset_clear">900p · Sharper image</string>
+    <string name="mobile_preset_hd">1080p · Higher GPU load</string>
+    <string name="mobile_preset_custom">Custom</string>
+    <string name="mobile_preset_unavailable">No compatible profile</string>
+    <string name="mobile_preset_description">Tap a profile to apply its resolution, a 60 FPS target, and mobile graphics defaults. Disables SSAO, motion blur, depth of field, bloom, soft particles and dynamic shadows; enables intro skipping and X to skip videos. You can then adjust each setting here or in Patches. Experimental profiles: results depend on your phone. Changes take effect on the next launch.</string>
+
+    <!-- 首页游戏身份卡（redesign-android-launcher-home） -->
+    <string name="home_identity_patches_loaded_fmt">Patches loaded · %1$d available</string>
+    <string name="home_identity_problem_title">Game info unavailable</string>
+    <string name="home_problem_no_game">Select your game folder in Settings → GENERAL to start.</string>
+    <string name="home_problem_invalid_game">The selected folder has no eboot.bin or readable game info.</string>
+    <string name="home_problem_invalid_update">The update patch folder is invalid or does not match the game.</string>
+    <string name="home_problem_unsupported">This game (TITLE ID) is not supported.</string>
+    <string name="home_problem_version">The game version does not match the patch catalog.</string>
+    <string name="home_problem_read_failed">Could not read the game folder. Check the path and storage permission.</string>
+    <string name="home_identity_open_storage">OPEN SETTINGS · GENERAL  ›</string>
+
+    <!-- 首页预设分段选择器 -->
+    <string name="preset_caption_custom">Custom — settings no longer match any preset</string>
+    <string name="preset_disabled_no_catalog">No compatible presets — check the game and update folders in Settings → GENERAL.</string>
+
+    <!-- 首页 GPU 驱动底部面板 -->
+    <string name="driver_sheet_title">GPU DRIVER</string>
+    <string name="driver_sheet_manage">MANAGE DRIVERS · DOWNLOAD / DELETE  ›</string>
+
+    <!-- 首页用户/存档区（占位：多用户能力随 add-android-launcher-user-profiles 落地） -->
+    <string name="user_zone_title">PLAYER</string>
+    <string name="user_zone_default_name">Hunter</string>
+    <string name="user_zone_saves_ready">Save data ready</string>
+    <string name="user_zone_saves_empty">No saves yet</string>
+    <string name="user_zone_note">Profiles and save management arrive in a future update.</string>
+
+    <!-- 首启游戏选择页（一次性硬门控） -->
+    <string name="first_run_title">SELECT YOUR GAME</string>
+    <string name="first_run_subtitle">Point the launcher to your game files to begin.</string>
+    <string name="first_run_game_folder">GAME FOLDER</string>
+    <string name="first_run_update_folder">UPDATE PATCH FOLDER</string>
+    <string name="first_run_required">REQUIRED</string>
+    <string name="first_run_optional">OPTIONAL</string>
+    <string name="first_run_tap_to_select">Tap to select</string>
+    <string name="first_run_update_desc">Optional: the update (patch) folder of the game, e.g. CUSA01740-patch, laid over the game at start.</string>
+    <string name="first_run_confirm">CONFIRM</string>
+    <string name="first_run_confirm_locked">Select a game folder first</string>
+
+    <!-- 设置存储分类（首启之后目录修改的常驻位置） -->
+    <string name="storage_section_title">GAME FOLDERS</string>
+    <string name="storage_valid">VALID</string>
+    <string name="storage_game_desc">Tap to choose the extracted game folder (must contain eboot.bin).</string>
+    <string name="storage_update_desc">Optional: the update (patch) folder laid over the game at start.</string>
+    <string name="param_desc_vsync">Syncs the game\'s frames with your screen\'s refresh rate to stop visual tearing. Leave it ON unless you see tearing or stutter.</string>
+    <string name="param_desc_frames_queued">How many frames the game prepares ahead of what the screen shows. Lower numbers cut input lag; higher numbers can improve smoothness on weaker hardware.</string>
+    <string name="param_desc_anisotropy">Sharpens floors and walls viewed at an angle. Higher values may use a little more GPU bandwidth. Takes effect on the next launch.</string>
+    <string name="param_desc_vibration">Scales the gamepad vibration strength. 0% disables vibration. Takes effect immediately while the game is running.</string>
+    <string name="param_desc_sharpen">Sharpens the upscaled image (the full strength range applies to every upscaler). Has no effect while the upscaler is OFF.</string>
+    <string name="param_desc_sharpness">Strength of the sharpening pass (0.00–2.00). Only used when sharpening is ON.</string>
+    <string name="param_desc_display_stretch">How the picture fills the screen: Fit keeps the aspect ratio and leaves black bars; Stretch fills the screen but distorts the picture; Crop to fill keeps the aspect ratio, scales the picture until it covers the whole screen and crops the overflow (no bars, no distortion, some edge vision is lost). Takes effect on the next launch.</string>
+    <string name="param_skip_animations">Skip animations</string>
+    <string name="param_desc_skip_animations">Skips the intro logos and opening videos, and lets you skip any in-game video with the X button. Same switches as the Patches page.</string>
+
+    <!-- Settings 页 -->
+    <string name="settings_title">SETTINGS</string>
+    <string name="settings_subtitle">Graphics, performance, controls, audio and driver settings.</string>
+    <string name="settings_no_settings">No settings in this category yet. More categories will arrive in future updates.</string>
+
+    <!-- Settings 页分类（分类栏顺序与 LaunchCategory 枚举声明顺序一致） -->
+    <string name="param_category_general">GENERAL</string>
+    <string name="param_category_graphics">GRAPHICS</string>
+    <string name="param_category_performance">PERFORMANCE</string>
+    <string name="param_category_controls">CONTROLS</string>
+
+    <!-- 按键映射卡片与页面（add-pad-button-mapping；PS 按钮名符号用 Unicode） -->
+    <string name="pad_mapping_title">Button Mapping</string>
+    <string name="pad_mapping_desc">Remap the physical gamepad buttons to game buttons. Bindings apply when the next game session starts.</string>
+    <string name="pad_mapping_custom">CUSTOMIZE</string>
+    <string name="pad_mapping_hint_idle">Tap a game button, then press a pad button or trigger to bind. Tap here to cancel.</string>
+    <string name="pad_mapping_hint_capture">Press a pad button or trigger… tap here to cancel</string>
+    <string name="pad_mapping_restore">Restore defaults</string>
+    <string name="pad_mapping_done">Done</string>
+    <string name="pad_mapping_restored">Button mapping restored to defaults</string>
+    <string name="pad_mapping_default_fmt">Default: %1$s</string>
+    <string name="pad_mapping_unbound">Unbound</string>
+    <string name="pad_button_cross">✕ Cross</string>
+    <string name="pad_button_circle">○ Circle</string>
+    <string name="pad_button_square">□ Square</string>
+    <string name="pad_button_triangle">△ Triangle</string>
+    <string name="pad_button_l1">L1</string>
+    <string name="pad_button_r1">R1</string>
+    <string name="pad_button_l2">L2</string>
+    <string name="pad_button_r2">R2</string>
+    <string name="pad_button_l3">L3</string>
+    <string name="pad_button_r3">R3</string>
+    <string name="pad_button_options">OPTIONS</string>
+    <string name="pad_button_touchpad">Touchpad</string>
+    <string name="pad_button_up">D-Pad Up</string>
+    <string name="pad_button_down">D-Pad Down</string>
+    <string name="pad_button_left">D-Pad Left</string>
+    <string name="pad_button_right">D-Pad Right</string>
+    <string name="param_category_audio">AUDIO</string>
+    <string name="param_category_driver">DRIVER</string>
+
+    <!-- 帧生成卡片 -->
+    <string name="frame_gen_title">FRAME GENERATION</string>
+    <string name="frame_gen_not_installed">Not installed</string>
+    <string name="frame_gen_needs_dll">Frame generation needs the Lossless.dll from your own copy of Lossless Scaling. Import the file here, or get it from Steam.</string>
+    <string name="frame_gen_source_game_folder">Beside your game folder — remove it there yourself</string>
+    <string name="frame_gen_source_app_private">In the launcher\'s own folder</string>
+    <string name="frame_gen_import_dll">IMPORT .DLL</string>
+    <string name="frame_gen_get_from_steam">GET FROM STEAM</string>
+    <string name="frame_gen_remove">REMOVE</string>
+    <string name="frame_gen_footer">Imported files stay in the app\'s private folder and take effect the next time the game starts. IMPORT .DLL also works when Steam is unavailable.</string>
+    <string name="frame_gen_toggle_off">Off</string>
+    <string name="frame_gen_save_failed">Could not save the setting.</string>
+    <string name="frame_gen_drawer_need_dll">Needs Lossless.dll (Settings → General)</string>
+    <string name="lossless_row_import">IMPORT</string>
+    <string name="lossless_row_missing">Not imported — frame generation stays off</string>
+    <string name="lossless_row_installed">Installed — frame generation ready</string>
+    <string name="lossless_row_title">LOSSLESS.DLL (frame generation)</string>
+    <string name="frame_gen_import_done">Lossless.dll imported</string>
+    <string name="frame_gen_import_hint">Requires Lossless.dll from your own Lossless Scaling — import it in Settings → General.</string>
+    <string name="frame_gen_toggle_on">On</string>
+
+    <!-- About 页 -->
+    <string name="about_title">God of War III for Android</string>
+    <string name="about_version_fmt">Version %1$s</string>
+    <string name="about_description">A community launcher bringing the God of War III Remastered experience to Android via emulation.</string>
+    <string name="about_third_party_licenses">Third-party licenses</string>
+    <string name="update_check_title">Check for updates</string>
+    <string name="update_check_action">CHECK</string>
+    <string name="update_check_checking">Checking for updates…</string>
+    <string name="update_check_up_to_date_fmt">You have the latest version (%1$s).</string>
+    <string name="update_check_newer_fmt">Version %1$s is available.</string>
+    <string name="update_check_download">DOWNLOAD</string>
+    <string name="update_check_not_comparable_installed_fmt">Version %1$s is a local build and cannot be compared with releases.</string>
+    <string name="update_check_not_comparable_latest_fmt">The latest release (%1$s) is not an Android release and cannot be compared.</string>
+    <string name="update_check_failed_network">Could not reach GitHub. Check your connection and try again.</string>
+    <string name="update_check_failed_timeout">The check timed out. Try again later.</string>
+    <string name="update_check_failed_rate_limit">Too many update checks from this network. Try again later.</string>
+    <string name="update_check_failed_http">The check failed (HTTP %1$d). Try again later.</string>
+    <string name="update_check_failed_response">The release information could not be read. Try again later.</string>
+    <string name="language_setting">Language</string>
+    <string name="language_follow_system">Follow system</string>
+    <string name="language_zh">简体中文</string>
+    <string name="language_en">English</string>
+
+    <!-- 存档卡片 -->
+    <string name="save_data_title">SAVE DATA</string>
+    <string name="saves_found">Saves found</string>
+    <string name="no_saves_yet">No saves yet</string>
+    <string name="save_data_description">Back up your God of War III saves to a .zip file, or restore a backup. The game\'s savedata lives in the app\'s private folder.</string>
+    <string name="save_export">EXPORT SAVE</string>
+    <string name="save_import">IMPORT SAVE</string>
+    <string name="save_import_footer">Importing replaces the current saves, but the existing ones are backed up first into the app\'s private folder.</string>
+
+    <!-- 日志卡片 -->
+    <string name="log_runtime_logs">RUNTIME LOGS</string>
+    <string name="logs_found">Logs found</string>
+    <string name="no_logs_yet">No logs yet</string>
+    <string name="log_description">Export the God of War III runtime logs to a .zip file for troubleshooting. The game\'s log (android-game.log) lives in the app\'s private folder.</string>
+    <string name="log_export">EXPORT LOGS</string>
+    <string name="log_export_footer">Exporting only reads the runtime log files; it never modifies them or grabs the system logcat.</string>
+
+    <!-- 联系卡片 -->
+    <string name="contact_title">AUTHOR &amp; SUPPORT</string>
+    <string name="contact_author_label">Author</string>
+    <string name="contact_qq_label">QQ group</string>
+    <string name="contact_telegram_label">Telegram</string>
+    <string name="contact_open">OPEN</string>
+    <string name="copied_fmt">%1$s copied</string>
+    <string name="contact_qq_not_installed">QQ not installed, group number copied</string>
+    <string name="contact_no_app_fmt">No app can open %1$s</string>
+    <string name="contact_description">Bug reports, crashes and feature requests are all welcome — attach the exported logs when you report an issue so it can be reproduced.</string>
+
+    <!-- GitHub 卡片 -->
+    <string name="github_title">GITHUB</string>
+    <string name="github_star_label">Star us</string>
+    <string name="github_star_description">Enjoying the project? Give it a star to support development.</string>
+    <string name="github_issue_label">Issues &amp; feedback</string>
+    <string name="github_issue_description">Report bugs, crashes or feature requests on the Issues page.</string>
+    <string name="github_open">OPEN</string>
+
+    <!-- Mods 页 -->
+    <string name="mods_title">MOD &amp; PATCH</string>
+    <string name="mods_description">Choose patches for the selected game. Changes apply the next time you start the game.</string>
+    <string name="mods_empty_title">NO MODS INSTALLED</string>
+    <string name="mods_empty_description">Your mod and patch list will appear here.</string>
+
+    <!-- 数据层消息 -->
+    <string name="no_file_picker_fmt">No file picker is available on this device (%1$s).</string>
+    <string name="unknown_error">unknown error</string>
+    <string name="selected_location">the selected location</string>
+    <string name="log_no_logs">No logs to export</string>
+    <string name="log_write_failed">Could not write to the selected location. The logs were not modified.</string>
+    <string name="log_exported_fmt">Logs exported: %1$s</string>
+    <string name="log_export_failed_fmt">Log export failed: %1$s</string>
+    <string name="save_no_saves">No saves to export</string>
+    <string name="save_write_failed">Could not write to the selected location. No saves were changed.</string>
+    <string name="save_exported_fmt">Saves exported: %1$s</string>
+    <string name="save_export_failed_fmt">Save export failed: %1$s</string>
+    <string name="save_read_failed">Could not read the selected file.</string>
+    <string name="save_imported_with_backup_fmt">Saves imported successfully; the previous saves were backed up to %1$s.</string>
+    <string name="save_imported">Saves imported successfully.</string>
+    <string name="save_import_failed_fmt">Save import failed: %1$s</string>
+    <string name="save_archive_not_zip">The selected file is not a valid zip archive.</string>
+    <string name="save_archive_no_content">The archive contains no saves to import.</string>
+    <string name="save_archive_unsafe_path_fmt">The archive contains an unsafe path: %1$s</string>
+    <string name="save_archive_duplicate_fmt">The archive contains a duplicate path: %1$s</string>
+    <string name="save_archive_wrong_layout_fmt">The archive layout is not a savedata layout: %1$s</string>
+    <string name="save_archive_title_fmt">The archive title does not match God of War III (%2$s): %1$s</string>
+    <string name="lossless_no_readable_name">That file has no readable name.</string>
+    <string name="lossless_wrong_file_fmt">That is not %1$s (selected: %2$s).</string>
+    <string name="lossless_empty_fmt">%1$s is empty.</string>
+    <string name="lossless_write_failed_fmt">%1$s could not be written. Nothing was changed.</string>
+    <string name="lossless_remove_failed_fmt">%1$s could not be removed.</string>
+
+    <!-- 游戏目录管理器 -->
+    <string name="storage_permission_title">Storage permission required</string>
+    <string name="storage_permission_message">God of War III needs storage access to read the game folder.</string>
+    <string name="not_a_game_folder">Not a God of War III folder</string>
+    <string name="not_a_game_update_folder">Not a God of War III update folder</string>
+    <string name="choose_again">Choose again</string>
+    <string name="no_eboot">That location has no eboot.bin.</string>
+    <string name="no_eboot_path_fmt">%1$s has no eboot.bin.</string>
+    <string name="update_same_as_game">Choose a folder separate from the game folder, or clear the update.</string>
+    <string name="folder_eyebrow_game">GAME SETUP</string>
+    <string name="folder_eyebrow_update">GAME UPDATE</string>
+    <string name="folder_title_game">Choose your game folder</string>
+    <string name="folder_title_update">Choose the game update folder</string>
+    <string name="folder_message_update">Optional: the update (patch) folder of the game, e.g. CUSA01740-patch. Its eboot.bin and sce_sys are laid over the game at start; the game files are never changed. Leave it empty to use the game folder as-is.</string>
+    <string name="folder_message_game">Select the extracted God of War III folder, such as CUSA01740, or its parent folder. The selected location must contain eboot.bin.</string>
+    <string name="folder_current_selection_fmt">\n\nCurrent selection:\n%1$s</string>
+    <string name="folder_choose_update">CHOOSE UPDATE FOLDER</string>
+    <string name="folder_choose_game">CHOOSE GAME FOLDER</string>
+    <string name="no_folder_picker_fmt">No folder picker: %1$s</string>
+    <string name="nav_mods">PATCHES</string>
+    <string name="mods_loading">Reading the game and patch catalog…</string>
+    <string name="mods_saved">Saved. Applies on next launch.</string>
+    <string name="mods_no_game">Choose a game folder on Home first.</string>
+    <string name="mods_invalid_game">The game executable or version information could not be read. Check the folder and storage permission.</string>
+    <string name="mods_invalid_update">The update folder is invalid or belongs to another game. Check the update folder on Home.</string>
+    <string name="mods_unsupported">There is no patch catalog for this game ID.</string>
+    <string name="mods_version">This game version has no matching patch catalog. Check the selected game and update folders.</string>
+    <string name="mods_read_failed">The patch catalog could not be read. Please retry.</string>
+    <string name="mods_unavailable">PATCHES UNAVAILABLE</string>
+    <string name="mods_retry">RETRY</string>
+    <string name="mods_count">%1$d patches · %2$d selected</string>
+    <string name="mods_next_launch">Selection is saved, not applied to the running game. Each patch is checked against your game when it starts. Resolution and frame rate are shared with Home settings.</string>
+    <string name="mods_group_resolution">RESOLUTION</string>
+    <string name="mods_group_fps">FRAME RATE</string>
+    <string name="mods_group_video">VIDEO SKIPPING</string>
+    <string name="mods_group_fixes">FIXES</string>
+    <string name="mods_group_effects">DISABLE EFFECTS</string>
+    <string name="mods_exclusive">Choose one option. Turning it off returns to the native setting.</string>
+    <string name="mods_verified_device">Device output verified</string>
+    <string name="mods_verified_offline">Offline checked · device test pending</string>
+    <string name="mods_pending_sample">Matching game sample not yet verified</string>
+    <string name="mods_legacy">Existing patch · checked again at launch</string>
+    <string name="mods_details">Details</string>
+    <string name="mods_hide_details">Hide details</string>
+    <string name="mods_author">Author: %1$s</string>
+
+    <!-- 驱动管理卡片（Home 选择 + Settings DRIVER 分类） -->
+    <string name="driver_card_title">GPU DRIVER</string>
+    <string name="driver_card_system">System driver</string>
+    <string name="driver_card_footer">Switching takes effect the next time the game starts. Download more drivers in Settings → DRIVER.</string>
+    <string name="driver_card_needs_game_folder">Select your game folder first — driver switching stays disabled until then.</string>
+    <string name="driver_pick_selected_fmt">Selected %1$s. Takes effect on the next launch.</string>
+
+    <string name="driver_manager_title">GPU DRIVER</string>
+    <string name="driver_manager_system_fmt">System driver (%1$s)</string>
+    <string name="driver_manager_stock">stock</string>
+    <string name="driver_manager_version_fmt">Version %1$s</string>
+    <string name="driver_manager_author_fmt">Author: %1$s</string>
+    <string name="driver_manager_library_fmt">Library: %1$s</string>
+    <string name="driver_manager_invalid">Unusable — the driver library is missing</string>
+    <string name="driver_manager_delete">DELETE</string>
+    <string name="driver_manager_confirm_delete_fmt">Delete %1$s? The pack is removed from the launcher\'s private folder.</string>
+    <string name="driver_manager_deleted_fmt">Deleted %1$s.</string>
+    <string name="driver_manager_deleted_fallback_fmt">Deleted %1$s. Switched back to the system driver.</string>
+    <string name="dialog_cancel">Cancel</string>
+    <string name="driver_manager_download">DOWNLOAD DRIVERS</string>
+    <string name="driver_manager_import">IMPORT DRIVERS</string>
+    <string name="driver_manager_network">DOWNLOAD ACCELERATION</string>
+    <string name="driver_manager_needs_game_folder">Select your game folder before changing drivers.</string>
+    <string name="driver_manager_footer">Driver packs live in the launcher\'s private storage and are resolved through gow3.ini at the next launch.</string>
+
+    <string name="driver_dl_title">Download drivers</string>
+    <string name="driver_dl_sources_unavailable">The built-in driver source list could not be loaded.</string>
+    <string name="driver_dl_loading">Loading…</string>
+    <string name="driver_dl_empty">No downloadable driver packs in this source.</string>
+    <string name="driver_dl_failed_network">Could not reach GitHub. Check your connection and retry.</string>
+    <string name="driver_dl_failed_rate_limit">GitHub rate limit reached. Try again later.</string>
+    <string name="driver_dl_failed_http_fmt">Request failed (HTTP %1$d).</string>
+    <string name="driver_dl_retry">RETRY</string>
+    <string name="driver_dl_downloaded">Downloaded</string>
+    <string name="driver_dl_download">DOWNLOAD</string>
+    <string name="driver_dl_downloading_fmt">Downloading %1$s… %2$s / %3$s</string>
+    <string name="driver_dl_unknown_size">unknown size</string>
+    <string name="driver_dl_cancel">CANCEL</string>
+    <string name="driver_dl_done_fmt">Installed %1$s. It now appears in the driver list.</string>
+    <string name="driver_dl_failed_install">The downloaded package is not a usable driver pack and was discarded.</string>
+    <string name="driver_dl_failed_download">The download failed. Try again.</string>
+    <string name="driver_dl_close">CLOSE</string>
+
+    <string name="driver_px_title">Download acceleration</string>
+    <string name="driver_px_direct">Direct connection</string>
+    <string name="driver_px_custom">Custom mirror prefix</string>
+    <string name="driver_px_active_fmt">Active: %1$s</string>
+    <string name="driver_px_direct_label">direct connection</string>
+    <string name="driver_px_save">SAVE</string>
+    <string name="driver_px_speedtest">SPEED TEST</string>
+    <string name="driver_px_testing">Testing…</string>
+    <string name="driver_px_ms_fmt">%1$d ms</string>
+    <string name="driver_px_failed">failed</string>
+    <string name="driver_px_note">GitHub is accessed directly first; if that fails and a mirror is configured, the download retries once through it. The speed test only measures latency of the built-in mirrors.</string>
+</resources>

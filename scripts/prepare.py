@@ -71,6 +71,8 @@ def parse_self(data):
 
 
 def sfo(data):
+    if not data:
+        raise ValueError('param.sfo is empty (0 bytes): the game files are incomplete')
     magic, version, keys, values, count = unpack('<4sIIII', data, 0)
     if magic != b'\0PSF':
         raise ValueError('bad SFO signature')
@@ -81,6 +83,28 @@ def sfo(data):
         v = span(data, values + off, size)
         result[k] = struct.unpack('<I', v)[0] if fmt == 0x404 else v.rstrip(b'\0').decode('utf8', 'replace')
     return result
+
+
+SFO_LIMIT = 1 << 20  # a param.sfo is a few KiB; whatever lies beyond this under that name is not one
+
+
+def load_sfo(path):
+    """The values of a param.sfo file: OSError when it cannot be read, ValueError when it is not
+    one. At most SFO_LIMIT bytes are read."""
+    with Path(path).open('rb') as stream:
+        data = stream.read(SFO_LIMIT)
+    try:
+        return sfo(data)
+    except (TypeError, IndexError, struct.error) as error:
+        raise ValueError(f'bad SFO: {error}') from error
+
+
+def read_sfo(path):
+    """The values of a param.sfo, or None when the file is missing, unreadable, empty or not one."""
+    try:
+        return load_sfo(path)
+    except (OSError, ValueError):
+        return None
 
 
 def write_report(path, report):

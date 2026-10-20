@@ -8,6 +8,8 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/logging/log.h"
+#include "core/emulator_settings.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -38,17 +40,30 @@ std::string_view BufferTypeName(MemoryType type) {
 /// read-only buffers from guest memory into it on the Vulkan recording thread. "device"
 /// (shadPS4's choice) is VRAM written through the PCIe BAR: cheap with AMD Smart Access Memory
 /// on a desktop, but on a laptop NVIDIA GPU these writes took half of that thread's time and
-/// it limited the frame rate. "cached" (default) is cached system memory the GPU reads over
-/// PCIe instead; "host" is uncached system memory.
+/// limited the frame rate. "cached" is cached system memory the GPU reads over PCIe instead;
+/// "host" is uncached system memory. The default follows the vendor: NVIDIA benefits from
+/// "cached", AMD keeps "device" (UMA / discrete SAM) unless overridden.
 enum class StreamPlacement { Device, Host, Cached };
 static StreamPlacement StreamMemory() {
     static const StreamPlacement placement = [] {
         const char* env = std::getenv("GOW3_STREAM_MEMORY");
-        const std::string_view value = env ? env : "cached";
-        if (value == "device") {
-            return StreamPlacement::Device;
+        StreamPlacement placement;
+        if (env) {
+            const std::string_view value = env;
+            placement = value == "device"  ? StreamPlacement::Device
+                        : value == "host"  ? StreamPlacement::Host
+                                           : StreamPlacement::Cached;
+        } else {
+            // PCI vendor ID 0x10DE is NVIDIA; everything else keeps shadPS4's device placement.
+            placement =
+                Gow3GpuVendorId() == 0x10DE ? StreamPlacement::Cached : StreamPlacement::Device;
         }
-        return value == "host" ? StreamPlacement::Host : StreamPlacement::Cached;
+        LOG_INFO(Render_Vulkan, "Stream buffers: {} memory{}",
+                 placement == StreamPlacement::Device    ? "device-local"
+                 : placement == StreamPlacement::Cached  ? "cached host"
+                                                         : "uncached host",
+                 env ? " (GOW3_STREAM_MEMORY)" : " (vendor default)");
+        return placement;
     }();
     return placement;
 }
@@ -152,13 +167,13 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
 }
 
 Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes_,
-               MemoryType mem_type_, std::string_view debug_name)
+               MemoryType mem_type_, std::string_view debug_name, vk::BufferUsageFlags usage)
     : cpu_addr{cpu_addr_}, size_bytes{size_bytes_}, mem_type{mem_type_},
       buffer{instance.GetDevice(), instance.GetAllocator()} {
 
     vk::BufferCreateInfo buffer_ci = {
         .size = size_bytes,
-        .usage = AllFlags,
+        .usage = usage,
         .sharingMode = vk::SharingMode::eExclusive,
     };
     // uc3 (Drake's scarf): the readback side queue is another queue family and reads these

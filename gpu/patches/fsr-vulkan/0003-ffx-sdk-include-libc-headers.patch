@@ -1,5 +1,5 @@
 From: gow3
-Subject: [PATCH] FFX 1.1.4: include missing standard headers for libc++ (MSYS2 CLANG64)
+Subject: [PATCH] FFX 1.1.4: include missing standard headers for libc++ CLANG builds
 
 ---
 diff --git a/upstream/ffx-1.1.4/sdk/src/backends/vk/ffx_vk.cpp b/upstream/ffx-1.1.4/sdk/src/backends/vk/ffx_vk.cpp

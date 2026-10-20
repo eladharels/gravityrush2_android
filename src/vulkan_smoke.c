@@ -1,4 +1,52 @@
 /* Independent backend smoke test: command submission and readback, no game graphics. */
+#ifdef __ANDROID__
+/* gow3port: Bionic 下进程没有 libvulkan 可链接：驱动来自 gpu/shim/vk_driver_loader.cpp
+ * （GOW3_VULKAN_DRIVER 或系统 loader），所有函数都从它的 vkGetInstanceProcAddr 解析。
+ * VK_NO_PROTOTYPES：下面的 vkXxx 名称是本文件的函数指针。 */
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
+#include "gpu/shim/vk_driver_loader.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#define CHECK(call) do { VkResult r = (call); if (r != VK_SUCCESS) { \
+    fprintf(stderr, "Vulkan: %s returned %d\n", #call, r); exit(1); } } while (0)
+
+static PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers;
+static PFN_vkAllocateMemory vkAllocateMemory;
+static PFN_vkBeginCommandBuffer vkBeginCommandBuffer;
+static PFN_vkBindBufferMemory vkBindBufferMemory;
+static PFN_vkCmdFillBuffer vkCmdFillBuffer;
+static PFN_vkCmdPipelineBarrier vkCmdPipelineBarrier;
+static PFN_vkCreateBuffer vkCreateBuffer;
+static PFN_vkCreateCommandPool vkCreateCommandPool;
+static PFN_vkCreateDevice vkCreateDevice;
+static PFN_vkCreateInstance vkCreateInstance;
+static PFN_vkDestroyBuffer vkDestroyBuffer;
+static PFN_vkDestroyCommandPool vkDestroyCommandPool;
+static PFN_vkDestroyDevice vkDestroyDevice;
+static PFN_vkDestroyInstance vkDestroyInstance;
+static PFN_vkEndCommandBuffer vkEndCommandBuffer;
+static PFN_vkEnumeratePhysicalDevices vkEnumeratePhysicalDevices;
+static PFN_vkFreeMemory vkFreeMemory;
+static PFN_vkGetBufferMemoryRequirements vkGetBufferMemoryRequirements;
+static PFN_vkGetDeviceQueue vkGetDeviceQueue;
+static PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties;
+static PFN_vkGetPhysicalDeviceProperties vkGetPhysicalDeviceProperties;
+static PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties;
+static PFN_vkMapMemory vkMapMemory;
+static PFN_vkQueueSubmit vkQueueSubmit;
+static PFN_vkQueueWaitIdle vkQueueWaitIdle;
+static PFN_vkUnmapMemory vkUnmapMemory;
+static PFN_vkGetInstanceProcAddr get_instance_proc_addr;
+#define LOAD(instance, name) do { name = (PFN_##name)get_instance_proc_addr(instance, #name); \
+    if (!name) { fprintf(stderr, "Vulkan: driver lacks %s\n", #name); exit(1); } } while (0)
+
+int vulkan_smoke(void) {
+    get_instance_proc_addr = (PFN_vkGetInstanceProcAddr)gow3_vk_get_instance_proc_addr();
+    if (!get_instance_proc_addr) { fprintf(stderr, "Vulkan: no driver\n"); return 1; }
+    LOAD(NULL, vkCreateInstance);
+#else
 #include <vulkan/vulkan.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -7,9 +55,37 @@
     fprintf(stderr, "Vulkan: %s returned %d\n", #call, r); exit(1); } } while (0)
 
 int vulkan_smoke(void) {
+#endif
     VkApplicationInfo app = {.sType=VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName="God of War III native probe", .apiVersion=VK_API_VERSION_1_0};
     VkInstanceCreateInfo ici = {.sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo=&app};
     VkInstance instance; CHECK(vkCreateInstance(&ici, NULL, &instance));
+#ifdef __ANDROID__
+    LOAD(instance, vkAllocateCommandBuffers);
+    LOAD(instance, vkAllocateMemory);
+    LOAD(instance, vkBeginCommandBuffer);
+    LOAD(instance, vkBindBufferMemory);
+    LOAD(instance, vkCmdFillBuffer);
+    LOAD(instance, vkCmdPipelineBarrier);
+    LOAD(instance, vkCreateBuffer);
+    LOAD(instance, vkCreateCommandPool);
+    LOAD(instance, vkCreateDevice);
+    LOAD(instance, vkDestroyBuffer);
+    LOAD(instance, vkDestroyCommandPool);
+    LOAD(instance, vkDestroyDevice);
+    LOAD(instance, vkDestroyInstance);
+    LOAD(instance, vkEndCommandBuffer);
+    LOAD(instance, vkEnumeratePhysicalDevices);
+    LOAD(instance, vkFreeMemory);
+    LOAD(instance, vkGetBufferMemoryRequirements);
+    LOAD(instance, vkGetDeviceQueue);
+    LOAD(instance, vkGetPhysicalDeviceMemoryProperties);
+    LOAD(instance, vkGetPhysicalDeviceProperties);
+    LOAD(instance, vkGetPhysicalDeviceQueueFamilyProperties);
+    LOAD(instance, vkMapMemory);
+    LOAD(instance, vkQueueSubmit);
+    LOAD(instance, vkQueueWaitIdle);
+    LOAD(instance, vkUnmapMemory);
+#endif
     uint32_t count = 0; CHECK(vkEnumeratePhysicalDevices(instance, &count, NULL));
     if (!count) { fprintf(stderr, "Vulkan: no physical devices\n"); vkDestroyInstance(instance, NULL); return 1; }
     VkPhysicalDevice *devices = calloc(count, sizeof(*devices));

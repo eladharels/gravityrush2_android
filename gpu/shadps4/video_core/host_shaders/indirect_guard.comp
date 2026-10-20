@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// 移植自 Bloodborne-Android（GPL-2.0）的 indirect_guard.comp：在 GPU 上先校验一次 indirect
+// dispatch 的 group counts 再放行（vk_indirect_guard.cpp）。垃圾计数（数十亿个 group）会让
+// GPU 跑到内核超时把设备拖挂死；越界的 dispatch 在这里被清成零个 group 执行，并计数上报。
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 0) readonly buffer Args { uint args[]; };
+layout(std430, binding = 1) writeonly buffer Checked { uint checked[]; };
+layout(std430, binding = 2) buffer Skipped { uint skipped; uvec3 last; };
+
+layout(push_constant) uniform Push {
+    uvec3 max_count; // 设备各维的 group 数上限
+    uint first;      // 参数在绑定 0 里的首个 dword 序号
+    uint max_total;  // 三维总数上限
+    uint slot;       // 写入绑定 1 的位置（dword）
+} push;
+
+void main() {
+    const uvec3 groups = uvec3(args[push.first], args[push.first + 1], args[push.first + 2]);
+    uint high, low, high2, total;
+    umulExtended(groups.x, groups.y, high, low);
+    umulExtended(low, groups.z, high2, total);
+    const bool plausible = all(lessThanEqual(groups, push.max_count)) && high == 0 &&
+                           high2 == 0 && total <= push.max_total;
+    const uvec3 run = plausible ? groups : uvec3(0);
+    checked[push.slot] = run.x;
+    checked[push.slot + 1] = run.y;
+    checked[push.slot + 2] = run.z;
+    if (!plausible) {
+        atomicAdd(skipped, 1);
+        last = groups;
+    }
+}

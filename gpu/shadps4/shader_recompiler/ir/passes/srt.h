@@ -8,6 +8,7 @@
 #include <vector>
 #include <boost/container/set.hpp>
 #include <boost/container/small_vector.hpp>
+#include "common/arch.h"
 #include "common/types.h"
 
 namespace Serialization {
@@ -39,10 +40,31 @@ inline bool WindowAddr64Only() {
 }
 
 struct SrtWalkCtx;
+#ifdef ARCH_X86_64
 // uc3 (Fable R.8.1): the walker takes a context: the pointer loader it calls for each table
 // pointer and a table it fills with the guest address of each flattened dword.
 using PFN_SrtWalker = void PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*flat_dst*/,
                                             SrtWalkCtx* /*ctx*/);
+inline const void* SrtWalkerCode(PFN_SrtWalker walker) {
+    return reinterpret_cast<const void*>(walker);
+}
+#else
+/// On non-x86 hosts the walker is portable SRT bytecode, not executable machine code
+/// (gow3_android). android port TODO: the uc3 walker context (load_ptr through the backing
+/// view, src_table for GPU-written leaves) and ReadConst windows are not in the bytecode yet.
+void RunSrtProgram(const u32* program, const u32* user_data, u32* flat_dst);
+struct SrtWalker {
+    const u32* program{};
+    void operator()(const u32* user_data, u32* flat_dst) const {
+        RunSrtProgram(program, user_data, flat_dst);
+    }
+    explicit operator bool() const { return program != nullptr; }
+};
+using PFN_SrtWalker = SrtWalker;
+inline const void* SrtWalkerCode(PFN_SrtWalker walker) {
+    return walker.program;
+}
+#endif
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
 
 /// uc3: a table pointer as the walker follows it: `host` is where its loads read (the

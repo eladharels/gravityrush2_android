@@ -1409,9 +1409,17 @@ bool Gcn::FetchShaderData::Deserialize(Serialization::Archive& ar) {
 void PersistentSrtInfo::Serialize(Serialization::Archive& ar) const {
     Serialization::Writer srt{ar};
 
+    const auto* code = static_cast<const u8*>(SrtWalkerCode(walker_func));
+    if (walker_func_size && !code) {
+        PersistentSrtInfo copy = *this;
+        copy.walker_func = {};
+        copy.walker_func_size = 0;
+        srt.Write(&copy, sizeof(copy));
+        return;
+    }
     srt.Write(this, sizeof(*this));
     if (walker_func_size) {
-        srt.Write(reinterpret_cast<void*>(walker_func), walker_func_size);
+        srt.Write(code, walker_func_size);
     }
 }
 
@@ -1419,10 +1427,17 @@ bool PersistentSrtInfo::Deserialize(Serialization::Archive& ar) {
     Serialization::Reader srt{ar};
 
     srt.Read(this, sizeof(*this));
+    // The stored function/object belonged to the process that wrote the cache.
+    walker_func = {};
 
     if (walker_func_size) {
-        walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
+        const auto code = ar.CurrPtr();
         ar.Advance(walker_func_size);
+        walker_func = RegisterWalkerCode(code, walker_func_size);
+        if (!walker_func) {
+            walker_func_size = 0;
+            return false;
+        }
     }
 
     return true;

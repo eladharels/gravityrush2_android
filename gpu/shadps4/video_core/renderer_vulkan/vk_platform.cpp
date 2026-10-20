@@ -13,6 +13,7 @@
 #define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
+#include <cstdlib>
 #include <vector>
 #include <fmt/ranges.h>
 
@@ -21,6 +22,7 @@
 #include "common/path_util.h"
 #include "core/emulator_settings.h"
 #include "sdl_window.h"
+#include "vk_driver_loader.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 
@@ -271,9 +273,18 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
 #endif
 
-    static vk::detail::DynamicLoader dl;
+    // gow3port: resolve every Vulkan entry point through the one loader that honours
+    // GOW3_VULKAN_DRIVER (gpu/shim/vk_driver_loader.cpp). With the variable unset it is the
+    // platform loader (Android: libvulkan.so and the stock Adreno driver); set to a driver library
+    // (an adrenotools-style Turnip) it is that driver, so the real renderer - not just the smoke
+    // test - runs on the driver the player picked. Previously this dlopen'ed libvulkan itself,
+    // which made the selection unreachable from the game.
+    const auto gow3_get_instance_proc_addr = gow3_vk_get_instance_proc_addr();
+    ASSERT_MSG(gow3_get_instance_proc_addr,
+               "No Vulkan driver could be loaded (GOW3_VULKAN_DRIVER={})",
+               std::getenv("GOW3_VULKAN_DRIVER") ? std::getenv("GOW3_VULKAN_DRIVER") : "(unset)");
     VULKAN_HPP_DEFAULT_DISPATCHER.init(
-        dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
+        reinterpret_cast<PFN_vkGetInstanceProcAddr>(gow3_get_instance_proc_addr));
 
     const auto [available_version_result, available_version] =
         VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion

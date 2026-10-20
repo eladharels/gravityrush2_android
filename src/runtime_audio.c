@@ -14,6 +14,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
 
 #define PORTS 25
 #define ERR_NOT_OPENED ((int32_t)0x80260001)
@@ -30,7 +31,8 @@
 #define VOLUME_0DB 32768
 
 typedef struct {
-    int used, type, channels, is_float, frames, sample_bytes, std_layout, downmix;
+    int used, type, channels, is_float, frames, sample_bytes, std_layout;
+    int output_channels, output_sample_bytes;
     int32_t volume[8];
     SDL_AudioStream *stream;
     uint64_t next_deadline_ns; /* next return of sceAudioOutOutput */
@@ -48,6 +50,7 @@ _Static_assert(sizeof(PortState)==32,"AudioOut port state layout");
 static pthread_mutex_t table_lock=PTHREAD_MUTEX_INITIALIZER;
 static Port ports[PORTS];
 static int initialized, sdl_ready=-1;
+static int android_disk;
 static size_t buffers_out, ports_opened;
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec; }
@@ -63,8 +66,25 @@ static void sleep_until(uint64_t deadline) {
 static int sdl_audio(void) {
     if (sdl_ready<0) {
         const char *mode=getenv("GOW3_AUDIO");
+        const char *driver=getenv("SDL_AUDIO_DRIVER");
+        android_disk=getenv("GOW3_ANDROID_INPUT") && !strcmp(getenv("GOW3_ANDROID_INPUT"),"1") &&
+            driver && !strcmp(driver,"disk");
+        // SDL refuses SDL_InitSubSystem until the app has declared main() as its own: with
+        // SDL_MAIN_NEEDED (Android) SDL_MainIsReady starts false and the call fails with
+        // "Application didn't initialize properly, did you include SDL_main.h ...". probe's main()
+        // is the real entry point, so mark it ready before touching any SDL subsystem.
+        SDL_SetMainReady();
         sdl_ready = (!mode || strcmp(mode,"none")) && SDL_InitSubSystem(SDL_INIT_AUDIO);
-        printf("Runtime: audio backend %s\n", sdl_ready ? SDL_GetCurrentAudioDriver() : "timer (silent)");
+        printf("Runtime: audio backend %s%s\n", sdl_ready ? SDL_GetCurrentAudioDriver() : "timer (silent)",
+               android_disk ? " (Android PCM bridge: s16 stereo 48 kHz)" : "");
+        if (!sdl_ready) {
+            // Why it failed matters: with SDL_AUDIO_DRIVER=disk the sink is the app's FIFO. Report
+            // it on stderr - stdout is block-buffered into the log file and a fatal signal ends
+            // the process with _exit(), which drops whatever is still buffered.
+            fprintf(stderr, "Runtime: SDL audio init failed: %s (driver=%s, output=%s)\n",
+                    SDL_GetError(), driver ? driver : "(unset)",
+                    getenv("SDL_AUDIO_DISK_OUTPUT_FILE") ?: "(unset)");
+        }
     }
     return sdl_ready;
 }
@@ -79,27 +99,6 @@ static int port_range(int type, int *first, int *last) {
     case 127: *first=23; *last=24; return 1;  /* aux */
     default: return 0;
     }
-}
-/* SDL's 7.1-to-stereo matrix keeps only ~0.21 of the front channels (-13.5 dB), so the game
-   was far too quiet on stereo outputs. Folds SDL-ordered FL FR C LFE BL BR SL SR frames to
-   stereo in place: fronts at full level, center and surrounds at -3 dB, LFE dropped, clamped.
-   Returns the stereo byte count. */
-static size_t downmix_stereo(unsigned char *buf, size_t frames, int is_float) {
-    const float k=0.70710678f;
-    for (size_t f=0;f<frames;++f) {
-        float s[8], lr[2];
-        for (int c=0;c<8;++c) {
-            if (is_float) memcpy(&s[c],buf+(f*8+(size_t)c)*4,4);
-            else { int16_t v; memcpy(&v,buf+(f*8+(size_t)c)*2,2); s[c]=(float)v/32768.0f; }
-        }
-        lr[0]=s[0]+k*(s[2]+s[4]+s[6]); lr[1]=s[1]+k*(s[2]+s[5]+s[7]);
-        for (int c=0;c<2;++c) {
-            float v=lr[c]<-1.0f ? -1.0f : lr[c]>1.0f ? 1.0f : lr[c];
-            if (is_float) memcpy(buf+(f*2+(size_t)c)*4,&v,4);
-            else { int16_t o=(int16_t)(v*32767.0f); memcpy(buf+(f*2+(size_t)c)*2,&o,2); }
-        }
-    }
-    return frames*2*(is_float ? 4u : 2u);
 }
 static Port *port_of(int32_t handle, int32_t *error) {
     int id=handle & 0xff;
@@ -134,15 +133,34 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     pthread_mutex_init(&p->lock,NULL);
     p->used=1; p->type=type; p->channels=channels[format]; p->is_float=format>=3 && format!=6;
     p->sample_bytes=p->is_float ? 4 : 2; p->frames=(int)length; p->std_layout=format>=6;
+    sdl_audio();
+    // The app's FIFO sink is what makes the game audible on Android. If SDL could not open it, the
+    // port used to be refused outright, and the guest faulted during start-up right after this
+    // refusal (null handle + 8). Silently keeping the port on the timer sink is not a fix for the
+    // missing sink, but a game that is out of audio can still reach its main menu, and the port
+    // stays consistent with what the guest thinks it opened.
+    if (android_disk && !sdl_ready) {
+        fprintf(stderr,"Runtime: Android audio sink unavailable; port %d falls back to the silent "
+                       "timer sink\n",id);
+        android_disk = 0;
+    }
+    p->output_channels=android_disk ? 2 : p->channels;
+    p->output_sample_bytes=android_disk ? 2 : p->sample_bytes;
     for (int c=0;c<8;++c) p->volume[c]=VOLUME_0DB;
-    if (sdl_audio()) {
-        SDL_AudioSpec device; int device_frames;
-        p->downmix=p->channels==8 && SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&device,&device_frames)
-                   && device.channels==2;
-        SDL_AudioSpec spec={p->is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16, p->downmix ? 2 : p->channels, 48000};
+    if (sdl_ready) {
+        SDL_AudioSpec spec={android_disk ? SDL_AUDIO_S16 : (p->is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16),
+                            p->output_channels, 48000};
         p->stream=SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&spec,NULL,NULL);
         if (p->stream) SDL_ResumeAudioStreamDevice(p->stream);
-        else fprintf(stderr,"Runtime: SDL audio stream failed (%s); port %d uses the timer sink\n",SDL_GetError(),id);
+        else fprintf(stderr,"Runtime: SDL audio stream failed (%s); port %d uses the timer sink (type %d, %d ch)\n",
+                     SDL_GetError(),id,type,p->channels);
+        if (android_disk && !p->stream) {
+            // Same reasoning as above: no FIFO stream. Stay on the timer sink instead of taking the
+            // port back, so the guest keeps a usable audio handle.
+            fprintf(stderr,"Runtime: Android audio stream unavailable; port %d falls back to the "
+                           "silent timer sink\n",id);
+            android_disk = 0;
+        }
     }
     p->stats=getenv("GOW3_AUDIO_STATS")!=NULL;
     const char *dump=getenv("GOW3_AUDIO_DUMP");
@@ -153,8 +171,8 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     }
     ++ports_opened;
     pthread_mutex_unlock(&table_lock);
-    printf("Runtime: audio port %d opened (type %d, %d ch, %s, %u frames%s)\n",id,type,p->channels,p->is_float ? "float" : "s16",length,
-           p->downmix ? ", downmixed to stereo" : "");
+    printf("Runtime: audio port %d opened (type %d, %d ch %s -> %d ch s16, %u frames)\n",id,type,p->channels,
+           p->is_float ? "float" : "s16",p->output_channels,length);
     return (type<<16) | id | 0x20000000;
 }
 static ABI int32_t audio_close(int32_t handle) {
@@ -167,6 +185,7 @@ static ABI int32_t audio_close(int32_t handle) {
         if (p->dump) fclose(p->dump);
         p->dump=NULL;
         p->stream=NULL; p->used=0;
+        printf("Runtime: audio port %d closed\n",(int)(p-ports));
         pthread_mutex_unlock(&p->lock);
     }
     pthread_mutex_unlock(&table_lock);
@@ -180,18 +199,42 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
     pthread_mutex_unlock(&table_lock);
     if (!p) return error;
     pthread_mutex_lock(&p->lock);
-    size_t samples=(size_t)p->frames*(size_t)p->channels, bytes=samples*(size_t)p->sample_bytes;
+    size_t samples=(size_t)p->frames*(size_t)p->channels;
+    size_t output_samples=(size_t)p->frames*(size_t)p->output_channels;
+    size_t bytes=output_samples*(size_t)p->output_sample_bytes;
     uint64_t period=(uint64_t)p->frames*1000000000u/48000u;
     if (data) {
         /* Apply per-channel volume and map PS4 8ch (L R C LFE SL SR BL BR) to SDL 7.1 order. */
         unsigned char converted[2048*8*4];
         static const int remap[8]={0,1,2,3,6,7,4,5};
-        for (size_t f=0;f<(size_t)p->frames;++f) for (int c=0;c<p->channels;++c) {
-            int target=p->channels==8 && !p->std_layout ? remap[c] : c;
-            size_t from=f*(size_t)p->channels+(size_t)c, to=f*(size_t)p->channels+(size_t)target;
-            float gain=(float)p->volume[c]/VOLUME_0DB;
-            if (p->is_float) { float v; memcpy(&v,(const char *)data+from*4,4); v*=gain; memcpy(converted+to*4,&v,4); }
-            else { int16_t v; memcpy(&v,(const char *)data+from*2,2); v=(int16_t)((float)v*gain); memcpy(converted+to*2,&v,2); }
+        for (size_t f=0;f<(size_t)p->frames;++f) {
+            if (android_disk) {
+                float left=0, right=0;
+                for (int c=0;c<p->channels;++c) {
+                    size_t from=f*(size_t)p->channels+(size_t)c;
+                    float v;
+                    if (p->is_float) memcpy(&v,(const char *)data+from*4,4);
+                    else { int16_t s; memcpy(&s,(const char *)data+from*2,2); v=(float)s/32768.0f; }
+                    v*=(float)p->volume[c]/VOLUME_0DB;
+                    if (p->channels==1) { left+=v; right+=v; }
+                    else if (c==0) left+=v;
+                    else if (c==1) right+=v;
+                    else if (c==2) { left+=v*0.7071f; right+=v*0.7071f; }
+                    else if (c==3) { left+=v*0.35f; right+=v*0.35f; }
+                    else if ((c&1)==0) left+=v*0.5f;
+                    else right+=v*0.5f;
+                }
+                if (left>1) left=1; if (left<-1) left=-1;
+                if (right>1) right=1; if (right<-1) right=-1;
+                int16_t out[2]={(int16_t)(left*32767.0f),(int16_t)(right*32767.0f)};
+                memcpy(converted+f*sizeof(out),out,sizeof(out));
+            } else for (int c=0;c<p->channels;++c) {
+                int target=p->channels==8 && !p->std_layout ? remap[c] : c;
+                size_t from=f*(size_t)p->channels+(size_t)c, to=f*(size_t)p->channels+(size_t)target;
+                float gain=(float)p->volume[c]/VOLUME_0DB;
+                if (p->is_float) { float v; memcpy(&v,(const char *)data+from*4,4); v*=gain; memcpy(converted+to*4,&v,4); }
+                else { int16_t v; memcpy(&v,(const char *)data+from*2,2); v=(int16_t)((float)v*gain); memcpy(converted+to*2,&v,2); }
+            }
         }
         /* GOW3_AUDIO_DUMP: the game's own buffer (PS4 channel order, before volume and downmix). */
         if (p->dump) fwrite(data,1,bytes,p->dump);

@@ -7,6 +7,10 @@
 #include <utility>
 
 #include "common/adaptive_mutex.h"
+// gow3port: Bionic is __unix__ without PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP, so LockType falls back
+// to SpinLock: spin_lock.h is included unconditionally (glibc gets it through adaptive_mutex.h).
+#include "common/spin_lock.h"
+#include "common/debug.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
 #include "video_core/buffer_cache/region_definitions.h"

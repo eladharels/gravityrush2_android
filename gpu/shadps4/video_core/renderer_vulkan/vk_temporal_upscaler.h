@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// gow3: temporal upscaling of the HDR scene color (docs/upscaler.md). Off for God of War III
-// until its scene color, depth and camera constants are found (run.py). GOW3_UPSCALER=fsr3
-// runs FSR 3.1 (FireBurn/FSR-Vulkan, native Vulkan) on the scene color right before the
-// post-processing combine pass, with the scene depth and camera motion vectors, and writes the
-// result back so the game's own post, tonemap and UI continue unchanged (Native AA preset).
+// gow3: temporal upscaling of the HDR scene color (docs/upscaler.md). The scene color, depth
+// and camera constants for God of War III were located and verified (docs/upscaler.md Status;
+// my-docs/gow3/upscaler-trigger-verification.md): GOW3_UPSCALER=fsr3 runs FSR 3.1
+// (FireBurn/FSR-Vulkan, native Vulkan) on the scene color right before the post-processing
+// combine pass (compute shader 9a9cf8a9), with the scene depth and camera motion vectors, and
+// writes the result back so the game's own post, tonemap and UI continue unchanged (Native AA
+// preset). Android defaults to GSR 2 (vk_gsr2) in the same slot.
 //
 // Guest targets stay at 1920x1080. Host scene targets use output/preset dimensions,
 // resized at frame boundaries. At 1080p HDR reconstruction precedes post; other outputs
@@ -38,6 +40,7 @@ class Scheduler;
 class Runtime;
 class CameraMotion;
 class SceneTargets;
+class GsrUpscaler;
 
 class TemporalUpscaler {
 public:
@@ -166,6 +169,8 @@ private:
     bool RecordReactive(vk::ImageView color_view);
     /// FSR 4 is selected, possible in this session (not GOW3_RENDER_RES) and has not failed.
     [[nodiscard]] bool UseFsr4() const;
+    /// gow3: GSR 2 selected and has not failed in this session (Android default provider).
+    [[nodiscard]] bool UseGsr2() const;
     /// gow3: DLSS selected and the bridge is ready (NVIDIA RTX, gow3_dlss.dll).
     [[nodiscard]] bool UseDlss() const;
     /// Records DLSS into `cmdbuf` (output in General). `hdr`: linear scene color input.
@@ -175,6 +180,10 @@ private:
     /// Records FSR 4 into output_image; on a permanent failure FSR 3 takes over.
     bool RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image color, Fsr4Upscaler::Image depth,
                     u32 w, u32 h, u32 ow, u32 oh, float frame_ms);
+    /// gow3: GSR 2 记录进 output_image（Android 默认 provider）；失败时按平台回落
+    ///（Android → off，桌面 → FSR 3.1）。
+    bool RecordGsr2(vk::CommandBuffer cmdbuf, vk::ImageView color, vk::ImageView depth,
+                    u32 w, u32 h, u32 ow, u32 oh);
     void RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color, vk::ImageView depth);
     /// Sharpness above 1 for FSR 3/4 (their RCAS stops at 1): one more RCAS pass over the target
     /// (output_image, or the 8-bit UI image with ldr) in General layout after the upscaler.
@@ -250,9 +259,12 @@ private:
     bool resources_ready = false; ///< images below match width/height/out size
     bool resources_fsr4 = false;  ///< made for FSR 4 (no FSR 3 context)
     bool resources_taa = false;
+    bool resources_gsr2 = false;  ///< made for GSR 2 (no FSR 3 context)
     std::unique_ptr<Fsr4Upscaler> fsr4;
     bool fsr4_failed = false;
     bool dlss_failed = false;
+    std::unique_ptr<GsrUpscaler> gsr2;
+    bool gsr2_failed = false;
     VideoCore::UniqueImage motion_image;
     VideoCore::UniqueImage output_image;
     vk::UniqueImageView motion_view;

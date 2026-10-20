@@ -12,7 +12,7 @@
 #include <ranges>
 #include <string>
 #include <unordered_set>
-#include <x86intrin.h>
+#include "common/rdtsc.h"
 #include "gow3_threads.h"
 
 #include "common/hash.h"
@@ -918,7 +918,7 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             why = 4;
         } else {
             const bool split = GfxPipeSplit();
-            const u64 c0 = split ? __rdtsc() : 0;
+            const u64 c0 = split ? Common::RawRDTSC() : 0;
             u32 range_hits = 2; ///< R.10.17: 0 when pages read were written outside the ranges
             // R.10.17 (Fable): a GPU write still pending over the runs read is a miss for every
             // draw about to be trusted (stamps or values), tested before the stamps: a landing
@@ -929,7 +929,7 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             bool pending_hit = false;
             if ((A1PendingCheck() || pending_log) && prepared.num_guest_runs != 0) {
                 auto* const rasterizer = liverpool->GetRasterizer();
-                const u64 p0 = __rdtsc();
+                const u64 p0 = Common::RawRDTSC();
                 u32 tested = 0;
                 for (u32 r = 0; rasterizer && r < prepared.num_guest_runs; ++r) {
                     const auto& run = prepared.guest_runs[r];
@@ -950,11 +950,11 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
                     }
                 }
                 prep_trust_pending_runs += tested;
-                prep_trust_pending_cycles += __rdtsc() - p0;
+                prep_trust_pending_cycles += Common::RawRDTSC() - p0;
             }
             why = SrtChangedSince(prepared.srt_snap, prepared.read_pages.data(),
                                   prepared.num_read_pages);
-            const u64 c1 = split ? __rdtsc() : 0;
+            const u64 c1 = split ? Common::RawRDTSC() : 0;
             if (why == 3) {
                 const u32 index = SrtChangedPage(prepared.srt_snap, prepared.read_pages.data(),
                                                  prepared.num_read_pages);
@@ -1069,7 +1069,7 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             }
             if (split) {
                 g_gow3_gfx_pipe_split[6].fetch_add(c1 - c0, std::memory_order_relaxed);
-                g_gow3_gfx_pipe_split[7].fetch_add(__rdtsc() - c1, std::memory_order_relaxed);
+                g_gow3_gfx_pipe_split[7].fetch_add(Common::RawRDTSC() - c1, std::memory_order_relaxed);
             }
         }
         trusted = prepared.no_gpu_leaves && why == 0;
@@ -1082,7 +1082,7 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
     }
     if (trusted && (trust_mode == 1 || trust_mode == 3)) {
         const bool split = GfxPipeSplit();
-        const u64 c0 = split ? __rdtsc() : 0;
+        const u64 c0 = split ? Common::RawRDTSC() : 0;
         for (u32 i = 0; i < prepared.num_stages; ++i) {
             const auto& stage = prepared.stages[i];
             const auto* pgm = regs.ProgramForStage(static_cast<u32>(stage.hw_stage));
@@ -1101,7 +1101,7 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             info.trusted_flat_size = stage.flat_size;
             info.gpu_leaves.clear();
         }
-        const u64 c1 = split ? __rdtsc() : 0;
+        const u64 c1 = split ? Common::RawRDTSC() : 0;
         // R.10 A1 v8 (Fable 1a/1b): consecutive draws mostly share the key; the previous
         // trusted pipeline is reused when the key is the same (its own copy, compared here),
         // otherwise the worker's hash saves hashing the key again.
@@ -1126,7 +1126,7 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             }
         }
         if (split) {
-            const u64 c2 = __rdtsc();
+            const u64 c2 = Common::RawRDTSC();
             g_gow3_gfx_pipe_split[8].fetch_add(c2 - c0, std::memory_order_relaxed);
             g_gow3_gfx_pipe_split[9].fetch_add(c1 - c0, std::memory_order_relaxed);
             g_gow3_gfx_pipe_split[10].fetch_add(c2 - c1, std::memory_order_relaxed);
@@ -1140,9 +1140,9 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             return nullptr;
         }
         const bool split = GfxPipeSplit();
-        const u64 c0 = split ? __rdtsc() : 0;
+        const u64 c0 = split ? Common::RawRDTSC() : 0;
         const auto params = AmdGpu::GetParams(*pgm);
-        const u64 c1 = split ? __rdtsc() : 0;
+        const u64 c1 = split ? Common::RawRDTSC() : 0;
         if (trusted && (params.hash != stage.hash || params.Base() != stage.pgm_base)) {
             NotePrepTrustDivergence("program", stage.hash, params.Base());
         }
@@ -1153,14 +1153,14 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         info.pgm_base = params.Base();
         info.user_data = params.user_data;
         info.RefreshFlatBuf();
-        const u64 c2 = split ? __rdtsc() : 0;
+        const u64 c2 = split ? Common::RawRDTSC() : 0;
         const bool flat_differs =
             info.pgm_base != stage.pgm_base || info.flattened_ud_buf.size() != stage.flat_size ||
             std::memcmp(info.flattened_ud_buf.data(), stage.flat, stage.flat_size * sizeof(u32)) != 0;
         if (split) {
             g_gow3_gfx_pipe_split[3].fetch_add(c1 - c0, std::memory_order_relaxed);
             g_gow3_gfx_pipe_split[4].fetch_add(c2 - c1, std::memory_order_relaxed);
-            g_gow3_gfx_pipe_split[5].fetch_add(__rdtsc() - c2, std::memory_order_relaxed);
+            g_gow3_gfx_pipe_split[5].fetch_add(Common::RawRDTSC() - c2, std::memory_order_relaxed);
         }
         if (flat_differs) {
             if (trusted) {
@@ -1226,13 +1226,13 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared) {
     const bool split = GfxPipeSplit();
-    const u64 t0 = split ? __rdtsc() : 0;
+    const u64 t0 = split ? Common::RawRDTSC() : 0;
     SeedWorkerCaches();
     PublishShaders();
     PublishGraphics();
     PumpWarmUp();
     used_prepared = nullptr;
-    const u64 t1 = split ? __rdtsc() : 0;
+    const u64 t1 = split ? Common::RawRDTSC() : 0;
     if (split) {
         g_gow3_gfx_pipe_split[0].fetch_add(t1 - t0, std::memory_order_relaxed);
         g_gow3_gfx_pipe_split[2].fetch_add(1, std::memory_order_relaxed);
@@ -1240,7 +1240,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (prepared) {
         const auto* pipeline = TryPreparedPipeline(*prepared);
         if (split) {
-            g_gow3_gfx_pipe_split[1].fetch_add(__rdtsc() - t1, std::memory_order_relaxed);
+            g_gow3_gfx_pipe_split[1].fetch_add(Common::RawRDTSC() - t1, std::memory_order_relaxed);
         }
         if (pipeline) {
             used_prepared = prepared;

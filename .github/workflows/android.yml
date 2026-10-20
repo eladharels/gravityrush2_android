@@ -1,0 +1,226 @@
+name: android
+
+on:
+  pull_request:
+  push:
+    branches: [main, gow3, android-port]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_PLATFORM: '35'
+  ANDROID_BUILD_TOOLS: '35.0.0'
+  GOW3_BUILD_TYPE: Release
+  # These paths are intentionally outside the checkout and are never uploaded.
+
+jobs:
+  source-check:
+    name: Android source checks
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate Android manifests and packaging tests
+        run: |
+          python -m unittest \
+            discover -s tests -p 'test_android_*.py'
+          python -m py_compile tools/android/*.py
+
+  release:
+    name: Build signed Android release
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    environment: android-release
+    permissions:
+      contents: read
+    env:
+      GOW3_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      GOW3_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      GOW3_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      GOW3_FEXDROID_APK_URL: ${{ vars.GOW3_FEXDROID_APK_URL }}
+      GOW3_FEXDROID_APK_SHA256: ${{ vars.GOW3_FEXDROID_APK_SHA256 }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore Android SDK package cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/platform-tools
+            /usr/local/lib/android/sdk/platforms/android-${{ env.ANDROID_PLATFORM }}
+            /usr/local/lib/android/sdk/build-tools/${{ env.ANDROID_BUILD_TOOLS }}
+          key: android-sdk-${{ runner.os }}-${{ env.ANDROID_PLATFORM }}-${{ env.ANDROID_BUILD_TOOLS }}
+
+      - name: Set up native dependency environment
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: ci/environment.yml
+          cache-environment: true
+          init-shell: bash
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-${{ env.ANDROID_PLATFORM }}
+            build-tools;${{ env.ANDROID_BUILD_TOOLS }}
+
+      - name: Install Android and native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            clang lld llvm cmake ninja-build meson pkg-config patchelf ccache \
+            libxml2-utils unzip xz-utils zstd
+
+      - name: Restore reproducible build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .local-deps/android/src
+            .local-deps/android/m2
+            .local-deps/android/steam-libs
+            ~/.cache/ccache
+          key: android-${{ runner.os }}-${{ hashFiles('tools/android/**', 'cpu/**', 'gpu/CMakeLists.txt', 'gpu/third_party/**', 'ci/**') }}
+          restore-keys: android-${{ runner.os }}-
+
+      - name: Restore fexdroid APK cache
+        uses: actions/cache@v4
+        with:
+          path: .local-deps/android/fexdroid-legacy.apk
+          key: fexdroid-apk-${{ vars.GOW3_FEXDROID_APK_SHA256 || '21bed34092f698e39e77138589ebdab8d3498577ffc4fdc3bfef1c711b50d3bf' }}
+
+      - name: Build pinned host dependencies
+        shell: bash -el {0}
+        run: bash ci/setup-deps.sh "$CONDA_PREFIX"
+
+      - name: Configure temporary paths
+        shell: bash
+        run: |
+          {
+            echo "GOW3_KEYSTORE=$RUNNER_TEMP/gow3-release.keystore"
+            echo "GOW3_BRIDGE_APK=$GITHUB_WORKSPACE/.local-deps/android/fexdroid-legacy.apk"
+          } >> "$GITHUB_ENV"
+
+      - name: Restore signing keystore
+        shell: bash
+        run: |
+          set +x
+          for name in ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD ANDROID_KEYSTORE_BASE64; do
+            if [[ -z ${!name:-} ]]; then
+              echo "Missing required GitHub secret: $name" >&2
+              exit 1
+            fi
+            printf '::add-mask::%s\n' "${!name}"
+          done
+          bash tools/android/inputs/prepare_signing.sh "$GOW3_KEYSTORE"
+
+      - name: Fetch Steam libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/android/inputs/fetch_steam_libs.sh
+
+      # Vulkan 驱动不进 payload：设备侧由 DriverManager / install_bionic_driver.sh 安装
+      # adrenotools 风格驱动包（下载源见 launcher assets driver_sources.json）。
+
+      - name: Build the Bionic runtime
+        shell: bash -el {0}
+        run: |
+          bash tools/android/build_bionic_deps.sh
+          bash tools/android/build_bionic.sh
+
+      - name: Build and sign the release APK
+        run: |
+          bash tools/android/apk/build_release_apk.sh
+          apk=out/release/*.apk
+          test -e $apk || { echo 'No APK was produced' >&2; exit 1; }
+          sha256sum $apk > "$apk.sha256"
+          echo "APK=$apk" >> "$GITHUB_ENV"
+          echo "APK_SHA256=$(cut -d' ' -f1 "$apk.sha256")" >> "$GITHUB_ENV"
+
+      - name: Publish build summary
+        run: |
+          {
+            echo '## Android build/package verified'
+            echo
+            printf '%s\n' "- Commit: ${GITHUB_SHA}"
+            printf '%s\n' "- APK: $(basename "$APK")"
+            printf '%s\n' "- SHA-256: ${APK_SHA256}"
+            echo '- ABI: `arm64-v8a`'
+            echo '- Scope: build, package, signature, and checksum verification only'
+            echo '- Not verified by CI: device installation, Vulkan, Turnip/GPU compatibility, and gameplay'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload signed APK and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: gow3-android-arm64-${{ github.sha }}
+          path: |
+            out/release/*.apk
+            out/release/*.apk.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove signing material
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -f -- "$GOW3_KEYSTORE"
+
+  publish-release:
+    name: Publish Android release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed APK and checksum
+        uses: actions/download-artifact@v4
+        with:
+          name: gow3-android-arm64-${{ github.sha }}
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.apk
+            *.apk.sha256
+          generate_release_notes: true

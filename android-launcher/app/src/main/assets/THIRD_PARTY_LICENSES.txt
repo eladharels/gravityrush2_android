@@ -1,0 +1,44 @@
+The native display and X11 input bridges from the fexdroid project
+(https://github.com/cobrabm12/fexdroid) were reused unmodified by earlier builds. They
+belonged to the retired glibc/proot runtime: the X11 display bridge is replaced by
+libgow3present, and the XTEST input bridge could never work under Bionic, which has no X
+server. Neither binary is part of this build any more.
+
+Vulkan driver: not bundled in this APK at all. The game loads whichever
+adrenotools-style driver pack the player installs under files/drivers/<name>
+(launcher DriverManager download or manual install; the shipped default is the
+phone's own driver, gow3.ini: gpu_driver). No Mesa/Turnip code is built or
+distributed with this app.
+
+Frame generation (LSFG, change add-native-frame-generation): the Bionic game
+process loads libbloodframe.so (MIT, https://github.com/ducvd89/bloodframe,
+pinned commit c29027555cfa8c9fc73c20f03816230becb9f469; it carries the history
+of GameNative's MIT lsfg-vk Android fork, based on lsfg-vk 1.0 by PancakeTAS).
+The library is built by tools/android/build_framegen.sh into the runtime
+payload (gow3port/bionic/lib/) and is dlopen()ed by libgow3gpu only while
+frame generation is on. Lossless Scaling and its Lossless.dll are NOT included
+and are never redistributed with this app: the player supplies their own copy
+(launcher Home, IMPORT .DLL on the FRAME GENERATION card, or Settings →
+General → IMPORT, or Steam below); the engine reads it as data (never
+executes it) and the file stays in the player's folders.
+
+(Former note "Frame generation: not part of this app" is superseded above.)
+
+Steam sign-in (downloads Lossless.dll from the player's own Lossless Scaling):
+JavaSteam 1.8.0 (MIT, https://github.com/Longi94/JavaSteam), with Kotlin and
+kotlinx.coroutines/io/serialization (Apache-2.0, JetBrains), Ktor (Apache-2.0,
+JetBrains), OkHttp and Okio (Apache-2.0, Square), Protocol Buffers for Java
+(BSD-3-Clause, Google), Apache Commons Lang 3 (Apache-2.0), SLF4J API (MIT),
+JetBrains annotations (Apache-2.0), XZ for Java (0BSD, Lasse Collin) and
+zstd-jni (BSD-2-Clause, Luben Karavelov; bundles Zstandard, BSD). The QR code
+is drawn with ZXing core 3.5.4 (Apache-2.0). Menu icons: Material Design icons
+(Apache-2.0, Google).
+
+FSR 3.1: AMD FidelityFX (MIT) through
+FireBurn/FSR-Vulkan.
+
+Snapdragon Game Super Resolution 2 (the default Android upscaler): the 2-pass
+compute GLSL from SnapdragonStudios/snapdragon-gsr, commit d926f074
+(BSD-3-Clause, Copyright (c) 2024, Qualcomm Innovation Center, Inc.), vendored
+unmodified under gpu/third_party/snapdragon-gsr2/ with derived shader copies in
+gpu/shadps4/video_core/host_shaders/gsr2_*.comp.

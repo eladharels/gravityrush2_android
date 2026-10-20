@@ -12,6 +12,8 @@
  *   - per-thread state is read again after every switch through thread_state(), which the
  *     compiler cannot fold across a switch (the fiber may now run on another thread);
  *   - on Windows the TEB stack limits follow the running stack, as with native fibers. */
+#include "guest_cpu.h"
+#if defined(GUEST_CPU_NATIVE) /* android port: src/runtime_fiber_jit.c under the JIT */
 #include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -221,3 +223,4 @@ uintptr_t runtime_fiber_resolve(const char *name) { return RUNTIME_LOOKUP(export
 void runtime_fiber_report(void) {
     printf("Runtime: fibers created=%llu, switches=%llu\n",(unsigned long long)created,(unsigned long long)switches);
 }
+#endif /* GUEST_CPU_NATIVE */

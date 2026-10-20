@@ -61,6 +61,21 @@ public:
     /// Vertical field of view and near/far planes of the current camera.
     [[nodiscard]] float VerticalFov() const noexcept;
     [[nodiscard]] float Near() const noexcept;
+    /// 相机（view 与 projection）自上一帧以来没有变化。两帧相机未知时为 false。
+    /// GSR 2 用它在相机静止时启用 9-tap 采样核（上游的 bSameCamera）。
+    [[nodiscard]] bool CameraStill() const noexcept {
+        if (!current.valid || !previous.valid) {
+            return false;
+        }
+        float diff = 0.0f;
+        for (size_t i = 0; i < current.view.size(); ++i) {
+            diff += std::abs(current.view[i] - previous.view[i]);
+        }
+        for (size_t i = 0; i < current.proj.size(); ++i) {
+            diff += std::abs(current.proj[i] - previous.proj[i]);
+        }
+        return diff < 1e-5f;
+    }
     // Current projection, previous projection, and row Z of previous-view * inverse-view.
     [[nodiscard]] std::array<std::array<float, 4>, 3> TaaDepthParameters() const noexcept;
 

@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <initializer_list>
 #include <unistd.h>
 #include "gow3_settings.h"
@@ -77,6 +78,34 @@ int main() {
     setenv("GOW3_RENDER_RES", "", 1);
     assert(!FixedRenderSession() && !ResolutionNeedsRestart());
     unsetenv("GOW3_RENDER_RES");
+    // GSR 2 (Android default provider): the ini name round-trips, and the desktop fallback
+    // target stays FSR 3.1 while Android falls back to off.
+    assert(std::strcmp(UpscalerName(UpscalerGsr2), "gsr2") == 0);
+    assert(IsGsr2(UpscalerGsr2) && !IsGsr2(UpscalerFsr3));
+    {
+        FILE* config = std::fopen(path, "w");
+        assert(config);
+        std::fprintf(config, "upscaler=gsr2\noutput_res=854x480\n");
+        std::fclose(config);
+        Load();
+        assert(s.upscaler == UpscalerGsr2);
+        assert(s.output_res == 4 && OutputWidths[4] == 854 && OutputHeights[4] == 480);
+    }
+    for (bool fsr4 : {false, true}) {
+        setenv("GOW3_ANDROID_INPUT", "1", 1);
+        FILE* config = std::fopen(path, "w");
+        assert(config);
+        std::fprintf(config, "upscaler=%s\n", UpscalerName(UpscalerFsr4));
+        std::fclose(config);
+        s.fsr4_problem = nullptr;
+        Load();
+        assert(s.upscaler == UpscalerFsr4);
+        ConfigureUpscalerSupport(fsr4, false);
+        assert(s.upscaler == (fsr4 ? UpscalerFsr4 : UpscalerOff));
+        assert(bool(s.fsr4_problem.load()) == !fsr4);
+        unsetenv("GOW3_ANDROID_INPUT");
+    }
+    unsetenv("GOW3_ANDROID_INPUT");
     std::remove(path);
     std::puts("Upscaler support: saved choices and FSR 3.1 fallback PASS");
 }

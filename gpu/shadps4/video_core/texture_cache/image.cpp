@@ -33,9 +33,10 @@ static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance& instance,
                 usage |= vk::ImageUsageFlagBits::eAttachmentFeedbackLoopEXT;
             }
             // Always create images with storage flag to avoid needing re-creation in case of e.g
-            // compute clears This sacrifices a bit of performance but is less work. ExtendedUsage
-            // flag is also used. The exception here is for multisample images when storage is not
-            // supported, where even with ExtendedUsage we may get only one supported sample back.
+            // compute clears. This sacrifices a bit of performance but is less work. ExtendedUsage
+            // flag is also used. The exception is multisample images when storage is not supported
+            // (shaderStorageImageMultisample): with ExtendedUsage a driver that cannot store to a
+            // multisample image may return only one supported sample, losing the MSAA render.
             if (info.num_samples == 1 || instance.IsMultisampleStorageImageSupported())
                 usage |= vk::ImageUsageFlagBits::eStorage;
         }

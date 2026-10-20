@@ -248,7 +248,13 @@ void SceneTargets::Resample(vk::Image src, vk::Image dst, const VideoCore::Image
     });
     const auto pipeline = ResamplePipeline(format, stencil);
     const auto layout = *resample_layout;
-    scheduler.Record([=](vk::CommandBuffer cmd) {
+    // GPU breadcrumbs：登记深度重采样 pass。
+    const Breadcrumbs::Crumb resample_crumb{
+        .kind = Breadcrumbs::Kind::Pass,
+        .name = "depth resample",
+        .hash = {u64(stencil_bits), u64(dst_size.width) << 32 | dst_size.height},
+    };
+    scheduler.RecordCrumb(resample_crumb, [=](vk::CommandBuffer cmd) {
         const vk::RenderingAttachmentInfo attachment{
             .imageView = target_view,
             .imageLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal,

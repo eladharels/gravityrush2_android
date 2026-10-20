@@ -49,3 +49,19 @@ ucndc*.ini
 captures/
 # Local test scripts (the public ones live in windows/)
 /*.bat
+.deps/
+.local/
+.local-deps/
+.gradle
+local.properties
+.idea
+# 根目录 game/ 是机器本地的玩家游戏数据（CUSA 序列号目录），永不入库；
+# 必须锚定根目录——裸词 `game` 会误伤 android-launcher 的 game/ Java 包新文件。
+/game/
+# Machine-local: git worktree checkouts, editor/agent tooling and Finder droppings. None of these
+# belong in the index; a tracked .worktrees/ gitlink points only at the machine that created it.
+.worktrees/
+.DS_Store
+.agents/
+.opencode/
+.kotlin

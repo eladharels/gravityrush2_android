@@ -3,6 +3,11 @@
 
 #pragma once
 
+#ifdef __ANDROID__
+// Bionic：没有 VkSwapchainKHR（见 vk_swapchain_ahb.h）；同样的 Swapchain 接口换成 AHardwareBuffer。
+#include "video_core/renderer_vulkan/vk_swapchain_ahb.h"
+#else
+
 #include <mutex>
 #include <vector>
 #include "common/types.h"
@@ -96,6 +101,21 @@ public:
         return needs_hdr;
     }
 
+    /// gow3: the AHB swapchain (Bionic) hands its images to the Android compositor, so it needs a
+    /// layout and a queue-family ownership transition on both sides; a VkSwapchainKHR owns its
+    /// images inside one queue and needs neither. Presenter asks through these so one code path
+    /// serves both: here the layout is the WSI present layout and no queue family changes hands.
+    vk::ImageLayout PresentLayout() const { return vk::ImageLayout::ePresentSrcKHR; }
+    /// {src, dst} of the barrier that takes the image back from the consumer / gives it over.
+    std::pair<u32, u32> AcquireQueues() const {
+        return {VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED};
+    }
+    std::pair<u32, u32> ReleaseQueues() const {
+        return {VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED};
+    }
+    /// The submission carrying the present-ready signal has to be queued before Present.
+    static constexpr bool NeedsSubmittedBeforePresent() { return false; }
+
 private:
     /// Selects the best available swapchain image format
     void FindPresentFormat();
@@ -142,3 +162,5 @@ private:
 };
 
 } // namespace Vulkan
+
+#endif // !__ANDROID__

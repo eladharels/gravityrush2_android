@@ -13,18 +13,24 @@
 namespace Gow3Settings {
 
 enum Upscaler : int { UpscalerOff = 0, UpscalerFsr3 = 1, UpscalerFsr4 = 2, UpscalerFsr411 = 3,
-                      UpscalerTaa = 4, UpscalerDlss = 5, UpscalerCount };
+                      UpscalerTaa = 4, UpscalerDlss = 5, UpscalerGsr2 = 6, UpscalerCount };
 /// FSR 4 v07 or FSR 4.1.1: the same inputs, settings and placement in the frame.
 inline bool IsFsr4(int upscaler) {
     return upscaler == UpscalerFsr4 || upscaler == UpscalerFsr411;
+}
+/// Qualcomm Snapdragon GSR 2: the Android default temporal upscaler (same slot as FSR 3.1).
+inline bool IsGsr2(int upscaler) {
+    return upscaler == UpscalerGsr2;
 }
 enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
 
 /// Live output resolutions: the upscaler's output and the UI host targets.
-inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840};
-inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160};
-inline constexpr int OutputCount = 4;
+/// 854x480 is the Android low tier (run-bionic.sh's whitelist); appended last so the
+/// desktop indices (and OutputDefault) keep their meaning.
+inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840, 854};
+inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160, 480};
+inline constexpr int OutputCount = 5;
 inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 
 struct Values {
@@ -46,6 +52,9 @@ struct Values {
     std::atomic<unsigned> overlay_items{7};
     std::atomic<int> overlay_scale{100}, overlay_corner{1}, overlay_opacity{50}, overlay_layout{0};
     std::atomic<int> menu_tab{0};
+    /// Android touch overlay mouse mapping (overlay_mouse in gow3.ini). The display cursor is
+    /// hidden while it is off, so the game picture shows no stuck X11 pointer.
+    std::atomic<bool> overlay_mouse{false};
     std::atomic<float> red_orb_multiplier{1.0f};
     std::atomic<bool> red_orbs_supported{false};
     /// Damage and orb pickup multipliers (src/damage_hook.h, src/orb_hook.h), 0.1x to 100x.
@@ -72,11 +81,19 @@ struct Values {
     /// Set by the presenter: the game's image and the window it is shown in, in pixels.
     std::atomic<int> image_width{0}, image_height{0}, window_width{0}, window_height{0};
     std::atomic<int> frames_queued{1};
+    /// Controller vibration strength in percent; 0 turns it off. Live.
+    std::atomic<int> vibration{100};
+    /// Forced anisotropic filtering level; 0 keeps the game's choice. Applied on restart.
+    std::atomic<int> anisotropy{0};
     // Startup: run.py turns them into patches and environment variables; "Apply and restart".
     std::atomic<int> render_resolution{0};
     std::atomic<int> engine_fps{120};
+    /// The engine rate this launch really runs at (GOW3_ENGINE_FPS): 60 when the frame rate
+    /// patch does not apply to this game build.
+    std::atomic<int> applied_engine_fps{120};
     std::atomic<bool> deferred_readback{true};
     std::atomic<bool> stale_readback{false}; // ucndc: off, as the games were tested
+    int startup_anisotropy = 0;
     /// Set before an "Apply and restart"; cleared once the new launch shows the game. run.py
     /// restores the previous startup options when a launch never cleared it.
     std::atomic<bool> restart_unconfirmed{false};

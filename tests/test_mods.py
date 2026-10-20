@@ -61,7 +61,9 @@ class ModTests(unittest.TestCase):
         self.assertEqual(mods.selected(self.moddir, config), ['B', 'C'])
 
     def test_no_mod_returns_original_game(self):
-        self.assertEqual(mods.build_overlay(self.game, self.root / 'out', []), self.game)
+        # build_overlay 返回 resolve(strict=True) 后的路径；macOS 的 tmpdir 在 /var
+        # （符号链接到 /private/var），必须比较解析后的期望值，而非字面输入。
+        self.assertEqual(mods.build_overlay(self.game, self.root / 'out', []), self.game.resolve())
         self.assertFalse((self.root / 'out').exists())
 
     def test_directory_conflict_does_not_modify_base(self):

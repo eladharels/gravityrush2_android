@@ -50,6 +50,8 @@ public:
     /// last submitted tick and prints the ones that did not (a GPU queue waiting on a signal
     /// that will never be submitted keeps the process from terminating).
     static void SettleAll(u32 timeout_ms);
+    /// 等待 tick 到来，最多等 timeout_ns；超时返回 false（供卡死检测在超时后报告）。
+    [[nodiscard]] bool WaitFor(u64 tick, u64 timeout_ns);
 
 protected:
     const Instance& instance;

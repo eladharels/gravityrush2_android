@@ -69,6 +69,10 @@ enum : std::uint64_t {
     // when nothing moves. Static-camera flicker of railings/window bars p99.9 -45% (2026-10-03).
     TaaKeepNearerHistory = 1ull << 55,
     SceneMipBias = 1ull << 57, ///< negative LOD bias of G-buffer samplers at reduced scene sizes
+    /// gow3（上游 b646683）：同一地址、pitch、tile mode 且字节像素比相同的"顶部行整数格式视图"
+    /// 直接复用更高缓存的镜像，而不是新建并上传（texture_cache.cpp）。GOW3_PARTIAL_HEIGHT_VIEWS=0
+    /// 可在启动时关闭，运行期仍可用 toggle 文件做 A/B。
+    PartialHeightViews = 1ull << 58,
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {

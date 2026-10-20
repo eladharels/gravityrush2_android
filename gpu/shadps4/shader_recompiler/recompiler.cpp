@@ -137,6 +137,11 @@ IR::Program TranslateProgram(const std::span<const u32>& code_in, Pools& pools, 
                     "patched\n", static_cast<unsigned long long>(info.pgm_hash));
     }
     const std::span<const u32> code = movie_code.empty() ? code_in : std::span<const u32>(movie_code);
+    // gow3（上游 368d899）：空指令流在入口显式报错，不进入 token 校验产生难定位的崩溃。
+    if (code.empty()) {
+        UNREACHABLE_MSG("TranslateProgram received an empty instruction stream");
+    }
+
     // Ensure first instruction is expected.
     constexpr u32 token_mov_vcchi = 0xBEEB03FF;
     if (code[0] != token_mov_vcchi) {

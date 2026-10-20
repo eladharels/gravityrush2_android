@@ -26,6 +26,7 @@
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_gsr2.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -229,18 +230,18 @@ TemporalUpscaler::~TemporalUpscaler() {
 
 bool TemporalUpscaler::Active() const {
     // Toggle 1 << 24 switches it off at run time (A/B); history restarts after.
+    const int selected = Gow3Settings::Get().upscaler;
     return enabled && !failed &&
-           (Gow3Settings::Get().upscaler == Gow3Settings::UpscalerFsr3 ||
-            Gow3Settings::IsFsr4(Gow3Settings::Get().upscaler) ||
-            Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa ||
-            Gow3Settings::Get().upscaler == Gow3Settings::UpscalerDlss) &&
+           (selected == Gow3Settings::UpscalerFsr3 || selected == Gow3Settings::UpscalerTaa ||
+            Gow3Settings::IsFsr4(selected) || selected == Gow3Settings::UpscalerDlss ||
+            Gow3Settings::IsGsr2(selected)) &&
            !Gow3Toggle::Disabled(1u << 24);
 }
 
 bool TemporalUpscaler::ReactiveOn() const {
     // FSR 4 takes no reactive mask: the opaque snapshot and the mask pass would be wasted.
     return Gow3Settings::Get().reactive && !Gow3Toggle::Disabled(1u << 27) && !UseFsr4() && !UseDlss() &&
-           Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa;
+           !UseGsr2() && Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa;
 }
 
 void TemporalUpscaler::OnSceneColor(VideoCore::ImageId color) {
@@ -270,12 +271,23 @@ bool TemporalUpscaler::OnFrameStart() {
     // gow3: GOW3_PRESET_FILE=<file> holding a preset number, read about once a second: switches
     // the preset like the menu does (scripted tests of live preset changes).
     static const char* preset_file = std::getenv("GOW3_PRESET_FILE");
+    static const bool alive_printed = [] {
+        std::printf("OnFrameStart: alive (preset file %s)\n", std::getenv("GOW3_PRESET_FILE") ? "set" : "unset");
+        std::fflush(stdout);
+        return true;
+    }();
+    (void)alive_printed;
     if (preset_file && ++preset_file_frames % 64 == 0) {
         if (FILE* f = std::fopen(preset_file, "r")) {
             int value = 0;
             int output = -1;
             int provider = -1;
             const int fields = std::fscanf(f, "%d %d %d", &value, &output, &provider);
+            if (preset_file_frames <= 128) {
+                std::printf("preset file: fields=%d value=%d output=%d provider=%d\n",
+                            fields, value, output, provider);
+                std::fflush(stdout);
+            }
             if (fields >= 1 && value >= 0 &&
                 value < Gow3Settings::PresetCount) {
                 Gow3Settings::Get().preset.store(value);
@@ -314,7 +326,10 @@ bool TemporalUpscaler::OnFrameStart() {
         fsr4 = std::make_unique<Fsr4Upscaler>(instance, scheduler);
         if (Gow3Settings::IsFsr4(upscaler)) Gow3Settings::Get().fsr4_problem = nullptr;
     }
-    if (applied_upscaler != upscaler) fsr4_failed = false; // retry after a menu change
+    if (applied_upscaler != upscaler) {
+        gsr2.reset(); // a fresh history when GSR 2 is selected again
+        fsr4_failed = gsr2_failed = false; // retry after a menu change
+    }
     // Dynamic scene resolution scaling (live preset switching) works on all GPUs.
     // On GPUs without D32S8 blit support, UI depth is cleared instead of copied from scene.
     if (!scaled_session) {
@@ -351,7 +366,17 @@ bool TemporalUpscaler::OnFrameStart() {
     }
     // CameraMotion::OnDisplayPass has already cleared Depth(). Use the context's render
     // size, which survives the frame boundary (Performance 960 -> 1920 needs 32 phases).
-    const u32 phases = Scaled() ? Motion::JitterPhases(render_width, target_width)
+    // Scaled session: prefer the game's real scene size from the camera constants once they
+    // are known — GOW3_RENDER_RES is only the pre-camera fallback (Android startup patch;
+    // the resolution patch's real size can differ from the env value).
+    u32 phase_render_width = render_width;
+    if (Scaled()) {
+        const auto real = camera_motion.RenderSize();
+        if (real[0] != 0) {
+            phase_render_width = real[0];
+        }
+    }
+    const u32 phases = Scaled() ? Motion::JitterPhases(phase_render_width, target_width)
         : Motion::JitterPhases(scene_targets.Size().width, 1920);
     jitter_index = jitter_index % phases + 1;
     jitter = {Halton(jitter_index, 2) - 0.5f, Halton(jitter_index, 3) - 0.5f};
@@ -371,20 +396,30 @@ void TemporalUpscaler::OnDispatch(u64 cs_hash) {
 }
 
 bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
-    // DLSS, like FSR 4, has its own context: no portable FSR 3 context is made.
+    // DLSS, like FSR 4 and GSR 2, owns its context: no portable FSR 3 context is made.
     const bool use_fsr4 = UseFsr4() || UseDlss();
+    const bool use_gsr2 = UseGsr2();
     const bool use_taa = Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa;
     if (use_taa && (w != ow || h != oh)) {
         std::printf("TAA: remove GOW3_RENDER_RES to use native-resolution TAA\n");
         return false;
     }
     if (resources_ready && w == width && h == height && ow == out_width && oh == out_height &&
-        hdr == context_hdr && use_fsr4 == resources_fsr4 && use_taa == resources_taa) {
+        hdr == context_hdr && use_fsr4 == resources_fsr4 && use_taa == resources_taa &&
+        use_gsr2 == resources_gsr2) {
         return true;
     }
     const auto device = instance.GetDevice();
     // FSR 4 owns no portable FSR 3 context, but its images can still be in flight.
+    if (use_gsr2 && !resources_ready) {
+        std::printf("EnsureResources: GSR 2 session begin %ux%u -> %ux%u\n", w, h, ow, oh);
+        std::fflush(stdout);
+    }
     scheduler.Finish();
+    if (use_gsr2 && !resources_ready) {
+        std::printf("EnsureResources: GSR 2 scheduler.Finish() done\n");
+        std::fflush(stdout);
+    }
     resources_ready = false;
     if (context) {
         ffxVkPortableUpscaleContextDestroy(context);
@@ -418,7 +453,8 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     create_info.maxRenderSize = {w, h};
     create_info.maxOutputSize = {ow, oh};
     // FSR 4 has its own model context (vk_fsr4); the images below are shared.
-    if (!use_fsr4 && !use_taa) {
+    // GSR 2 has its own images too (vk_gsr2): no portable FSR 3 context for it either.
+    if (!use_fsr4 && !use_taa && !use_gsr2) {
         if (const u64 issues = ffxVkPortableValidateUpscaleCreateInfo(&create_info)) {
             PrintIssues("create info", issues);
             return false;
@@ -519,6 +555,11 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     resources_ready = true;
     resources_fsr4 = use_fsr4;
     resources_taa = use_taa;
+    resources_gsr2 = use_gsr2;
+    if (use_gsr2) {
+        std::printf("EnsureResources: GSR 2 session done\n");
+        std::fflush(stdout);
+    }
     if (use_taa) {
         std::printf("TAA: context %ux%u -> %ux%u (%s), no FSR model\n", w, h, ow, oh,
                     hdr ? "HDR scene color" : "tonemapped frame");
@@ -732,7 +773,10 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
 void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w,
                                     u32 h) {
     const auto& settings = Gow3Settings::Get();
-    const float extra = std::clamp(settings.sharpness.load(), 0.0f, 2.0f) - 1.0f;
+    // AMD's RCAS (FSR 3/4) covers strength 0..1; GSR 2 has no RCAS of its own, so the menu's
+    // whole 0..2 range goes through this pass for it.
+    const float own = Gow3Settings::IsGsr2(settings.upscaler) ? 0.0f : 1.0f;
+    const float extra = std::clamp(settings.sharpness.load(), 0.0f, 2.0f) - own;
     if (!settings.sharpen || extra <= 0.0f) {
         return;
     }
@@ -1096,6 +1140,8 @@ void TemporalUpscaler::Run() {
             {input_color, input_color_view, color.info.pixel_format, vk::ImageAspectFlagBits::eColor, w, h},
             {input_depth, input_depth_view, depth_format, vk::ImageAspectFlagBits::eDepth, w, h}, w, h,
             ow, oh, frame_ms, true);
+    } else if (UseGsr2()) {
+        dispatched = RecordGsr2(cmdbuf, input_color_view, input_depth_view, w, h, ow, oh);
     } else {
         FfxVkPortableUpscaleDispatchInfo info{};
         info.structSize = sizeof(info);
@@ -1539,7 +1585,26 @@ void TemporalUpscaler::RunScaled() {
     const u32 iw = color.info.size.width, ih = color.info.size.height;
     const auto [w, h] = SceneSize(iw, ih);
     const u32 ow = target_width, oh = target_height;
+    if (Active()) {
+        // 排障：Temporal 帧入口（第一帧 + 每 600 帧）。冻点分析：有它无后续 = 夹在中间。
+        static u64 entries = 0;
+        if (entries < 3 || entries % 600 == 0) {
+            std::printf("RunScaled: enter #%llu (provider %s, scene %ux%u, target %ux%u -> %ux%u)\n",
+                        static_cast<unsigned long long>(entries),
+                        Gow3Settings::UpscalerName(Gow3Settings::Get().upscaler.load()),
+                        w, h, iw, ih, ow, oh);
+            std::fflush(stdout);
+        }
+        ++entries;
+    }
     if (depth.info.size.width != iw || depth.info.size.height != ih || w > ow || h > oh) {
+        // 排障：早退意味着本帧没有任何放大与呈现 blit（静默丢帧）。速率限制打印。
+        static u32 guard_trips = 0;
+        if (Active() && (guard_trips++ < 3 || guard_trips % 600 == 0)) {
+            std::printf("RunScaled: skipped frame (target %ux%u, scene %ux%u, depth %ux%u, output %ux%u)\n",
+                        iw, ih, w, h, depth.info.size.width, depth.info.size.height, ow, oh);
+            std::fflush(stdout);
+        }
         return;
     }
     if (!EnsureResources(w, h, ow, oh, false)) {
@@ -1616,7 +1681,8 @@ void TemporalUpscaler::RunScaled() {
     last_frame = now;
 
     // gow3: FSR 4 writes its HDR-format output, copied into the output-size UI image.
-    if (UseFsr4() || UseDlss() || Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) {
+    if (UseFsr4() || UseDlss() || UseGsr2() ||
+        Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) {
         barrier(vk::Image(output_image), vk::ImageAspectFlagBits::eColor,
                 vk::ImageLayout::eUndefined, all, vk::AccessFlagBits2::eNone,
                 vk::ImageLayout::eGeneral, all, rw);
@@ -1630,6 +1696,8 @@ void TemporalUpscaler::RunScaled() {
                              {depth_image, depth_view, depth_format, vk::ImageAspectFlagBits::eDepth,
                               source_width, source_height},
                              w, h, ow, oh, frame_ms, false);
+        } else if (UseGsr2()) {
+            ok4 = RecordGsr2(cmdbuf, color_view, depth_view, w, h, ow, oh);
         } else {
             ok4 = RecordFsr4(cmdbuf, {color_image, color_view, source_width, source_height},
                             {depth_image, depth_view, source_width, source_height}, w, h, ow,
@@ -1979,6 +2047,61 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
         fsr4_failed = true; // EnsureResources creates the FSR 3 context next frame
         reset = true;
     }
+    return ok;
+}
+
+bool TemporalUpscaler::UseGsr2() const {
+    return Gow3Settings::IsGsr2(Gow3Settings::Get().upscaler) && !gsr2_failed;
+}
+
+bool TemporalUpscaler::RecordGsr2(vk::CommandBuffer cmdbuf, vk::ImageView color,
+                                  vk::ImageView depth, u32 w, u32 h, u32 ow, u32 oh) {
+    static u64 dispatched = 0;
+    if (dispatched == 0) {
+        std::printf("Upscaler: GSR 2 first dispatch %ux%u -> %ux%u\n", w, h, ow, oh);
+    }
+    if (!gsr2) {
+        gsr2 = std::make_unique<GsrUpscaler>(instance, scheduler);
+    }
+    // Same jitter convention as FSR 3; toggle 1 << 26 flips it for tests.
+    const float sign = Gow3Toggle::Disabled(1u << 26) ? -1.0f : 1.0f;
+    const bool ok = gsr2->Record({
+        .cmdbuf = cmdbuf,
+        .color = color,
+        .depth = depth,
+        .motion = *motion_view,
+        .output = *output_view,
+        .render_width = w,
+        .render_height = h,
+        .output_width = ow,
+        .output_height = oh,
+        .jitter = {sign * jitter[0], sign * jitter[1]},
+        .vertical_fov = camera_motion.VerticalFov(),
+        .camera_still = camera_motion.CameraStill(),
+        .reset = reset,
+    });
+    if (!ok) {
+        // Android 的回落目标是 off（FSR 3.1 在该平台是玩家判定无效的路径）；桌面维持 FSR 3.1。
+        const bool android = [] {
+            const char* env = std::getenv("GOW3_ANDROID_INPUT");
+            return env && env[0];
+        }();
+        std::printf("Upscaler: GSR 2 failed; falling back to %s\n",
+                    android ? "off" : "FSR 3.1");
+        Gow3Settings::Get().upscaler =
+            android ? Gow3Settings::UpscalerOff : Gow3Settings::UpscalerFsr3;
+        gsr2_failed = true; // EnsureResources creates the FSR 3 context next frame (desktop)
+        reset = true;
+    } else {
+        // 录制完成的帧计数（排障：与「画面冻结」的时间点对照——录制停了 = 调用链问题；
+        // 录制继续而画面冻结 = GPU 侧挂起）。行缓冲下即时落盘。
+        ++dispatched;
+        if (dispatched == 1 || dispatched % 600 == 0) {
+            std::printf("Upscaler: GSR 2 recorded frame %llu\n",
+                        static_cast<unsigned long long>(dispatched));
+        }
+    }
+    std::fflush(stdout);
     return ok;
 }
 

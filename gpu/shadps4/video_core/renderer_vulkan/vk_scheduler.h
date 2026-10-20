@@ -24,6 +24,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
+#include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
 #include "vulkan/vulkan.hpp"
@@ -76,11 +77,23 @@ struct SubmitInfo {
     u32 num_signal_semas;
 
     void AddWait(vk::Semaphore semaphore, u64 tick = 1) {
+        // A null handle is not a valid VkSemaphore: it reaches vkQueueSubmit as an entry of
+        // pWaitSemaphores and the driver dereferences it (Adreno faults at vkQueueSubmit+0x102dc0,
+        // address 0x108). The AHB swapchain hands out a null acquire semaphore on the first use of
+        // a buffer - the one frame that needs no wait - so drop those instead of submitting them.
+        // Dropping keeps the arrays consistent: num_wait_semas does not grow, so wait_ticks and
+        // the timeline submit info's waitSemaphoreValueCount stay paired with the handles.
+        if (semaphore == vk::Semaphore{}) {
+            return;
+        }
         wait_semas[num_wait_semas] = semaphore;
         wait_ticks[num_wait_semas++] = tick;
     }
 
     void AddSignal(vk::Semaphore semaphore, u64 tick = 1) {
+        if (semaphore == vk::Semaphore{}) {
+            return;
+        }
         signal_semas[num_signal_semas] = semaphore;
         signal_ticks[num_signal_semas++] = tick;
     }
@@ -756,12 +769,34 @@ public:
             func(current_cmdbuf);
             return;
         }
-        if (!record_chunk->Push(std::forward<Func>(func))) {
-            full_chunks.push_back(std::move(record_chunk));
-            record_chunk = AcquireChunk();
-            const bool pushed = record_chunk->Push(std::forward<Func>(func));
+        if (!CurrentChunk().Push(std::forward<Func>(func))) {
+            RetireChunk();
+            const bool pushed = CurrentChunk().Push(std::forward<Func>(func));
             ASSERT(pushed);
         }
+    }
+
+    /// 移植自 Bloodborne-Android：Record() 的带 breadcrumbs 版本，给一条 draw、dispatch 或
+    /// 会跑着色器的 pass 在 GPU breadcrumbs 里登记（vk_breadcrumbs.h），GPU 挂死时指认它。
+    /// 注意 crumb 的 Note 在调用时机完成（与 Record 的入队同线程同序），func 可延迟执行。
+    template <typename Func>
+    void RecordCrumb(const Breadcrumbs::Crumb& crumb, Func&& func) {
+        if (!Breadcrumbs::Enabled()) {
+            Record(std::forward<Func>(func));
+            return;
+        }
+        const u32 id = Breadcrumbs::Note(crumb_stream, crumb);
+        Record([func = std::forward<Func>(func), stream = crumb_stream,
+                id](vk::CommandBuffer cmdbuf) mutable {
+            Breadcrumbs::Mark(cmdbuf, stream, id, false);
+            func(cmdbuf);
+            Breadcrumbs::Mark(cmdbuf, stream, id, true);
+        });
+    }
+
+    /// 本 scheduler 命令流的 breadcrumbs 流号（StreamCommands() 为关闭时的占位值）。
+    [[nodiscard]] u32 CrumbStream() const noexcept {
+        return crumb_stream;
     }
 
     /// True when Record() defers commands (and RecordData() copies into chunks).
@@ -777,9 +812,8 @@ public:
             return;
         }
         ASSERT(bytes + 1024 <= RecordChunk::Capacity);
-        if (RecordChunk::Capacity - record_chunk->Size() < bytes + 1024) {
-            full_chunks.push_back(std::move(record_chunk));
-            record_chunk = AcquireChunk();
+        if (RecordChunk::Capacity - CurrentChunk().Size() < bytes + 1024) {
+            RetireChunk();
         }
     }
 
@@ -793,7 +827,7 @@ public:
         // Room for the data and the command that follows it, so both stay in one chunk.
         const size_t bytes = data.size_bytes();
         ReserveRecordData(bytes + alignof(T));
-        auto* dst = static_cast<T*>(record_chunk->Allocate(bytes, alignof(T)));
+        auto* dst = static_cast<T*>(CurrentChunk().Allocate(bytes, alignof(T)));
         std::memcpy(dst, data.data(), bytes);
         return {dst, data.size()};
     }
@@ -903,6 +937,24 @@ private:
 
     std::unique_ptr<RecordChunk> AcquireChunk();
 
+    /// Returns the writable chunk. The replacement is installed before a chunk is handed over,
+    /// so recording never observes the transient null window that caused issue #100 upstream.
+    RecordChunk& CurrentChunk() {
+        if (!record_chunk) [[unlikely]] {
+            record_chunk = AcquireChunk();
+        }
+        return *record_chunk;
+    }
+
+    /// Moves the current chunk aside while keeping a writable chunk installed at all times.
+    void RetireChunk() {
+        auto full = AcquireChunk();
+        record_chunk.swap(full);
+        if (full) {
+            full_chunks.push_back(std::move(full));
+        }
+    }
+
     void RecorderThread(std::stop_token stoken);
 
     void SubmitExecution(SubmitInfo& info, bool async = false);
@@ -945,6 +997,8 @@ private:
     // gow3: threaded recording
     std::unique_ptr<RecordChunk> record_chunk;
     std::vector<std::unique_ptr<RecordChunk>> full_chunks;
+    // gow3: SignalAfterHostCopies 与等待路径都可能触发 KickRecording，保护 chunk 移交。
+    std::mutex kick_mutex;
     std::mutex recorder_mutex;
     std::condition_variable_any recorder_cv;
     std::condition_variable_any recorder_idle_cv;
@@ -954,6 +1008,7 @@ private:
     std::atomic<size_t> queued_chunks{0}; ///< recorder_queue.size() for lock-free polling
     bool recorder_sleeping = false; ///< waiting on recorder_cv (guarded by recorder_mutex)
     bool direct_mode = false; ///< the command buffer is recorded on the caller's thread
+    u32 crumb_stream{};       ///< GPU breadcrumbs stream of this command stream (vk_breadcrumbs.h)
     std::atomic<u64> host_copies_issued{0};
     std::atomic<u64> host_copies_done{0};
     std::atomic<u64> deferred_signals_issued{0}; ///< by the thread recording (A or B)

@@ -11,12 +11,16 @@
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "gow3_overlay.h"
 #include "gow3_settings.h"
 #include "gow3_graphics.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#ifdef __ANDROID__
+#include "gow3_lsfg.h" // 帧生成引擎宿主（change add-native-frame-generation）
+#endif
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
@@ -29,6 +33,7 @@
 #include <cmath>
 #include <csetjmp>
 #include <cstring>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -134,9 +139,16 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
                EmulatorSettings.IsVkCrashDiagnosticEnabled()},
       draw_scheduler{instance, true}, present_scheduler{instance}, flip_scheduler{instance},
-      swapchain{instance, window}, runtime{instance, draw_scheduler},
+      lsfg_requested{Gow3LsfgState::Initial()}, lsfg_watch{lsfg_requested},
+      lsfg{Lsfg::Create(instance, lsfg_requested)},
+      swapchain{instance, window, lsfg ? lsfg->Multiplier() : 0},
+      runtime{instance, draw_scheduler},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, runtime, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
+#ifdef __ANDROID__
+    // 防御：无论成员声明/初始化顺序如何，确保交换链的缓冲数与 FIFO 跟随帧生成配置。
+    ApplyLsfgOutputMode();
+#endif
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
 
@@ -274,6 +286,24 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     frame->is_hdr = swapchain.GetHDR();
 }
 
+// 等待 present 相关的 fence；超过 10 秒说明 GPU 无进展，先输出一次 breadcrumbs 卡死报告
+// （只打一次）再继续等，等待语义不变。device lost 时先给 breadcrumbs 出报告再返回错误。
+static vk::Result WaitPresentFence(vk::Device device, vk::Fence fence) {
+    vk::Result result{};
+    while (true) {
+        result = device.waitForFences(fence, vk::True, 10'000'000'000ull);
+        if (result == vk::Result::eTimeout) {
+            Breadcrumbs::ReportStuck("waiting for a frame");
+            continue;
+        }
+        break;
+    }
+    if (result == vk::Result::eErrorDeviceLost) {
+        Breadcrumbs::ReportDeviceLost("waiting for a frame");
+    }
+    return result;
+}
+
 Frame* Presenter::PrepareLastFrame() {
     if (last_submit_frame == nullptr) {
         return nullptr;
@@ -281,14 +311,20 @@ Frame* Presenter::PrepareLastFrame() {
 
     Frame* frame = last_submit_frame;
 
+    // 等待上一帧的 present fence；超过 10 秒说明 GPU 无进展，先输出一次 breadcrumbs
+    // 卡死报告再继续等（报告只打一次），等待语义不变。
     while (true) {
         vk::Result result = instance.GetDevice().waitForFences(frame->present_done, false,
-                                                               std::numeric_limits<u64>::max());
+                                                               10'000'000'000ull);
         if (result == vk::Result::eSuccess) {
             break;
         }
         if (result == vk::Result::eTimeout) {
+            Breadcrumbs::ReportStuck("waiting for a frame");
             continue;
+        }
+        if (result == vk::Result::eErrorDeviceLost) {
+            Breadcrumbs::ReportDeviceLost("waiting for a frame");
         }
         ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
                    "Device lost during waiting for a frame");
@@ -504,7 +540,12 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb ||
         (present_gamma_fix &&
          attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10);
-    pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
+    // GPU breadcrumbs: the post process pass (direct mode here, the closure runs at once).
+    draw_scheduler.RecordCrumb({.kind = Breadcrumbs::Kind::Pass, .name = "post process"},
+                               [&](vk::CommandBuffer rec_cmdbuf) {
+                                   pp_pass.Render(rec_cmdbuf, image_view, image_size, *frame,
+                                                  pp_settings);
+                               });
     if (frame_dump) {
         // The presented image as the swapchain blit reads it (General after the pass).
         const vk::MemoryBarrier2 done{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -618,6 +659,21 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     return frame;
 }
 
+namespace {
+// The AHB swapchain hands image ownership to the Android compositor across queue families
+// (VK_QUEUE_FAMILY_FOREIGN_EXT). Whether that is correct on a given driver is worth being able to
+// A/B without a rebuild: GOW3_AHB_OWNERSHIP=0 keeps the layout transition but leaves both queue
+// families IGNORED, which is what the WSI swapchain does. A GPU fault that disappears with it
+// points at the ownership transfer rather than at the game.
+bool AhbOwnershipEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_AHB_OWNERSHIP");
+        return !(value && *value && std::strcmp(value, "0") == 0);
+    }();
+    return enabled;
+}
+} // namespace
+
 void Presenter::PresentLoadingFrame() {
     if (window.GetWidth() == 0 || window.GetHeight() == 0) {
         return;
@@ -637,8 +693,13 @@ void Presenter::PresentLoadingFrame() {
         .levelCount = 1,
         .layerCount = VK_REMAINING_ARRAY_LAYERS,
     };
+    // Queue families default to IGNORED (a plain layout change inside this queue); the AHB
+    // swapchain passes the real pair so the image is actually handed over to / taken back from
+    // the Android compositor (VK_QUEUE_FAMILY_FOREIGN_EXT), which VK_EXT_queue_family_foreign
+    // provides and vk_instance.cpp enables.
     const auto barrier = [&](vk::ImageLayout from, vk::ImageLayout to, vk::AccessFlags src,
-                             vk::AccessFlags dst) {
+                             vk::AccessFlags dst, u32 src_family = VK_QUEUE_FAMILY_IGNORED,
+                             u32 dst_family = VK_QUEUE_FAMILY_IGNORED) {
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
                                vk::PipelineStageFlagBits::eAllCommands, {}, {}, {},
                                vk::ImageMemoryBarrier{
@@ -646,26 +707,67 @@ void Presenter::PresentLoadingFrame() {
                                    .dstAccessMask = dst,
                                    .oldLayout = from,
                                    .newLayout = to,
-                                   .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                   .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                   .srcQueueFamilyIndex = src_family,
+                                   .dstQueueFamilyIndex = dst_family,
                                    .image = image,
                                    .subresourceRange = range,
                                });
     };
-    barrier(vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, {},
-            vk::AccessFlagBits::eTransferWrite);
+    // Taking the image back from the app: it comes in PresentLayout(), owned by the FOREIGN queue
+    // family, and has to end up usable here - TransferDst for the loading frame's clear,
+    // ColorAttachmentOptimal for the frame that renders.
+    const auto acquire_from_app = [&](vk::ImageLayout to) {
+        const auto [src_family, dst_family] = AhbOwnershipEnabled() ? swapchain.AcquireQueues()
+                                                                   : std::pair<u32, u32>{
+                                                                         VK_QUEUE_FAMILY_IGNORED,
+                                                                         VK_QUEUE_FAMILY_IGNORED};
+        barrier(swapchain.PresentLayout(), to, vk::AccessFlagBits::eNone,
+                vk::AccessFlagBits::eColorAttachmentWrite, src_family, dst_family);
+    };
+    // Handing the finished image over: layout and ownership both change, so the app's compositor
+    // sees it as SHARED and waits on the present-ready fence.
+    const auto release_to_app = [&] {
+        const auto [src_family, dst_family] = AhbOwnershipEnabled() ? swapchain.ReleaseQueues()
+                                                                   : std::pair<u32, u32>{
+                                                                         VK_QUEUE_FAMILY_IGNORED,
+                                                                         VK_QUEUE_FAMILY_IGNORED};
+        barrier(vk::ImageLayout::eColorAttachmentOptimal, swapchain.PresentLayout(),
+                vk::AccessFlagBits::eColorAttachmentWrite, vk::AccessFlagBits::eNone, src_family,
+                dst_family);
+    };
+    acquire_from_app(vk::ImageLayout::eTransferDstOptimal);
     cmdbuf.clearColorImage(image, vk::ImageLayout::eTransferDstOptimal,
                            vk::ClearColorValue{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}},
                            range);
     barrier(vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eColorAttachmentOptimal,
             vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eColorAttachmentWrite);
-    Gow3Overlay::Render(cmdbuf, swapchain.ImageView(), extent);
-    barrier(vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::ePresentSrcKHR,
-            vk::AccessFlagBits::eColorAttachmentWrite, {});
+    // GPU breadcrumbs：登记 overlay pass（present_scheduler 非线程化，闭包立即执行）。
+    present_scheduler.RecordCrumb({.kind = Breadcrumbs::Kind::Pass, .name = "overlay"},
+                                  [&](vk::CommandBuffer rec_cmdbuf) {
+                                      Gow3Overlay::Render(rec_cmdbuf, swapchain.ImageView(),
+                                                          extent);
+                                  });
+    release_to_app();
     SubmitInfo info{};
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddSignal(swapchain.GetPresentReadySemaphore());
+    // Same reason as in Present(): the AHB export in Swapchain::Present() needs the present-ready
+    // signal to be no longer pending, so give the submission a fence and wait on it below.
+    vk::Fence present_fence;
+    if (swapchain.NeedsSubmittedBeforePresent()) {
+        auto [fence_result, fence] = instance.GetDevice().createFence({});
+        ASSERT_MSG(fence_result == vk::Result::eSuccess, "Loading frame fence creation failed: {}",
+                   vk::to_string(fence_result));
+        present_fence = fence;
+        info.AddSignal(present_fence);
+    }
     present_scheduler.Flush(info);
+    if (present_fence) {
+        const auto waited = WaitPresentFence(instance.GetDevice(), present_fence);
+        instance.GetDevice().destroyFence(present_fence, nullptr);
+        ASSERT_MSG(waited == vk::Result::eSuccess,
+                   "Waiting before the AHB present export failed: {}", vk::to_string(waited));
+    }
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
         swapchain.Present();
@@ -692,11 +794,35 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         return;
     }
 
+#ifdef __ANDROID__
+    // 帧生成：app 侧设置变更在两帧之间应用（BB 同位）。
+    PollLsfgState();
+#endif
+
     // Recreate the swapchain if the window was resized.
     swapchain.UpdateVsync();
     if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
+
+#ifdef __ANDROID__
+    // 帧生成（gow3_lsfg.h）：先交生成帧，再交真实帧。仅接受与输出同尺寸的游戏帧
+    // （首帧在输出尺寸已知前生成的不算：上下文按该尺寸建一次）。
+    if (lsfg && is_game_frame && !is_reusing_frame) {
+        const vk::Extent2D extent = swapchain.GetExtent();
+        SetExpectedGameSize(s32(extent.width), s32(extent.height));
+        if (frame->width == expected_frame_width && frame->height == expected_frame_height &&
+            PresentWithLsfg(frame)) {
+            free_frame();
+            DebugState.IncFlipFrameNum();
+            return;
+        }
+        if (!lsfg) {
+            ApplyLsfgOutputMode(); // 引擎失败关闭：恢复正常缓冲数与呈现模式
+        }
+    }
+#endif
+
 
     if (!swapchain.AcquireNextImage()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
@@ -736,14 +862,22 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             .baseArrayLayer = 0,
             .layerCount = VK_REMAINING_ARRAY_LAYERS,
         };
+        // The swapchain image comes back from its consumer before this frame: on the AHB path the
+        // app's compositor left it in PresentLayout() and owns it in the FOREIGN queue family, so
+        // take it here (layout and ownership). A VkSwapchainKHR hands out a fresh image instead,
+        // and its AcquireQueues/PresentLayout answer with IGNORED / ePresentSrcKHR.
+        const auto [acquire_src, acquire_dst] = AhbOwnershipEnabled()
+                                                 ? swapchain.AcquireQueues()
+                                                 : std::pair<u32, u32>{VK_QUEUE_FAMILY_IGNORED,
+                                                                       VK_QUEUE_FAMILY_IGNORED};
         const std::array pre_barriers{
             vk::ImageMemoryBarrier{
                 .srcAccessMask = vk::AccessFlagBits::eNone,
                 .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-                .oldLayout = vk::ImageLayout::eUndefined,
+                .oldLayout = swapchain.PresentLayout(),
                 .newLayout = vk::ImageLayout::eTransferDstOptimal,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .srcQueueFamilyIndex = acquire_src,
+                .dstQueueFamilyIndex = acquire_dst,
                 .image = swapchain_image,
                 .subresourceRange = color_range,
             },
@@ -783,7 +917,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                          : vk::AccessFlagBits::eNone,
                 .oldLayout = vk::ImageLayout::eTransferDstOptimal,
                 .newLayout = overlay ? vk::ImageLayout::eColorAttachmentOptimal
-                                     : vk::ImageLayout::ePresentSrcKHR,
+                                     : swapchain.PresentLayout(),
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .image = swapchain_image,
@@ -804,20 +938,51 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                vk::PipelineStageFlagBits::eAllCommands,
                                vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
         if (overlay) {
-            Gow3Overlay::Render(cmdbuf, swapchain.ImageView(), extent);
+            // GPU breadcrumbs：登记 overlay pass（present_scheduler 非线程化，闭包立即执行）。
+            present_scheduler.RecordCrumb({.kind = Breadcrumbs::Kind::Pass, .name = "overlay"},
+                                          [&](vk::CommandBuffer rec_cmdbuf) {
+                                              Gow3Overlay::Render(rec_cmdbuf,
+                                                                  swapchain.ImageView(), extent);
+                                          });
+            const auto [release_src, release_dst] = AhbOwnershipEnabled()
+                                                      ? swapchain.ReleaseQueues()
+                                                      : std::pair<u32, u32>{VK_QUEUE_FAMILY_IGNORED,
+                                                                        VK_QUEUE_FAMILY_IGNORED};
             const vk::ImageMemoryBarrier to_present{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eNone,
                 .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
-                .newLayout = vk::ImageLayout::ePresentSrcKHR,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .newLayout = swapchain.PresentLayout(),
+                .srcQueueFamilyIndex = release_src,
+                .dstQueueFamilyIndex = release_dst,
                 .image = swapchain_image,
                 .subresourceRange = color_range,
             };
             cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
                                    vk::PipelineStageFlagBits::eBottomOfPipe,
                                    vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
+        } else {
+            // Without the overlay the post barrier above already left the image in
+            // PresentLayout(), but it did not hand ownership over. On the AHB path the image has
+            // to be owned by the FOREIGN queue family before the app's compositor uses it, and a
+            // queue-family release needs its own barrier (a release is always a separate write
+            // after the layout change above).
+            const auto [release_src, release_dst] = swapchain.ReleaseQueues();
+            if (release_src != release_dst) {
+                const vk::ImageMemoryBarrier hand_over{
+                    .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                    .dstAccessMask = vk::AccessFlagBits::eNone,
+                    .oldLayout = swapchain.PresentLayout(),
+                    .newLayout = swapchain.PresentLayout(),
+                    .srcQueueFamilyIndex = release_src,
+                    .dstQueueFamilyIndex = release_dst,
+                    .image = swapchain_image,
+                    .subresourceRange = color_range,
+                };
+                cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                                       vk::PipelineStageFlagBits::eAllCommands,
+                                       vk::DependencyFlagBits::eByRegion, {}, {}, hand_over);
+            }
         }
     }
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
@@ -832,6 +997,42 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     scheduler.Flush(info);
+    // gow3: the AHB swapchain exports the present-ready semaphore as a sync file in Present()
+    // (vkGetSemaphoreFdKHR). Vulkan requires an exported semaphore to not be in use by the GPU,
+    // and right after Flush() its signal is still pending - exporting it there is a spec violation,
+    // and the Adreno driver answers it by losing the device (VK_ERROR_DEVICE_LOST on the next
+    // submit). The submission above signals frame->present_done, so wait for it here. A
+    // VkSwapchainKHR needs none of this, hence the swapchain's own answer.
+    if (swapchain.NeedsSubmittedBeforePresent()) {
+        const auto waited = WaitPresentFence(instance.GetDevice(), frame->present_done);
+        ASSERT_MSG(waited == vk::Result::eSuccess, "Waiting before the AHB present export failed: {}",
+                   vk::to_string(waited));
+    }
+    // gow3：vkQueuePresentKHR 处的 Vulkan layer（Lossless Scaling 插帧，GOW3_LSFG，由 run-gow3.sh
+    // 配合玩家自备的 Lossless.dll 加载 lsfg-vk）会等待上面这次提交所 signal 的 present-ready
+    // 信号量。GOW3 有意不在应用侧为它加等待：
+    //   * Flush(info) -> SubmitExecution -> vkQueueSubmit 已经在本线程执行完（它持有 submit_mutex
+    //     并等提交返回后才继续），所以提交及其 present-ready 信号在下面 Present() 之前就已进入队列；
+    //   * vkQueuePresentKHR 在同一队列上排在其后，layer 对 present-ready 的等待由队列顺序满足，
+    //     而不是靠 GPU 已经画完。
+    // Bloodborne 的 present 路径之所以调 scheduler.WaitSubmitted(tick)，是因为它的 recording 线程
+    // 是异步提交（BB_ASYNC_SUBMIT），layer 可能在提交进入队列前就抢到 present；GOW3 在本线程同步
+    // 提交，因此这个保护不需要——而且 gow3 的无参 WaitSubmitted() 是「GPU 完成等待」（Wait(tick-1)），
+    // 会在每帧无谓地卡住流水线。
+    // （A/B 验证见 docs / OpenSpec harden-gow3-lsfg-integration 任务 5.3：LSFG 开启时不得在 present 前等 GPU 完成。）
+    static const bool present_layer = std::getenv("GOW3_LSFG") != nullptr;
+    // 只打一次，且线程安全：用局部静态初始化（C++11 起 magic static 的初始化是原子的）做一次性
+    // 日志，避免可变 static bool 在多线程 Flip（GOW3_PRESENT_THREAD=0 时 RunPresenter 直接在工作
+    // 线程执行）并发进入 Present() 时的 data race（见 4.4 复评）。
+    static const bool present_layer_logged_once = [] {
+        // present_layer 是静态存储期的局部变量，lambda 直接引用即可，无需捕获。
+        LOG_INFO(Render_Vulkan,
+                 "gow3: LSFG present path: {} (GOW3_LSFG={}); no app-side WaitSubmitted "
+                 "(submission is already queued by Flush)",
+                 present_layer ? "ENABLED" : "off", present_layer ? "1" : "(unset)");
+        return true;
+    }();
+    (void)present_layer_logged_once;
 
     // Present to swapchain.
     {
@@ -847,12 +1048,381 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     }
 }
 
+
+#ifdef __ANDROID__
+// ---- 帧生成（change add-native-frame-generation；结构对齐 BB，适配 gow3 的单体 Present）----
+
+void Presenter::PollLsfgState() {
+    Gow3LsfgState::State next;
+    if (!lsfg_watch.Poll(next)) {
+        WriteLsfgStats();
+        return; // 无变化
+    }
+    if (next == lsfg_requested && (lsfg || !next.On())) {
+        WriteLsfgStats();
+        return; // 状态没变（或引擎该在而不在的请求已应用过）
+    }
+    ApplyLsfgState(next);
+}
+
+void Presenter::WriteLsfgStats() {
+    const char* state_path = Gow3LsfgState::FilePath();
+    if (!state_path || !*state_path) return; // env 未设（env-only 运行）：无遥测
+    const auto now = std::chrono::steady_clock::now();
+    const bool active = lsfg != nullptr;
+    if (active) {
+        if (now - lsfg_stats_ts < std::chrono::seconds(1)) return;
+        lsfg_stats_ts = now;
+        double src = 0, pres = 0;
+        if (!lsfg->Rates(&src, &pres)) return; // 首窗未满：下个周期再写
+        std::string path = state_path;
+        path = path.substr(0, path.rfind('/') + 1) + "framegen.stats"; // 与 app 侧 FrameGenSettings.STATS_FILE_NAME 一致
+        std::string tmp = path + ".tmp";
+        std::FILE* f = std::fopen(tmp.c_str(), "w");
+        if (!f) return;
+        std::fprintf(f, "source_fps=%.1f\npresented_fps=%.1f\nmultiplier=%u\n",
+                     src, pres, lsfg->Multiplier());
+        std::fclose(f);
+        std::rename(tmp.c_str(), path.c_str());
+        lsfg_stats_active = true;
+        lsfg_stats_cleared = false; // 引擎激活：下次关闭需再清一次
+    } else if (!lsfg_stats_cleared) {
+        // 关闭/引擎失败/从未激活：清零一次，HUD 回单一帧率（spec 语义）。不依赖本会话
+        // 是否曾激活——上一会话残留的 framegen.stats（倍率≥2）也必须在此被清掉，
+        // 否则 HUD 会把它当成实时插帧遥测显示「LSFG Nx」。
+        std::string path = state_path;
+        path = path.substr(0, path.rfind('/') + 1) + "framegen.stats";
+        std::string tmp = path + ".tmp";
+        std::FILE* f = std::fopen(tmp.c_str(), "w");
+        if (!f) return;
+        std::fprintf(f, "source_fps=0\npresented_fps=0\nmultiplier=0\n");
+        std::fclose(f);
+        std::rename(tmp.c_str(), path.c_str());
+        lsfg_stats_active = false;
+        lsfg_stats_cleared = true; // 本会话只清一次：之后每帧只有布尔判断，无 I/O
+    }
+}
+
+void Presenter::ApplyLsfgState(const Gow3LsfgState::State& next) {
+    lsfg_requested = next;
+    // 帧边界：本函数跑在 present 线程两帧之间，没有循环持有的缓冲。引擎的 flow
+    // scale/模型/生成帧数在启动时固定——任何“开”态变化都是重建 Lsfg：旧的等最后
+    // 一批完成并析构，新的在下一个真实帧建上下文（头几帧只填时域历史）。
+    lsfg.reset();
+    if (next.On()) {
+        lsfg = Lsfg::Create(instance, next);
+    }
+    // 交换链跟随实际运行的东西：倍率决定缓冲数，帧生成要求 FIFO——仅在开启时。
+    ApplyLsfgOutputMode();
+    if (lsfg) {
+        LOG_INFO(Render_Vulkan, "LSFG: now x{}, flow {:.2f}, performance {}, fp16 {}",
+                 next.multiplier, next.flow, next.performance ? 1 : 0, next.fp16 ? 1 : 0);
+    } else {
+        LOG_INFO(Render_Vulkan, "LSFG: off");
+    }
+}
+
+void Presenter::ApplyLsfgOutputMode() {
+    swapchain.SetFrameGeneration(lsfg ? lsfg->Multiplier() : 0);
+    ApplyFramesCap();
+}
+
+void Presenter::ApplyFramesCap() {
+    frames_cap.store(lsfg ? lsfg->FramesCap() : 0, std::memory_order_relaxed);
+    free_cv.notify_all();
+}
+
+bool Presenter::PresentWithLsfg(Frame* frame) {
+    // 本路径同样 AddSignal(frame->present_done)：先 reset（普通路径在 Present 里做，
+    // LSFG 分支在它之前 return），否则第二次提交起 fence 恒 signaled，
+    // NeedsSubmittedBeforePresent 的提交完成闸被架空。
+    const auto reset_result = instance.GetDevice().resetFences(frame->present_done);
+    ASSERT_MSG(reset_result == vk::Result::eSuccess,
+               "Unexpected error resetting present done fence: {}", vk::to_string(reset_result));
+    using Clock = std::chrono::steady_clock;
+    // gow3：Flush 在本线程同步提交（vkQueueSubmit 返回后才返回），无需 BB 的
+    // WaitSubmitted(tick) 守卫（其 recording 线程异步提交才有此需求；gow3 的无参
+    // WaitSubmitted 是 GPU 完成等待，会无谓卡流水线——见 vk_presenter 旧注释）。
+    const int generated =
+        lsfg->ProcessFrame(present_scheduler, frame->image, frame->width, frame->height,
+                           frame->ready_semaphore, frame->ready_tick);
+    if (generated < 0) {
+        lsfg.reset(); // 本次运行内关闭（日志有原因）：本帧走常规路径
+        return false;
+    }
+    // 每帧一次性全部入队，各写各的缓冲：生成帧按序，然后真实帧。只有交付给 app
+    // 的节奏被拉开。
+    const u32 buffer_set = swapchain.Generation();
+    const auto base = Clock::now(); // 突发交付的节拍起点
+    u32 handed = 0;
+    for (int i = 0; i < generated; ++i) {
+        const Lsfg::Output& output = lsfg->GetOutput(i);
+        // 生成帧来自外部（EXTERNAL）队列族、GENERAL 布局：blit 进交换链缓冲时按
+        // 外部来源取所有权，并等待该帧的 sync file（经 AddWait 的时间线信号量）。
+        if (!swapchain.AcquireNextImage()) {
+            break; // 没有缓冲：本循环其余生成帧不显示
+        }
+        const vk::Image dst = swapchain.Image();
+        const vk::Extent2D extent = swapchain.GetExtent();
+        auto& scheduler = present_scheduler;
+        const auto cmdbuf = scheduler.CommandBuffer();
+        const vk::ImageSubresourceRange color_range{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        };
+        const auto [acquire_src, acquire_dst] = swapchain.AcquireQueues();
+        // 引擎输出图的所有权在 VK_QUEUE_FAMILY_EXTERNAL（引擎侧交接，见 gow3_lsfg.cpp）；
+        // FOREIGN 是 app↔game 的 AHB 交接语义，别混用。
+        const std::array pre_barriers{
+            vk::ImageMemoryBarrier{
+                .srcAccessMask = vk::AccessFlagBits::eNone,
+                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+                .oldLayout = swapchain.PresentLayout(),
+                .newLayout = vk::ImageLayout::eTransferDstOptimal,
+                .srcQueueFamilyIndex = acquire_src,
+                .dstQueueFamilyIndex = acquire_dst,
+                .image = dst,
+                .subresourceRange = color_range,
+            },
+            vk::ImageMemoryBarrier{
+                .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+                .oldLayout = vk::ImageLayout::eGeneral,
+                .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+                .dstQueueFamilyIndex = instance.GetGraphicsQueueFamilyIndex(),
+                .image = output.image,
+                .subresourceRange = color_range,
+            },
+        };
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                               vk::PipelineStageFlagBits::eTransfer,
+                               vk::DependencyFlagBits::eByRegion, {}, {}, pre_barriers);
+        cmdbuf.blitImage(output.image, vk::ImageLayout::eTransferSrcOptimal, dst,
+                         vk::ImageLayout::eTransferDstOptimal,
+                         MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
+                         vk::Filter::eLinear);
+        const auto [release_src, release_dst] = swapchain.ReleaseQueues();
+        const vk::ImageMemoryBarrier to_present{
+            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .dstAccessMask = vk::AccessFlagBits::eNone,
+            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+            .newLayout = swapchain.PresentLayout(),
+            .srcQueueFamilyIndex = release_src,
+            .dstQueueFamilyIndex = release_dst,
+            .image = dst,
+            .subresourceRange = color_range,
+        };
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                               vk::PipelineStageFlagBits::eBottomOfPipe,
+                               vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
+        // 输出图所有权交回 EXTERNAL（引擎下一周期要用）。
+        const vk::ImageMemoryBarrier output_release{
+            .srcAccessMask = vk::AccessFlagBits::eTransferRead,
+            .dstAccessMask = vk::AccessFlagBits::eNone,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .srcQueueFamilyIndex = instance.GetGraphicsQueueFamilyIndex(),
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+            .image = output.image,
+            .subresourceRange = color_range,
+        };
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                               vk::PipelineStageFlagBits::eBottomOfPipe,
+                               vk::DependencyFlagBits::eByRegion, {}, {}, output_release);
+        // 交付节奏：第一个生成帧立即上，后续生成帧按 spacing 依次拉开（真实帧最后）。
+        // 放在 present 之前而非循环末尾——睡在交付前只影响展示节拍；堆在末尾会
+        // 在 frames_cap 下白白压低源帧率。
+        if (lsfg->Paced() && i > 0) {
+            const double spacing_ms =
+                std::clamp(lsfg->FrameIntervalMs() / double(generated + 1), 2.0, 60.0);
+            std::this_thread::sleep_until(base + std::chrono::microseconds(
+                                                        s64(spacing_ms * 1000.0 * u64(i))));
+        }
+        SubmitInfo info{};
+        // app 的 release fence（导入为本缓冲的 acquire 信号量）：合成器可能仍在读
+        // 该缓冲——不等待就是覆写竞态。null（首用无 fence）被 AddWait 丢弃。
+        info.AddWait(swapchain.GetImageAcquiredSemaphore());
+        if (output.wait) {
+            info.AddWait(output.wait);
+        }
+        info.AddSignal(swapchain.GetPresentReadySemaphore());
+        if (output.done) {
+            info.AddSignal(output.done);
+        }
+        scheduler.Flush(info);
+        lsfg->OutputSubmitted(u32(i), scheduler.CurrentTick());
+        {
+            std::scoped_lock submit_lock{Scheduler::submit_mutex};
+            swapchain.Present(); // 交给 app（该缓冲被扣住直到 RELEASE）
+        }
+        ++handed;
+    }
+    // 真实帧：走常规 blit 路径进它已 acquire 的缓冲（Present() 主体的剩余部分在此
+    // 不可复用——它已过 acquire 点，因此这里把真实帧也按同一路径交付）。
+    if (!swapchain.AcquireNextImage()) {
+        return true; // 没有缓冲给真实帧：本循环只上生成帧（罕见：缓冲数为倍率+3）
+    }
+    {
+        const vk::Image dst = swapchain.Image();
+        const vk::Extent2D extent = swapchain.GetExtent();
+        auto& scheduler = present_scheduler;
+        const auto cmdbuf = scheduler.CommandBuffer();
+        const vk::ImageSubresourceRange color_range{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        };
+        const auto [acquire_src, acquire_dst] = swapchain.AcquireQueues();
+        const std::array pre_barriers{
+            vk::ImageMemoryBarrier{
+                .srcAccessMask = vk::AccessFlagBits::eNone,
+                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+                .oldLayout = swapchain.PresentLayout(),
+                .newLayout = vk::ImageLayout::eTransferDstOptimal,
+                .srcQueueFamilyIndex = acquire_src,
+                .dstQueueFamilyIndex = acquire_dst,
+                .image = dst,
+                .subresourceRange = color_range,
+            },
+            vk::ImageMemoryBarrier{
+                .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+                .oldLayout = vk::ImageLayout::eGeneral,
+                .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = frame->image,
+                .subresourceRange = color_range,
+            },
+        };
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                               vk::PipelineStageFlagBits::eTransfer,
+                               vk::DependencyFlagBits::eByRegion, {}, {}, pre_barriers);
+        const vk::ClearColorValue black{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}};
+        cmdbuf.clearColorImage(dst, vk::ImageLayout::eTransferDstOptimal, black, color_range);
+        const vk::MemoryBarrier clear_done{
+            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+        };
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                               vk::PipelineStageFlagBits::eTransfer,
+                               vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
+        cmdbuf.blitImage(frame->image, vk::ImageLayout::eTransferSrcOptimal, dst,
+                         vk::ImageLayout::eTransferDstOptimal,
+                         MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
+                         vk::Filter::eLinear);
+        // 游戏内设置菜单叠加层与直通路径一致（显示分辨率）。
+        const bool overlay = Gow3Overlay::Visible();
+        const std::array post_barriers{
+            vk::ImageMemoryBarrier{
+                .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                .dstAccessMask = overlay ? vk::AccessFlagBits::eColorAttachmentRead |
+                                               vk::AccessFlagBits::eColorAttachmentWrite
+                                         : vk::AccessFlagBits::eNone,
+                .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+                .newLayout = overlay ? vk::ImageLayout::eColorAttachmentOptimal
+                                     : swapchain.PresentLayout(),
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = dst,
+                .subresourceRange = color_range,
+            },
+            vk::ImageMemoryBarrier{
+                .srcAccessMask = vk::AccessFlagBits::eTransferRead,
+                .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
+                .newLayout = vk::ImageLayout::eGeneral,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = frame->image,
+                .subresourceRange = color_range,
+            },
+        };
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                               vk::PipelineStageFlagBits::eAllCommands,
+                               vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
+        if (overlay) {
+            // GPU breadcrumbs：登记 overlay pass（present_scheduler 非线程化，闭包立即执行）。
+            present_scheduler.RecordCrumb({.kind = Breadcrumbs::Kind::Pass, .name = "overlay"},
+                                          [&](vk::CommandBuffer rec_cmdbuf) {
+                                              Gow3Overlay::Render(rec_cmdbuf,
+                                                                  swapchain.ImageView(), extent);
+                                          });
+            const auto [release_src, release_dst] = swapchain.ReleaseQueues();
+            const vk::ImageMemoryBarrier to_present{
+                .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                .dstAccessMask = vk::AccessFlagBits::eNone,
+                .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                .newLayout = swapchain.PresentLayout(),
+                .srcQueueFamilyIndex = release_src,
+                .dstQueueFamilyIndex = release_dst,
+                .image = dst,
+                .subresourceRange = color_range,
+            };
+            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                   vk::PipelineStageFlagBits::eBottomOfPipe,
+                                   vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
+        } else {
+            const auto [release_src, release_dst] = swapchain.ReleaseQueues();
+            if (release_src != release_dst) {
+                const vk::ImageMemoryBarrier hand_over{
+                    .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                    .dstAccessMask = vk::AccessFlagBits::eNone,
+                    .oldLayout = swapchain.PresentLayout(),
+                    .newLayout = swapchain.PresentLayout(),
+                    .srcQueueFamilyIndex = release_src,
+                    .dstQueueFamilyIndex = release_dst,
+                    .image = dst,
+                    .subresourceRange = color_range,
+                };
+                cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                                       vk::PipelineStageFlagBits::eAllCommands,
+                                       vk::DependencyFlagBits::eByRegion, {}, {}, hand_over);
+            }
+        }
+        SubmitInfo info{};
+        info.AddWait(swapchain.GetImageAcquiredSemaphore());
+        info.AddWait(frame->ready_semaphore, frame->ready_tick);
+        info.AddSignal(swapchain.GetPresentReadySemaphore());
+        info.AddSignal(frame->present_done);
+        scheduler.Flush(info);
+        if (swapchain.NeedsSubmittedBeforePresent()) {
+            const auto waited = WaitPresentFence(instance.GetDevice(), frame->present_done);
+            ASSERT_MSG(waited == vk::Result::eSuccess,
+                       "Waiting before the AHB present export failed: {}", vk::to_string(waited));
+        }
+        swapchain.Present();
+        ++handed;
+    }
+    if (swapchain.Generation() != buffer_set) {
+        return true; // 中途缓冲换代：本循环已交付的帧随旧代作废
+    }
+    return true;
+}
+#endif // __ANDROID__
+
+
 Frame* Presenter::GetRenderFrame() {
     // Wait for free presentation frames
     Frame* frame;
     {
         std::unique_lock lock{free_mutex};
+#ifdef __ANDROID__
+        // 帧生成开启时，游戏帧还要等 frames_cap 之外没有未呈现帧：present 线程每帧
+        // 做的事更多，排队给它的帧就是延迟（BB 同语义）。
+        free_cv.wait(lock, [this] {
+            const u32 cap = frames_cap.load(std::memory_order_relaxed);
+            return !free_queue.empty() && (cap == 0 || present_frames.size() - free_queue.size() < cap);
+        });
+#else
         free_cv.wait(lock, [this] { return !free_queue.empty(); });
+#endif
         LOG_DEBUG(Render_Vulkan, "Got render frame, remaining {}", free_queue.size() - 1);
 
         // Take the frame from the queue
@@ -864,7 +1434,7 @@ Frame* Presenter::GetRenderFrame() {
     vk::Result result{};
 
     const auto wait = [&]() {
-        result = device.waitForFences(frame->present_done, false, std::numeric_limits<u64>::max());
+        result = WaitPresentFence(device, frame->present_done);
         return result;
     };
 

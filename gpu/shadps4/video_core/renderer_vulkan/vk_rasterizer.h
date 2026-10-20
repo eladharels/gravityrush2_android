@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_predication.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -30,7 +31,15 @@ class MemoryManager;
 namespace Vulkan {
 
 class GraphicsPipeline;
+class IndirectGuard;
 class Runtime;
+
+/// gow3: predicate state captured on the packet thread and handed to the recording thread (see
+/// vk_predication.h). The predicate value itself lives on the recording thread (the draw pipe
+/// is its only producer), so only the packet's predicate bit travels with the draw.
+struct DrawPredication {
+    bool predicated{};
+};
 
 class Rasterizer {
 public:
@@ -208,6 +217,10 @@ public:
         return pipeline_cache;
     }
 
+    PredicationManager& GetPredication() {
+        return predication;
+    }
+
     template <typename Func>
     void ForEachMappedRangeInRange(VAddr addr, u64 size, Func&& func) {
         const auto range = decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
@@ -271,7 +284,7 @@ private:
     bool FilterDrawPasses() const;
     /// Everything of a direct draw after the pipeline selection (GPU thread or stage B).
     void DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
-                    bool is_indexed, u32 index_offset);
+                    bool is_indexed, u32 index_offset, const DrawPredication& pred);
     static bool DrawPipeWanted();
     bool UseDrawPipe() const;
     bool OnStageA() const;
@@ -286,15 +299,17 @@ private:
     void DumpOnDraw(const GraphicsPipeline* pipeline);
     void SamplerLog(const GraphicsPipeline* pipeline);
     void DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_indexed,
-                            const IndirectDraw& indirect);
+                            const IndirectDraw& indirect, const DrawPredication& pred);
     /// Everything of an indirect dispatch after the pipeline selection.
-    void DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr args, u32 size);
+    void DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr args, u32 size,
+                                const DrawPredication& pred);
     /// Hands a draw (or, with `cs`, a dispatch) to the recording thread.
     void PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared, bool is_indexed,
-                  u32 index_offset, const AmdGpu::ComputeProgram* cs = nullptr,
+                  u32 index_offset, const DrawPredication& pred,
+                  const AmdGpu::ComputeProgram* cs = nullptr,
                   const IndirectDraw* indirect = nullptr);
     /// Everything of a direct dispatch after the pipeline selection (GPU thread or stage B).
-    void DispatchRecord(const ComputePipeline* pipeline);
+    void DispatchRecord(const ComputePipeline* pipeline, const DrawPredication& pred);
     /// The compute registers of the dispatch being recorded.
     const AmdGpu::ComputeProgram& CsRegs() const;
     static void RunDrawPacket(void* rasterizer, const u8* packet, u32 size);
@@ -391,6 +406,7 @@ private:
     boost::icl::interval_set<VAddr> mapped_ranges;
     Common::SharedFirstMutex mapped_ranges_mutex;
     PipelineCache pipeline_cache;
+    PredicationManager predication;
     std::unique_ptr<DrawPreparation> draw_prep;
     std::unique_ptr<CameraMotion> camera_motion; // gow3: motion vectors (docs/upscaler.md)
     std::unique_ptr<SceneTargets> scene_targets;
@@ -635,6 +651,8 @@ private:
     u32 eager_packets = 0;
     u64 eager_last_tsc = 0;
     std::atomic<u64> eager_cuts{0};
+    /// indirect dispatch 的 GPU 侧 group counts 校验（vk_indirect_guard.h），首次用到时创建。
+    std::unique_ptr<IndirectGuard> indirect_guard;
 };
 
 } // namespace Vulkan

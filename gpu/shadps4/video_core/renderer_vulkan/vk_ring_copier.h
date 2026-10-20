@@ -19,7 +19,7 @@
 #include <cstdlib>
 #include <memory>
 #include <thread>
-#include <x86intrin.h>
+#include "common/rdtsc.h"
 
 #include "common/thread.h"
 #include "common/types.h"
@@ -102,7 +102,7 @@ public:
             return;
         }
         while (head >= Capacity && !IsDone(head - Capacity + 1)) {
-            __builtin_ia32_pause();
+            COMMON_CPU_RELAX();
         }
         jobs[head % Capacity] = {address, dst, size, offset};
         ++head;
@@ -138,21 +138,21 @@ public:
         if (IsDone(seq)) {
             return;
         }
-        const u64 start = __rdtsc();
+        const u64 start = Common::RawRDTSC();
         if (steal) {
             // Run the copies this wait needs; when they are all claimed, wait for the others.
             u64 copied = 0;
             u64 copy_cycles = 0;
             for (u32 spins = 0; !IsDone(seq);) {
-                const u64 c0 = __rdtsc();
+                const u64 c0 = Common::RawRDTSC();
                 if (const u64 n = Claim(seq); n != NoJob) {
                     RunJob(n);
-                    copy_cycles += __rdtsc() - c0;
+                    copy_cycles += Common::RawRDTSC() - c0;
                     ++copied;
                     continue;
                 }
                 if (spins++ < 4096) {
-                    __builtin_ia32_pause();
+                    COMMON_CPU_RELAX();
                 } else {
                     std::this_thread::yield();
                 }
@@ -161,18 +161,18 @@ public:
             (stage_b ? b_copy_cycles : a_copy_cycles)
                 .fetch_add(copy_cycles, std::memory_order_relaxed);
             (stage_b ? b_wait_cycles : wait_cycles)
-                .fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+                .fetch_add(Common::RawRDTSC() - start, std::memory_order_relaxed);
             (stage_b ? b_waits : waits).fetch_add(1, std::memory_order_relaxed);
             return;
         }
         for (u32 spins = 0; !IsDone(seq); ++spins) {
             if (spins < 4096) {
-                __builtin_ia32_pause();
+                COMMON_CPU_RELAX();
             } else {
                 std::this_thread::yield();
             }
         }
-        (stage_b ? b_wait_cycles : wait_cycles).fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+        (stage_b ? b_wait_cycles : wait_cycles).fetch_add(Common::RawRDTSC() - start, std::memory_order_relaxed);
         (stage_b ? b_waits : waits).fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -247,7 +247,7 @@ private:
     /// who ran the copies; the "waited for it" of the draw pipe line includes the copying.
     std::chrono::steady_clock::time_point ReportSteal() {
         const auto now = std::chrono::steady_clock::now();
-        const u64 tsc = __rdtsc();
+        const u64 tsc = Common::RawRDTSC();
         const double seconds = std::chrono::duration<double>(now - report_last).count();
         const double cycles = double(tsc - report_tsc);
         const u64 t = thread_copies.load(std::memory_order_relaxed);
@@ -290,7 +290,7 @@ private:
             if (std::chrono::steady_clock::now() >= report_at) {
                 report_at = ReportSteal();
             }
-            const u64 start = __rdtsc();
+            const u64 start = Common::RawRDTSC();
             if (const u64 n = Claim(NoJob); n != NoJob) {
                 RunJob(n);
                 u64 count = 1;
@@ -298,14 +298,14 @@ private:
                     RunJob(m);
                 }
                 thread_copies.fetch_add(count, std::memory_order_relaxed);
-                busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+                busy_cycles.fetch_add(Common::RawRDTSC() - start, std::memory_order_relaxed);
                 continue;
             }
             const auto spin_until =
                 std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us);
             bool found = false;
             for (u32 spins = 1; spin_us != 0 && !stop.stop_requested(); ++spins) {
-                __builtin_ia32_pause();
+                COMMON_CPU_RELAX();
                 if (claim.load(std::memory_order_seq_cst) <
                     enqueued.load(std::memory_order_seq_cst)) {
                     found = true;
@@ -353,7 +353,7 @@ private:
                     if (stop.stop_requested()) {
                         return;
                     }
-                    __builtin_ia32_pause();
+                    COMMON_CPU_RELAX();
                     if (!(spins & check) && std::chrono::steady_clock::now() >= spin_until) {
                         const u32 seen = wake.load(std::memory_order_seq_cst);
                         sleeping.fetch_add(1, std::memory_order_seq_cst);
@@ -366,14 +366,14 @@ private:
                     available = enqueued.load(std::memory_order_acquire);
                 }
             }
-            const u64 start = __rdtsc();
+            const u64 start = Common::RawRDTSC();
             while (at < available) {
                 const Job& job = jobs[at % Capacity];
                 fn(context, job.address, job.dst, job.size, job.offset);
                 at += step;
                 done[index].value.store(++count, std::memory_order_release);
             }
-            busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+            busy_cycles.fetch_add(Common::RawRDTSC() - start, std::memory_order_relaxed);
         }
     }
 

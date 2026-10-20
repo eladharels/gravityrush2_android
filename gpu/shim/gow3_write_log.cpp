@@ -13,7 +13,8 @@
 #include <ucontext.h>
 #include <unistd.h>
 #endif
-#include <x86intrin.h>
+#include "common/rdtsc.h"
+#include "../../src/guest_cpu.h"
 
 // runtime_memory.c: the backing view of guest memory, past any page protection.
 extern "C" int runtime_memory_region_backing(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end,
@@ -70,7 +71,7 @@ void NoteDownload(std::uint64_t address, const void* data, std::uint64_t size) {
     }
     static std::atomic<int> shown{0};
     const std::uint64_t n = head.load(std::memory_order_relaxed);
-    const std::uint64_t now = __rdtsc();
+    const std::uint64_t now = Common::RawRDTSC();
     for (std::uint64_t i = n; i-- > (n > 65536 ? n - 65536 : 0);) {
         const Entry& e = ring[i % Size];
         if ((e.source != Fence && e.source != WriteData) || e.address >= address + size ||
@@ -97,7 +98,7 @@ void NoteDownload(std::uint64_t address, const void* data, std::uint64_t size) {
 
 void Record(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
     static thread_local const std::uint32_t tid = static_cast<std::uint32_t>(gettid());
-    Entry e{address, size, 0, __rdtsc(), source, tid};
+    Entry e{address, size, 0, Common::FencedRDTSC(), source, tid};
     std::memcpy(&e.first, data, size < 8 ? size : 8);
     Push(ring, head, e);
     // Only small writes are scanned: scanning downloads of megabytes delays them enough to hide
@@ -129,12 +130,11 @@ extern "C" void gow3gpu_dump_guest_writes(void* ucontext) {
     const CONTEXT* c = static_cast<const EXCEPTION_POINTERS*>(ucontext)->ContextRecord;
     const std::uint64_t regs[] = {c->Rax, c->Rbx, c->Rcx, c->Rdx, c->Rsi, c->Rdi, c->R14, c->R15};
 #else
-    const auto* uc = static_cast<const ucontext_t*>(ucontext);
-    const auto* g = uc->uc_mcontext.gregs;
-    const std::uint64_t regs[] = {std::uint64_t(g[REG_RAX]), std::uint64_t(g[REG_RBX]),
-                                  std::uint64_t(g[REG_RCX]), std::uint64_t(g[REG_RDX]),
-                                  std::uint64_t(g[REG_RSI]), std::uint64_t(g[REG_RDI]),
-                                  std::uint64_t(g[REG_R14]), std::uint64_t(g[REG_R15])};
+    GuestRegs guest{};
+    guest_cpu_signal_regs(ucontext, &guest);
+    const std::uint64_t* g = guest.gpr;
+    const std::uint64_t regs[] = {g[GUEST_RAX], g[GUEST_RBX], g[GUEST_RCX], g[GUEST_RDX],
+                                  g[GUEST_RSI], g[GUEST_RDI], g[GUEST_R14], g[GUEST_R15]};
 #endif
     const char* names[] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r14", "r15"};
     for (int i = 0; i < 8; ++i) {
@@ -142,7 +142,7 @@ extern "C" void gow3gpu_dump_guest_writes(void* ucontext) {
     }
     const char* sources[] = {"backing",      "WriteData",           "fence",
                              "EOP (decoded)", "WriteData (decoded)", "EOS (decoded)"};
-    const std::uint64_t now = __rdtsc();
+    const std::uint64_t now = Common::FencedRDTSC();
     const auto print = [&](const Entry& e, const char* what) {
         std::fprintf(stderr,
                      "Write log: %s %s %#llx +%llu first %#llx tid %u, %.3f s before the fault\n",

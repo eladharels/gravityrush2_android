@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <thread>
-#include <x86intrin.h>
+#include "common/rdtsc.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
 #ifndef _WIN32
 #include <dlfcn.h>
+#include <pthread.h>
 #endif
 #include <functional>
 
@@ -16,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "gow3_toggles.h"
 #include "video_core/renderer_vulkan/vk_wait_diagnostics.h"
+#include "common/arch.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -35,10 +37,10 @@ struct SubmitStep {
         static const bool on = std::getenv("GOW3_STAGEB_PROFILE") != nullptr;
         return on;
     }
-    u64 last = On() ? __rdtsc() : 0;
+    u64 last = On() ? Common::RawRDTSC() : 0;
     void Mark(u32 slot) {
         if (last) {
-            const u64 now = __rdtsc();
+            const u64 now = Common::RawRDTSC();
             gow3_submit_cycles[slot].fetch_add(now - last, std::memory_order_relaxed);
             last = now;
         }
@@ -57,6 +59,9 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
         recorder_thread = std::jthread(std::bind_front(&Scheduler::RecorderThread, this));
         recording_threaded = true;
     }
+    // GPU breadcrumbs：每个 scheduler 是一个命令流（vk_breadcrumbs.h）。
+    crumb_stream = Breadcrumbs::NewStream(
+        instance, recording_threaded ? "game draws and composition" : "presentation");
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
@@ -289,23 +294,30 @@ void Scheduler::KickRecording(bool force) {
     if (!recording_threaded) {
         return;
     }
+    std::scoped_lock kick_lock{kick_mutex};
     // Callers kick where nobody holds the raw command buffer: deferral resumes.
     direct_mode = false;
     // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
-    if (!force && full_chunks.empty() && record_chunk->Size() < 32 * 1024) {
+    if (!force && full_chunks.empty() && CurrentChunk().Size() < 32 * 1024) {
         return;
     }
-    if (full_chunks.empty() && record_chunk->Empty()) {
+    if (full_chunks.empty() && CurrentChunk().Empty()) {
         return;
     }
+    // Acquire the replacement before handing over the current chunk. This mirrors Bloodborne's
+    // issue #100 fix: record_chunk remains valid throughout the handover, including if another
+    // recording path is entered while the queue lock is held.
+    std::unique_ptr<RecordChunk> next_record =
+        CurrentChunk().Empty() ? nullptr : AcquireChunk();
     bool wake;
     {
         std::scoped_lock lk{recorder_mutex};
         for (auto& chunk : full_chunks) {
             recorder_queue.push_back(std::move(chunk));
         }
-        if (!record_chunk->Empty()) {
-            recorder_queue.push_back(std::move(record_chunk));
+        if (next_record) {
+            record_chunk.swap(next_record);
+            recorder_queue.push_back(std::move(next_record));
         }
         wake = recorder_sleeping;
         queued_chunks.store(recorder_queue.size(), std::memory_order_release);
@@ -314,9 +326,6 @@ void Scheduler::KickRecording(bool force) {
     // A busy recorder picks the new chunks up by itself: waking it is a syscall per draw.
     if (wake) {
         recorder_cv.notify_one();
-    }
-    if (!record_chunk) {
-        record_chunk = AcquireChunk();
     }
 }
 
@@ -340,7 +349,7 @@ void Scheduler::RecorderThread(std::stop_token stoken) {
             Gow3Threads::Available() >= 12 ? 200 : 20);
         const auto spin_until = std::chrono::steady_clock::now() + spin_time;
         for (u32 spins = 1; queued_chunks.load(std::memory_order_acquire) == 0; ++spins) {
-            __builtin_ia32_pause();
+            COMMON_CPU_RELAX();
             // The clock is read every 256 pauses, not per iteration.
             if (!(spins & 255) &&
                 (stoken.stop_requested() || std::chrono::steady_clock::now() >= spin_until)) {
@@ -463,7 +472,23 @@ void Scheduler::Wait(u64 tick, std::source_location caller, u64 submit_ns) {
     }
     Gow3Stats::WaitTimer timer{Gow3Stats::tick_wait_ns};
     const auto submitted = diagnose ? std::chrono::steady_clock::now() : start;
-    work_semaphore.Wait(tick);
+    // 卡死检测：等 5 秒还没到说明 GPU 可能挂死，先打印等待状态和 breadcrumbs 报告再继续等。
+    // 报告只打一次（ReportStuck 内部保证），继续等的部分保持原有阻塞语义。
+    if (!work_semaphore.WaitFor(tick, 5'000'000'000ull)) {
+#ifndef _WIN32
+        char thread[16] = {};
+        pthread_getname_np(pthread_self(), thread, sizeof(thread));
+        std::printf("GPU wait stalled 5 s on %s: tick %llu, GPU at %llu\n", thread,
+                    static_cast<unsigned long long>(tick),
+                    static_cast<unsigned long long>(work_semaphore.KnownGpuTick()));
+#else
+        std::printf("GPU wait stalled 5 s: tick %llu, GPU at %llu\n",
+                    static_cast<unsigned long long>(tick),
+                    static_cast<unsigned long long>(work_semaphore.KnownGpuTick()));
+#endif
+        Breadcrumbs::ReportStuck("a wait stalled 5 s");
+        work_semaphore.Wait(tick);
+    }
     if (diagnose) {
         const auto completed = std::chrono::steady_clock::now();
         WaitDiagnostics::Get().Add(caller.file_name(), caller.line(),
@@ -682,6 +707,9 @@ void Scheduler::QueueSubmit(vk::CommandBuffer cmdbuf, SubmitInfo& info) {
     };
 
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+    if (submit_result == vk::Result::eErrorDeviceLost) {
+        Breadcrumbs::ReportDeviceLost("submit");
+    }
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 }
 

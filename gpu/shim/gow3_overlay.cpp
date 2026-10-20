@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "gow3_overlay.h"
+#include "gow3_pad_input.h"
 
 #include <algorithm>
 #include <array>
@@ -101,6 +102,12 @@ std::atomic<int> choice_result{-1}; // -1 open, -2 cancelled, else the chosen in
 std::vector<Gow3Png::Image> choice_pictures;
 std::vector<ImTextureData*> choice_textures, choice_retired;
 std::atomic<bool> choice_retiring{false};
+// runtime_pad.c 发布的 pad 文件按键(Android 的屏幕手柄不产生任何 SDL 事件,存档列表只能靠它)。
+// 桌面的 SDL 文本框走 SDL 事件,Android 的文本输入走 app 自己的对话框,两者都不消费这个快照。
+std::atomic<u32> pad_published{0}, pad_seen{0};
+// Bionic 下菜单导航把 pad 边沿转成 ImGui 键（PollMenuPad）：ImGui 要成对的 down/up，
+// 这里记下待补发的 up（下帧发掉）。
+u32 pad_up_pending{0};
 float base_scale = 1.0f;
 
 // Present rate for the FPS counter.
@@ -108,6 +115,11 @@ std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
 
 void SetOpen(bool value) {
+    // Init 失败时 ImGui context 已被销毁：ImGui::GetIO() 会拿到没有 context 的 io。菜单快捷键
+    // （Android 的 R3+L2）与手柄边缘都会走到这里，所以在这里统一挡住，而不是等 Visible()。
+    if (!initialized) {
+        return;
+    }
     if (menu_open.exchange(value) == value) {
         return;
     }
@@ -289,6 +301,7 @@ const char* UpscalerLabel(int upscaler) {
     case Gow3Settings::UpscalerFsr411: return "FSR 4.1.1";
     case Gow3Settings::UpscalerTaa: return "TAA";
     case Gow3Settings::UpscalerDlss: return "DLSS";
+    case Gow3Settings::UpscalerGsr2: return "GSR 2";
     default: return "";
     }
 }
@@ -324,6 +337,12 @@ bool GodOfWar() {
 
 void GameTab() {
     auto& s = Gow3Settings::Get();
+    ImGui::SeparatorText("Controller");
+    if (BeginRows("##controller")) {
+        SliderRow("Vibration", s.vibration, 0, 100, "%d%%",
+                  "Strength of the controller's vibration. 0% turns it off.");
+        ImGui::EndTable();
+    }
     ImGui::SeparatorText("Cheats");
     if (BeginRows("##cheats")) {
         static const char* const names[] = {"Infinite health", "Infinite magic", "Infinite item meter",
@@ -638,6 +657,13 @@ void ImageTab() {
         ImGui::EndDisabled();
         ImGui::EndTable();
     }
+    ImGui::SeparatorText("Textures (applied on restart)");
+    if (BeginRows("##textures")) {
+        static const char* const labels[] = {"Game default", "2x", "4x", "8x", "16x"};
+        ChoiceRow("Anisotropic filtering", s.anisotropy, labels, G::Anisotropies.data(),
+                  int(G::Anisotropies.size()),
+                  "Sharper floors and walls seen at an angle. Little cost on most GPUs.");
+        ImGui::EndTable();
     }
     ImGui::SeparatorText("Information");
     if (BeginRows("##image_info")) {
@@ -681,7 +707,8 @@ void PerformanceTab() {
     ImGui::SeparatorText("Applied on restart");
     if (BeginRows("##restart")) {
         if (GodOfWar()) {
-            static const char* const resolution_labels[] = {"Native (1080p)", "480p", "720p", "1440p", "1800p", "4K"};
+            static const char* const resolution_labels[] = {"Native (1080p)", "854×480", "960×540", "1280×720", "1600×900", "1920×1080", "2560×1440", "3200×1800", "3840×2160"};
+            static_assert(std::size(resolution_labels) == G::Resolutions.size());
             ChoiceRow("Render resolution", s.render_resolution, resolution_labels, nullptr, int(G::Resolutions.size()),
                       "The resolution the game draws at. Higher is sharper and slower.");
             static const char* const engine_labels[] = {"60 (original)", "120", "240"};
@@ -1073,6 +1100,48 @@ void BackgroundLoading() {
 
 } // namespace
 
+namespace {
+// The entry points ImGui's Vulkan backend requires but Android has none of: no VkSurfaceKHR and
+// no VkSwapchainKHR. Its loader treats a NULL as "give up" and returns immediately, so with
+// NDEBUG the IM_ASSERT is gone and the backend keeps running on a half-filled function table -
+// the first vkCreateGraphicsPipelines then jumps to address 0. The AHB swapchain never touches
+// these (the overlay is drawn into our AHB image with dynamic rendering, no VkSwapchainKHR), so
+// answer with a stub that says so loudly if it is ever called instead of dropping the whole backend.
+// Takes the place of an entry point: its address is what the loader hands back, so its signature
+// has to match PFN_vkVoidFunction (void()).
+void UnavailableWsiEntryPoint() {
+    std::fprintf(stderr, "Overlay: a WSI entry point was called on Android, which has none\n");
+    std::abort();
+}
+
+bool IsWsiEntryPoint(const char* name) {
+    static const char* const kWsiNames[] = {
+        "vkCreateSwapchainKHR",         "vkDestroySwapchainKHR",
+        "vkDestroySurfaceKHR",          "vkGetSwapchainImagesKHR",
+        "vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+        "vkGetPhysicalDeviceSurfaceFormatsKHR",
+        "vkGetPhysicalDeviceSurfacePresentModesKHR",
+    };
+    for (const char* candidate : kWsiNames) {
+        if (std::strcmp(name, candidate) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ImGui_ImplVulkan_LoadFunctions takes a loader of PFN_vkVoidFunction (*)(const char*, void*)
+// plus a user_data it forwards to every lookup, so the instance rides along in user_data: no
+// captured state, nothing to keep in sync with the caller.
+PFN_vkVoidFunction LoaderForWsiStub(const char* name, void* user) {
+    const auto* instance = static_cast<const vk::Instance*>(user);
+    const auto resolved =
+        reinterpret_cast<PFN_vkVoidFunction>(VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr(
+            *instance, name));
+    return (!resolved && IsWsiEntryPoint(name)) ? &UnavailableWsiEntryPoint : resolved;
+}
+} // namespace
+
 void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) {
     std::scoped_lock lock{imgui_mutex};
     if (initialized) {
@@ -1099,13 +1168,15 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
                                    int(gow3_font_ttf_end - gow3_font_ttf), 18.0f, &font_config);
 
     const vk::Instance vk_instance = instance.GetInstance();
-    ImGui_ImplVulkan_LoadFunctions(
-        instance.ApiVersion(),
-        [](const char* name, void* user) {
-            return VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr(
-                *static_cast<const vk::Instance*>(user), name);
-        },
-        const_cast<vk::Instance*>(&vk_instance));
+    if (!ImGui_ImplVulkan_LoadFunctions(instance.ApiVersion(), LoaderForWsiStub,
+                                       const_cast<vk::Instance*>(&vk_instance))) {
+        // 返回 false 表示某个入口取到 NULL（通常是未启用的扩展）。NDEBUG 下后端自己的
+        // IM_ASSERT 已被编译掉，继续走就会带着半张函数表调到地址 0，所以这里明确失败并退出：
+        // 菜单快捷键和存档对话框都会因此被挡住，不会去用不存在的 ImGui context。
+        std::printf("Overlay: ImGui Vulkan backend could not load every entry point\n");
+        ImGui::DestroyContext();
+        return;
+    }
 
     const VkFormat color_format = static_cast<VkFormat>(format);
     ImGui_ImplVulkan_InitInfo info{};
@@ -1227,6 +1298,26 @@ bool HandleCaptureEvent(const SDL_Event& event) {
     return true;
 }
 
+// 施加列表动作的唯一入口,这样 SDL 事件和 pad 快照不会对同一个键各移动或各关闭一次。
+// 多来源去重(android-overlay-input-capture)由两半共同成立,各测其一:
+//   - SDL 先到:这里关闭对话框(choice_active=false),随后 pad 侧 PollChoice 的
+//     if (choice_active) 判断把它挡住;
+//   - pad 先到:PadEdges 只产出一个边沿(pad_seen 已跟上),且 PollChoice 关掉对话框后
+//     SDL 的 HandleEvent 也不再路由进 HandleChoiceEvent。
+//   pad 半边的边沿语义在 tests/test_pad_input.cpp 里验证(build.sh --test 跑)。
+// finish:1 确认,2 取消。调用方持有 imgui_mutex。
+static void ApplyChoiceAction(int move, int finish) {
+    const int count = int(choice_items.size());
+    if (move && count) {
+        choice_index = (choice_index + move + count) % count;
+    }
+    if (finish) {
+        choice_result = finish == 1 && count ? choice_index : -2;
+        choice_active = false;
+        RetireChoiceTextures();
+    }
+}
+
 // The save list takes the keys and buttons that move and confirm; the rest stays with the game
 // (held neutral by CapturesInput).
 bool HandleChoiceEvent(const SDL_Event& event) {
@@ -1244,15 +1335,7 @@ bool HandleChoiceEvent(const SDL_Event& event) {
     } else {
         return event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP;
     }
-    const int count = int(choice_items.size());
-    if (move && count) {
-        choice_index = (choice_index + move + count) % count;
-    }
-    if (finish) {
-        choice_result = finish == 1 && count ? choice_index : -2;
-        choice_active = false;
-        RetireChoiceTextures();
-    }
+    ApplyChoiceAction(move, finish);
     return true;
 }
 
@@ -1395,6 +1478,10 @@ void SetLoading(bool active, u32 done, u32 total) {
     loading = active;
 }
 
+bool Available() {
+    return initialized;
+}
+
 bool Visible() {
     const auto& s = Gow3Settings::Get();
     return initialized && (loading || background_total || menu_open || text_entry_active || choice_active ||
@@ -1406,8 +1493,37 @@ bool CapturesInput() {
     return menu_open || text_entry_active || choice_active;
 }
 
+void PublishPad(u32 buttons) { pad_published.store(buttons); }
+
+/* 自上次读取以来新出现的位:按下是边沿,不是 pad 文件里那种持续的电平。调用方负责让
+ * `pad_seen` 跟上,所以对话框弹出时仍被按住的键不会被当成一次新的按下。 */
+u32 PadEdges() {
+    return Gow3Pad::Edges(pad_published.load(), pad_seen);
+}
+
+void PollMenuShortcut() {
+    static const bool android_input = [] {
+        const char* value = std::getenv("GOW3_ANDROID_INPUT");
+        return value && value[0] == '1';
+    }();
+    if (!android_input) {
+        return;
+    }
+    static bool combo_down = false;
+    const u32 buttons = pad_published.load(std::memory_order_relaxed);
+    const bool combo = (buttons & (Gow3Pad::kR3 | Gow3Pad::kL2)) ==
+                       (Gow3Pad::kR3 | Gow3Pad::kL2);
+    if (combo && !combo_down) {
+        SetOpen(!menu_open.load(std::memory_order_relaxed));
+    }
+    combo_down = combo;
+}
+
 void BeginChoice(const std::string& title, const std::vector<std::string>& items,
                  std::vector<Gow3Png::Image> pictures, int focus) {
+    if (!initialized) {
+        return;
+    }
     std::scoped_lock lock{imgui_mutex};
     RetireChoiceTextures();
     choice_pictures = std::move(pictures);
@@ -1417,10 +1533,79 @@ void BeginChoice(const std::string& title, const std::vector<std::string>& items
     choice_index = focus >= 0 && focus < int(items.size()) ? focus : 0;
     choice_result = -1;
     choice_active = true;
+    /* 列表弹出之前就被按住的键,不算对它的一次按下。 */
+    Gow3Pad::Forget(pad_seen, pad_published.load());
 }
 
 int PollChoice() {
+    // Android 的屏幕手柄不产生 SDL 事件,所以发布的边沿在这里消费,消费方就是这个轮询线程。
+    // 桌面没有 pad 文件时 PadEdges() 恒为 0,SDL 是唯一来源 —— 两个来源不会对同一个键各动一次。
+    if (choice_active) {
+        const u32 edges = PadEdges();
+        if (edges) {
+            std::scoped_lock lock{imgui_mutex};
+            int move = 0, finish = 0;
+            Gow3Pad::Map(edges, move, finish);
+            ApplyChoiceAction(move, finish);
+        }
+    }
     return choice_result;
+}
+
+void CancelChoice() {
+    // runtime 放弃等待了(没有任何输入源能到达列表)。列表必须真的关掉:choice_active 只要还是
+    // true,它就会继续绘制,并继续扣住游戏的输入。
+    std::scoped_lock lock{imgui_mutex};
+    if (choice_active) ApplyChoiceAction(0, 2);
+}
+
+/* Bionic 下没有 SDL 事件流（window_android.cpp），菜单的导航输入来自 app 的 pad 状态文件
+ * （Gow3Pad 边沿），与 choice 对话框同一套机制。方向键移动选中项，Cross 确认、Circle 取消、
+ * L1/R1 切页签；L2+R3 开/关菜单由 PollMenuShortcut 处理。ImGui 需要成对的 down/up：
+ * 这里在下一帧补发 up（key repeat 交给 ImGui 自己）。 */
+void PollMenuPad() {
+#ifdef __ANDROID__
+    if (!menu_open.load(std::memory_order_relaxed)) {
+        return;
+    }
+    const u32 edges = PadEdges();
+    if (!edges && !pad_up_pending) {
+        return;
+    }
+    std::scoped_lock lock{imgui_mutex};
+    ImGuiIO& io = ImGui::GetIO();
+    const auto key_of = [](u32 bit) {
+        switch (bit) {
+        case Gow3Pad::kUp: return ImGuiKey_GamepadDpadUp;
+        case Gow3Pad::kDown: return ImGuiKey_GamepadDpadDown;
+        case Gow3Pad::kCross: return ImGuiKey_GamepadFaceDown;
+        case Gow3Pad::kCircle: return ImGuiKey_GamepadFaceRight;
+        case Gow3Pad::kL2: return ImGuiKey_GamepadL2;
+        case Gow3Pad::kR3: return ImGuiKey_GamepadR3;
+        default: return ImGuiKey_None;
+        }
+    };
+    // 先发上一帧边沿的 up（成对），再发这一帧边沿的 down。
+    for (u32 bit = 1; bit; bit <<= 1) {
+        if (pad_up_pending & bit) {
+            const ImGuiKey key = key_of(bit);
+            if (key != ImGuiKey_None) {
+                io.AddKeyEvent(key, false);
+            }
+        }
+    }
+    pad_up_pending = 0;
+    for (u32 bit = 1; bit; bit <<= 1) {
+        if (!(edges & bit)) {
+            continue;
+        }
+        const ImGuiKey key = key_of(bit);
+        if (key != ImGuiKey_None) {
+            io.AddKeyEvent(key, true);
+            pad_up_pending |= bit;
+        }
+    }
+#endif // __ANDROID__
 }
 
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text) {
@@ -1431,6 +1616,8 @@ void SetTextEntry(bool active, const std::string& prompt, const std::string& tex
 }
 
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
+    PollMenuShortcut();
+    PollMenuPad();
     // Present interval for the FPS readout (measured also while nothing is drawn).
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
