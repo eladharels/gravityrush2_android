@@ -43,6 +43,11 @@ if (( ncpu > 8 )); then build_cpus=2-$((ncpu - 1)); else build_cpus=0-$((ncpu - 
 run() { if command -v taskset >/dev/null 2>&1; then taskset -c "$build_cpus" nice -n 19 "$@"; else "$@"; fi; }
 [[ -f $toolchain ]] || { echo "No NDK: $ndk (tools/android/build_bionic_deps.sh)" >&2; exit 1; }
 [[ -f $prefix/.done-ffmpeg ]] || { echo "No Bionic deps in $prefix (tools/android/build_bionic_deps.sh)" >&2; exit 1; }
+# A fresh machine (CI) has no header-only prefix yet: stage it (QUICKSTART 2.2, automated).
+if [[ ! -d $headers/share/cmake/tsl-robin-map || ! -d $headers/share/cmake/magic_enum ]] ||
+   ! compgen -G "$headers/lib/cmake/Boost-*" >/dev/null; then
+    bash tools/android/inputs/stage_header_deps.sh "$headers"
+fi
 [[ -d $headers/share/cmake/tsl-robin-map ]] || { echo "No header-only packages in $headers" >&2; exit 1; }
 mkdir -p "$out"
 ndk_cmake=(-DCMAKE_TOOLCHAIN_FILE="$toolchain" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-$api -DANDROID_STL=c++_shared)
@@ -68,6 +73,7 @@ if [[ -z $boost_dir ]]; then
     for candidate in \
         "$headers/lib/cmake/Boost-1.87.0" \
         "$headers/lib/cmake/Boost-1.92.0" \
+        $(ls -d "$headers"/lib/cmake/Boost-* 2>/dev/null | sort -V -r) \
         "$(brew --prefix 2>/dev/null)/lib/cmake/Boost-1.92.0"; do
         if [[ -f "$candidate/BoostConfig.cmake" ]]; then
             boost_dir=$candidate
@@ -79,6 +85,7 @@ if [[ -z $boost_headers_dir ]]; then
     for candidate in \
         "$headers/lib/cmake/boost_headers-1.87.0" \
         "$headers/lib/cmake/boost_headers-1.92.0" \
+        $(ls -d "$headers"/lib/cmake/boost_headers-* 2>/dev/null | sort -V -r) \
         "$(brew --prefix 2>/dev/null)/lib/cmake/boost_headers-1.92.0"; do
         if [[ -f "$candidate/boost_headers-config.cmake" ]]; then
             boost_headers_dir=$candidate
