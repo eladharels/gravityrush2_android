@@ -48,4 +48,15 @@ int WindowSDL::PollTextInput(std::string&) {
 }
 
 } // namespace Frontend
+
+// android port: no mouse on the phone (window.cpp keeps the desktop mouse look). runtime_pad.c
+// asks for it: nothing to configure, no motion, no buttons.
+extern "C" void gow3gpu_mouse_configure(int) {}
+extern "C" int gow3gpu_mouse_sample(float* dx, float* dy, uint32_t* buttons, int* wheel) {
+    if (dx) *dx = 0.0f;
+    if (dy) *dy = 0.0f;
+    if (buttons) *buttons = 0;
+    if (wheel) *wheel = 0;
+    return 0;
+}
 #endif

@@ -775,6 +775,10 @@ static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
     }
     return patched;
 }
+#else
+/* android port: the game callbacks that write these (mouse camera, install_game_callbacks) are
+ * Windows-only; runtime_pad.c still reads them, and they stay 0. */
+volatile uint64_t runtime_guest_rbp, runtime_guest_ret;
 #endif
 #ifndef _WIN32
 static void fault(int sig, siginfo_t *info, void *context) {
