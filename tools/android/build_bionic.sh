@@ -107,7 +107,30 @@ if [[ ! -f $out/gpu/build.ninja ]]; then
         -Dboost_headers_DIR="$boost_headers_dir" \
         -Dmagic_enum_DIR="$headers/share/cmake/magic_enum" >/dev/null
 fi
-run ninja -C "$out/gpu" -j "$J" gow3gpu > "$out/gpu-build.log" 2>&1 || { grep -v '^\[' "$out/gpu-build.log" | tail -40 >&2; exit 1; }
+# uncharted_android: the runtime's C sources are checked first (they are compiled only after the
+# long GPU build), and the GPU build keeps going past errors (-k 0), so one run reports them all.
+early_cc=("$llvm/bin/aarch64-linux-android$api-clang")
+read -r -a early_includes <<< "$(PKG_CONFIG_SYSROOT_DIR= pkg-config --cflags libavcodec libavutil libswscale libswresample sdl3)"
+runtime_check=0
+for source in src/probe.c src/runtime*.c src/vulkan_smoke.c; do
+    "${early_cc[@]}" -fsyntax-only -std=c11 -Wall -Wextra -Werror -pthread -I"$prefix/include" -I. -Isrc \
+        "${early_includes[@]}" "$source" >> "$out/runtime-check.log" 2>&1 || runtime_check=1
+done
+gpu_ok=1
+run ninja -C "$out/gpu" -j "$J" -k 0 gow3gpu > "$out/gpu-build.log" 2>&1 || gpu_ok=0
+if (( ! gpu_ok || runtime_check )); then
+    if (( ! gpu_ok )); then
+        echo "==== GPU library: every compile error ====" >&2
+        grep -E "error:|FAILED:" "$out/gpu-build.log" | sed 's|^/[^ ]*/gpu/|gpu/|' | sort -u | head -150 >&2
+        echo "==== GPU library: log tail ====" >&2
+        grep -v '^\[' "$out/gpu-build.log" | tail -40 >&2
+    fi
+    if (( runtime_check )); then
+        echo "==== runtime (src/*.c): every error ====" >&2
+        grep -E "error:" "$out/runtime-check.log" | sort -u | head -150 >&2
+    fi
+    exit 1
+fi
 
 # bin/ 和 lib/ 并排，可执行文件经 $ORIGIN 找 lib/。
 mkdir -p "$out/bin" "$out/lib"
