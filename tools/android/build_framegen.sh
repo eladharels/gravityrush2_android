@@ -21,7 +21,10 @@ root=$PWD/.local-deps/android
 src=$root/src/bloodframe
 # NDK 解析：GOW3_NDK > 本机 Android SDK（与 Gradle 同源）> BB 式 $root/sdk 布局。
 if [[ -z ${GOW3_NDK:-} ]]; then
-    for cand in "$HOME/Library/Android/sdk/ndk/29.0.14206865" "$HOME/Library/Android/sdk/ndk/"*; do
+    # uncharted_android: also the SDK the environment names (the CI runner's ANDROID_HOME).
+    for cand in "$HOME/Library/Android/sdk/ndk/29.0.14206865" "$HOME/Library/Android/sdk/ndk/"* \
+                "${ANDROID_HOME:-/nonexistent}/ndk/29.0.14206865" "${ANDROID_SDK_ROOT:-/nonexistent}/ndk/29.0.14206865" \
+                "$HOME/Android/Sdk/ndk/29.0.14206865"; do
         [[ -f $cand/build/cmake/android.toolchain.cmake ]] && { GOW3_NDK=$cand; break; }
     done
 fi
