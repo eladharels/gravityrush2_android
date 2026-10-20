@@ -22,6 +22,7 @@
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_rasterizer.h" // uc3 R.10.17: SrtNoteReadback
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_wait_diagnostics.h"
@@ -226,6 +227,7 @@ void TextureCache::RetireReadbacks() {
                 entry.payload.Invalidate();
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(entry.address),
                     entry.payload.mapped, entry.size);
+                Vulkan::SrtNoteReadback(entry.address, entry.size);
                 if (entry.watched) WatchReadback<false>(entry.address, entry.size);
                 ++readbacks_completed;
             }
@@ -315,6 +317,7 @@ void TextureCache::ProcessDownloadImages() {
                     copy->staging.Invalidate();
                     Core::Memory::Instance()->TryWriteBacking(
                         std::bit_cast<u8*>(copy->guest_address), copy->staging.mapped, copy->size);
+                    Vulkan::SrtNoteReadback(copy->guest_address, copy->size);
                     runtime.GetStagingPool().FreeDeferred(copy->staging);
                 } else {
                     WatchReadback<true>(copy->guest_address, copy->size);
@@ -387,6 +390,7 @@ void TextureCache::ProcessDownloadImages() {
         download.staging.Invalidate();
         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(download.guest_address),
                                                   download.staging.mapped, download.size);
+        Vulkan::SrtNoteReadback(download.guest_address, download.size);
         runtime.GetStagingPool().FreeDeferred(download.staging);
     }
 }
@@ -453,12 +457,14 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
         download.Invalidate();
         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
                                                   download.mapped, download_size);
+        Vulkan::SrtNoteReadback(image.info.guest_address, download_size);
     } else {
         scheduler.DeferPriorityOperation(
             [this, device_addr = image.info.guest_address, download, download_size] {
                 download.Invalidate();
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr),
                                                           download.mapped, download_size);
+                Vulkan::SrtNoteReadback(device_addr, download_size);
                 runtime.GetStagingPool().FreeDeferred(download);
             });
     }

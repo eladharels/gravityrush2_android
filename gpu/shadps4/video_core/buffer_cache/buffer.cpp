@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <cstdlib>
 #include <numeric>
 #include <string_view>
@@ -160,6 +161,20 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
         .usage = AllFlags,
         .sharingMode = vk::SharingMode::eExclusive,
     };
+    // uc3 (Drake's scarf): the readback side queue is another queue family and reads these
+    // buffers with no ownership transfer. GOW3_SIDEQ_CONCURRENT=1 shares them between the two
+    // families instead.
+    static const bool concurrent = [] {
+        const char* env = std::getenv("GOW3_SIDEQ_CONCURRENT");
+        return env && env[0] == '1';
+    }();
+    const std::array<u32, 2> families = {instance.GetGraphicsQueueFamilyIndex(),
+                                         instance.GetSideQueueFamilyIndex()};
+    if (concurrent && families[1] != ~0u && families[1] != families[0]) {
+        buffer_ci.sharingMode = vk::SharingMode::eConcurrent;
+        buffer_ci.queueFamilyIndexCount = static_cast<u32>(families.size());
+        buffer_ci.pQueueFamilyIndices = families.data();
+    }
     VmaAllocationInfo alloc_info{};
     buffer.Create(buffer_ci, mem_type, &alloc_info);
 

@@ -38,7 +38,7 @@ LOG_FILE = USER_DIR / 'last_run.log'
 INPUT_FILE = DATA_DIR / 'input.ini'
 APP_NAME = 'Uncharted Collection PC'
 EXE_NAME = 'Uncharted Launcher.exe'
-VERSION = '0.3.3'
+VERSION = '0.3.4'
 RELEASES_API = 'https://api.github.com/repos/zorde23/Uncharted_Collection_PC/releases/latest'
 RELEASES_PAGE = 'https://github.com/zorde23/Uncharted_Collection_PC/releases/latest'
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -48,7 +48,7 @@ TESTED_TITLE = 'CUSA02344'
 COMMON = {
     'GOW3_READBACKS': '2', 'GOW3_FRAME_STATS': '1', 'GOW3_READBACK_ASYNC': '1', 'GOW3_LEAF_COPY': '1',
     'GOW3_SCALAR_COPY_HLE': '1', 'GOW3_HLE_INVALIDATE': '1', 'GOW3_EAGER_SUBMIT': '128',
-    'GOW3_EAGER_SUBMIT_US': '1000', 'GOW3_ASYNC_SUBMIT': '1', 'GOW3_READBACK_SIDEQ': '1',
+    'GOW3_EAGER_SUBMIT_US': '1000', 'GOW3_ASYNC_SUBMIT': '1',
     'GOW3_RING_COPY_THREAD': '1', 'GOW3_DEFERRED_SUBMIT': '1', 'GOW3_RING_DEDUP': '1',
     'GOW3_READBACK_FAST': '1', 'GOW3_READBACK_FAST_WAIT': '1', 'GOW3_READBACK_FAST_SIDEQ': '1',
 }
@@ -56,11 +56,13 @@ COMMON = {
 GAMES = [
     ('uc1', "Uncharted: Drake's Fortune", 'eboot.bin', ('Experimental', 'Experimental'),
      {'GOW3_COMPUTE_PIPE': '1', 'GOW3_LOW_IMAGE': '1', 'GOW3_AJM_END_RULES': '1', 'GOW3_EOP_TICK_WAIT': '1',
-      'GOW3_MOUSE_AIM_U1_ALL': '1'}),
+      'GOW3_MOUSE_AIM_U1_ALL': '1', 'GOW3_READBACK_SIDEQ': '1'}),
     ('uc2', 'Uncharted 2: Among Thieves', 'big2-ps4_Shipping.elf', ('Jogável', 'Playable'),
      # Without GOW3_COMPUTE_PIPE: with it the train carriage in the prologue falls too early. The two
      # in-order options keep the rooftop at 60 FPS; the train jump is still timing-sensitive with them.
-     {'GOW3_HLE_INORDER': '1', 'GOW3_ACB_DISPATCH_PIPE': '1'}),
+     {'GOW3_HLE_INORDER': '1', 'GOW3_ACB_DISPATCH_PIPE': '1', 'GOW3_READBACK_SIDEQ': '1'}),
+    # uc3 without GOW3_READBACK_SIDEQ: with it Drake's scarf jumps around in the desert (the guest
+    # resumes before the graphics work behind a readback runs); no FPS difference measured.
     ('uc3', "Uncharted 3: Drake's Deception", 'big3-ps4_Shipping.elf', ('Jogável · 60 FPS', 'Playable · 60 FPS'),
      {'GOW3_COMPUTE_PIPE': '1', 'GOW3_SYNC_SMALL_TARGETS': '1', 'GOW3_JOB_SPIN': '100', 'GOW3_JOB_SLEEP': '1',
       'GOW3_MIP_FIX': '1', 'GOW3_MOUSE_EDGE_AIM': '1', 'GOW3_SCOPE_SPLIT_SCALAR': '1',
@@ -76,7 +78,20 @@ INI_DEFAULTS = {'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
 DISPLAY_MODES = [('windowed', ('Janela', 'Window')), ('borderless', ('Janela sem borda', 'Borderless')),
                  ('fullscreen', ('Tela cheia', 'Fullscreen'))]
 DEFAULTS = {'game_dir': '', 'update_dir': '', 'language': '', 'last_game': 'uc3', 'disabled': [], 'experimental': [],
-            'check_updates': True}
+            'check_updates': True, 'resolution': '1080'}
+# Render and output resolution of the three games (launcher.json 'resolution'; the GOW3_UC3_* names
+# predate UC1 and UC2, whose executables share UC3's video settings and memory table). Above 1080p the game's own targets
+# grow (GOW3_UC3_RES); its render target heaps and GPU memory grow with them, and the intro movies
+# are scaled to the screen. Measured: 1440p and 4K on an RX 6750 XT; the image is scaled to the window.
+RESOLUTIONS = [('1080', ('1920x1080 (padrão)', '1920x1080 (default)')),
+               ('1440', ('2560x1440', '2560x1440')),
+               ('2160', ('3840x2160 (4K)', '3840x2160 (4K)'))]
+UC3_RESOLUTION_ENV = {
+    '1440': {'GOW3_UC3_RES': '2560x1440', 'GOW3_UC3_RES_ALL': '1', 'GOW3_UC3_MOVIE_FIX': '1',
+             'GOW3_UC3_RTHEAP_MB': '512', 'GOW3_DMEM_MB': '6144'},
+    '2160': {'GOW3_UC3_RES': '3840x2160', 'GOW3_UC3_RES_ALL': '1', 'GOW3_UC3_MOVIE_FIX': '1',
+             'GOW3_UC3_RTHEAP_MB': '1792', 'GOW3_UC3_RT_MB': '448', 'GOW3_DMEM_MB': '8192'},
+}
 # What each optimization does (Options > Advanced); the games turn them on by default.
 TOGGLE_HELP = {
     'GOW3_READBACK_ASYNC': ('Leituras da GPU sem parar a fila', 'GPU readbacks without draining the queue'),
@@ -112,6 +127,9 @@ TOGGLE_HELP = {
     'GOW3_PREP_TRUST_A1': ('Experimental: preparo de desenhos mais rápido (+FPS, UC3)', 'Experimental: faster draw preparation (+FPS, UC3)'),
     'GOW3_JOB_SLEEP': ('Threads de jobs podem dormir no gameplay (menos CPU)', 'Job threads may sleep in gameplay (less CPU)'),
 }
+# Options > Advanced shows the toggles in two lists: these fix bugs, the others are for performance.
+FIX_TOGGLES = {'GOW3_MOUSE_AIM_U1_ALL', 'GOW3_SYNC_SMALL_TARGETS', 'GOW3_MIP_FIX', 'GOW3_MOUSE_EDGE_AIM',
+               'GOW3_SCOPE_SPLIT_SCALAR', 'GOW3_DEPTH_KEEP_CLEAR'}
 # The Uncharted engines run at 60 at most, so higher limits would do nothing.
 FPS_LIMITS = [('0', ('Sem limite (60)', 'No limit (60)')), ('30', ('30', '30')), ('60', ('60', '60'))]
 # Fixed per game, never a user switch: UC1 needs LOW_IMAGE, AJM_END_RULES and EOP_TICK_WAIT; READBACKS
@@ -388,6 +406,8 @@ def game_environment(settings, key):
             env[name] = EXPERIMENTAL[name][1]  # turned on in Options > Advanced
     if 'GOW3_SCALAR_COPY_HLE' not in env:
         env.pop('GOW3_HLE_INVALIDATE', None)
+    if key in ('uc1', 'uc2', 'uc3'):
+        env.update(UC3_RESOLUTION_ENV.get(settings.get('resolution', '1080'), {}))
     env['GOW3_GAME_DIR'] = settings['game_dir']
     if settings.get('update_dir'):
         env['GOW3_PATCH_DIR'] = settings['update_dir']
@@ -776,53 +796,69 @@ class Launcher:
         limit_values = [v for v, _n in FPS_LIMITS]
         limit = tk.StringVar(value=pick(FPS_LIMITS)[limit_values.index(ini.get('fps_limit', '0'))
                                                     if ini.get('fps_limit', '0') in limit_values else 0])
+        res_values = [v for v, _n in RESOLUTIONS]
+        resolution = tk.StringVar(value=pick(RESOLUTIONS)[res_values.index(self.settings.get('resolution', '1080'))
+                                                          if self.settings.get('resolution', '1080') in res_values else 0])
         vsync = tk.BooleanVar(value=ini.get('vsync', '1') != '0')
         fps = tk.BooleanVar(value=ini.get('overlay_fps', '1') != '0' and ini.get('show_fps', '1') != '0')
         rows = ((_('Tela', 'Display'), ttk.Combobox(body, values=pick(DISPLAY_MODES), state='readonly', width=18, textvariable=mode)),
-                (_('Limite de FPS', 'FPS limit'), ttk.Combobox(body, values=pick(FPS_LIMITS), state='readonly', width=18, textvariable=limit)))
+                (_('Limite de FPS', 'FPS limit'), ttk.Combobox(body, values=pick(FPS_LIMITS), state='readonly', width=18, textvariable=limit)),
+                (_('Resolução', 'Resolution'), ttk.Combobox(body, values=pick(RESOLUTIONS), state='readonly', width=18, textvariable=resolution)))
         for row, (title, widget) in enumerate(rows, start=1):
             self.label(body, title, 10, MUTED).grid(row=row, column=0, sticky='w', pady=3)
             widget.grid(row=row, column=1, sticky='w', padx=10)
         check = dict(bg=PANEL, fg=TEXT, selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT,
                      font=('Segoe UI', 10), anchor='w')
         tk.Checkbutton(body, text=_('VSync (sem tearing; recomendado)', 'VSync (no tearing; recommended)'),
-                       variable=vsync, **check).grid(row=3, column=0, columnspan=2, sticky='w')
-        tk.Checkbutton(body, text=_('Mostrar FPS na tela', 'Show FPS on screen'), variable=fps, **check).grid(row=4, column=0, columnspan=2, sticky='w')
+                       variable=vsync, **check).grid(row=4, column=0, columnspan=2, sticky='w')
+        tk.Checkbutton(body, text=_('Mostrar FPS na tela', 'Show FPS on screen'), variable=fps, **check).grid(row=5, column=0, columnspan=2, sticky='w')
         updates = tk.BooleanVar(value=self.settings.get('check_updates', True))
         tk.Checkbutton(body, text=_('Avisar quando sair versão nova do port (consulta o GitHub ao abrir)',
                                     'Tell me when a new port version is out (asks GitHub at start)'),
-                       variable=updates, **check).grid(row=5, column=0, columnspan=2, sticky='w')
-        self.label(body, _('Os jogos rodam a no máximo 60 FPS. No jogo, Insert ou F1 (ou L2+R2+L3+R3) abre o menu do port.',
-                           'The games run at 60 FPS at most. In game, Insert or F1 (or L2+R2+L3+R3) opens the port menu.'),
-                   9, MUTED, wraplength=440, justify='left').grid(row=6, column=0, columnspan=2, sticky='w', pady=(4, 10))
+                       variable=updates, **check).grid(row=6, column=0, columnspan=2, sticky='w')
+        self.label(body, _('Os jogos rodam a no máximo 60 FPS. No jogo, Insert ou F1 (ou L2+R2+L3+R3) abre o menu do port. '
+                           'Resolução acima de 1080p pesa mais na placa de vídeo e usa mais memória.',
+                           'The games run at 60 FPS at most. In game, Insert or F1 (or L2+R2+L3+R3) opens the port menu. '
+                           'Resolutions above 1080p load the graphics card more and use more memory.'),
+                   9, MUTED, wraplength=440, justify='left').grid(row=7, column=0, columnspan=2, sticky='w', pady=(4, 10))
 
         advanced = tk.Frame(body, bg=PANEL)
+        perf_list = tk.Frame(advanced, bg=PANEL)
+        fix_list = tk.Frame(advanced, bg=PANEL)
+        perf_list.grid(row=0, column=0, sticky='nw', padx=(0, 16))
+        fix_list.grid(row=0, column=1, sticky='nw')
         disabled = set(self.settings.get('disabled', []))
         toggles = {}
         names = list(COMMON) + [k for g in GAMES for k in g[4] if k not in COMMON]
-        self.label(advanced, _('Otimizações (todas ligadas = configuração testada)',
-                               'Optimizations (all on = tested setup)'), 10, ACCENT, True).pack(anchor='w', pady=(0, 4))
+        self.label(perf_list, _('Desempenho (todas ligadas = configuração testada)',
+                                'Performance (all on = tested setup)'), 10, ACCENT, True).pack(anchor='w', pady=(0, 4))
+        self.label(fix_list, _('Correções', 'Fixes'), 10, ACCENT, True).pack(anchor='w', pady=(0, 4))
+
+        def toggle(parent, name, var):
+            help_text = TOGGLE_HELP.get(name, ('', ''))[0 if LANG == 'pt' else 1]
+            tk.Checkbutton(parent, text=f'{help_text}  ({public_name(name)})', variable=var, **check).pack(anchor='w')
         for name in dict.fromkeys(names):
             if name in FIXED:
                 continue
             toggles[name] = tk.BooleanVar(value=name not in disabled)
-            help_text = TOGGLE_HELP.get(name, ('', ''))[0 if LANG == 'pt' else 1]
-            tk.Checkbutton(advanced, text=f'{help_text}  ({public_name(name)})', variable=toggles[name], **check).pack(anchor='w')
+            toggle(fix_list if name in FIX_TOGGLES else perf_list, name, toggles[name])
         chosen = set(self.settings.get('experimental', []))
         trials = {}
+        if EXPERIMENTAL:
+            self.label(fix_list, _('Experimental', 'Experimental'), 10, ACCENT, True).pack(anchor='w', pady=(10, 4))
         for name in EXPERIMENTAL:
             trials[name] = tk.BooleanVar(value=name in chosen)
-            help_text = TOGGLE_HELP.get(name, ('', ''))[0 if LANG == 'pt' else 1]
-            tk.Checkbutton(advanced, text=f'{help_text}  ({public_name(name)})', variable=trials[name], **check).pack(anchor='w')
-        shown = tk.BooleanVar(value=bool(disabled) or bool(chosen))
+            toggle(fix_list, name, trials[name])
+        # Open when it was left open; older launcher.json files: open when something differs from the default.
+        shown = tk.BooleanVar(value=self.settings.get('show_advanced', bool(disabled) or bool(chosen)))
 
         def show_advanced():
             if shown.get():
-                advanced.grid(row=8, column=0, columnspan=2, sticky='w', pady=(6, 0))
+                advanced.grid(row=9, column=0, columnspan=2, sticky='w', pady=(6, 0))
             else:
                 advanced.grid_forget()
         tk.Checkbutton(body, text=_('Avançado: escolher otimizações', 'Advanced: choose optimizations'),
-                       variable=shown, command=show_advanced, **check).grid(row=7, column=0, columnspan=2, sticky='w')
+                       variable=shown, command=show_advanced, **check).grid(row=8, column=0, columnspan=2, sticky='w')
         show_advanced()
 
         def reset():
@@ -834,6 +870,7 @@ class Launcher:
             fps.set(True)
             updates.set(True)
             limit.set(pick(FPS_LIMITS)[0])
+            resolution.set(pick(RESOLUTIONS)[0])
 
         def save():
             ensure_ini({'display_mode': DISPLAY_MODES[pick(DISPLAY_MODES).index(mode.get())][0],
@@ -843,6 +880,8 @@ class Launcher:
             self.settings['disabled'] = sorted(k for k, v in toggles.items() if not v.get())
             self.settings['experimental'] = sorted(k for k, v in trials.items() if v.get())
             self.settings['check_updates'] = updates.get()
+            self.settings['resolution'] = RESOLUTIONS[pick(RESOLUTIONS).index(resolution.get())][0]
+            self.settings['show_advanced'] = shown.get()
             save_settings(self.settings)
             win.destroy()
         buttons = tk.Frame(win, bg=BG)

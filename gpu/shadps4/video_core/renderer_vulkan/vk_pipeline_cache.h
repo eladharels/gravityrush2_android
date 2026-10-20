@@ -174,6 +174,9 @@ public:
     u64 prep_trust_check_bytes = 0, prep_trust_check_skips = 0; ///< bytes compared, compares deduped
     u64 prep_trust_stamp_validated[4]{}; ///< R.10 A1: trusted by value after why 1/2/3 ([0] after a wait)
     u64 prep_trust_stamp_changed[4]{};   ///< R.10 A1: values changed, by the same origin
+    u64 prep_trust_pending = 0;        ///< R.10.17: GPU write still pending in the read set at A
+    u64 prep_trust_pending_runs = 0, prep_trust_pending_cycles = 0; ///< runs tested, their cost
+    u64 prep_trust_strict = 0;         ///< R.10.17: by value refused, a page in the read set written
     const PreparedDraw* last_value_ok = nullptr; ///< R.10 A1: the previous call's draw held by value
     /// R.10 A1 v8 (Fable 1a): the pipeline the last trusted apply found, with its key. Reset
     /// whenever a graphics pipeline is erased or replaced.

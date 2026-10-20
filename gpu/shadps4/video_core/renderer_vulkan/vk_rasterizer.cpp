@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <x86intrin.h>
 #include <cstdio>
+#include <format>
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "gow3_toggles.h"
@@ -15,6 +16,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
+#include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/resource.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -1625,6 +1627,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (FrameCapture::Active()) {
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
         FrameCapture::Draw(vs_info.pgm_hash, ps ? ps->pgm_hash : 0, num_indices, num_instances);
+        {
+            // uc3 (sand diagnosis): the color write masks (4 bits per target, RGBA from bit 0).
+            char note[64];
+            std::snprintf(note, sizeof(note), "\n  target mask %08x", regs.color_target_mask.raw);
+            FrameCapture::Note(note);
+        }
         if (const auto& bc = regs.blend_control[0]; bc.enable && regs.color_buffers[0]) {
             char note[128];
             std::snprintf(note, sizeof(note), "\n  blend ps %08x idx %u: src %u dst %u func %u z %u%u",
@@ -1696,13 +1704,78 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 // color targets of the next draw (direct or indirect) with that pixel shader are written raw
 // (Vulkan linear layout, num_bits per pixel) to GOW3_DUMP_DIR, and GOW3_DUMP_MEM=<hex addr>:<hex
 // size> guest memory with them (cave torch light debugging).
+// uc3 (GOW3_DUMP_CAPTURE=<ps>[:<addr>/<addr>...]+...+display[:...], ';' also separates; diagnosis): in every frame the
+// frame analyzer records (GOW3_CAPTURE_FRAMES), the first draw of each listed pixel shader
+// dumps its color targets and the images at the listed addresses, as GOW3_DUMP_PS does;
+// "display" is the display pass that ends the frame. Files are named f<frame>_<ps>_...
+struct CaptureDumpPoint {
+    u64 ps = 0; ///< 0: the display pass
+    std::string images;
+    u32 done_frame = 0;
+};
+
+static std::vector<CaptureDumpPoint>& CaptureDumpPoints() {
+    static std::vector<CaptureDumpPoint> points = [] {
+        std::vector<CaptureDumpPoint> list;
+        const char* env = std::getenv("GOW3_DUMP_CAPTURE");
+        std::string spec = env ? env : "";
+        size_t start = 0;
+        while (start < spec.size()) {
+            size_t end = spec.find_first_of(";+", start);
+            if (end == std::string::npos) {
+                end = spec.size();
+            }
+            const std::string item = spec.substr(start, end - start);
+            start = end + 1;
+            if (item.empty()) {
+                continue;
+            }
+            const size_t colon = item.find(':');
+            const std::string name = item.substr(0, colon);
+            CaptureDumpPoint point;
+            point.ps = name == "display" ? 0 : std::strtoull(name.c_str(), nullptr, 16);
+            if (colon != std::string::npos) {
+                point.images = item.substr(colon + 1);
+            }
+            list.push_back(std::move(point));
+        }
+        return list;
+    }();
+    return points;
+}
+
 void Rasterizer::DumpOnDraw(const GraphicsPipeline* pipeline) {
     static const char* dump_ps = std::getenv("GOW3_DUMP_PS");
     static const char* dump_trigger = std::getenv("GOW3_DUMP_TRIGGER");
     static int dump_index = 0;
     const auto* dps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-    if (dump_ps && dump_trigger && dps &&
-        dps->pgm_hash == std::strtoull(dump_ps, nullptr, 16) && std::remove(dump_trigger) == 0) {
+    const char* image_list = std::getenv("GOW3_DUMP_IMAGES");
+    std::string tag_prefix;
+    bool fire = false;
+    if (auto& points = CaptureDumpPoints(); !points.empty() && FrameCapture::DumpFrame() != 0) {
+        const u32 frame = FrameCapture::DumpFrame();
+        const u64 hash = dps ? dps->pgm_hash : 0;
+        for (auto& point : points) {
+            const bool match =
+                point.ps == 0 ? FrameCapture::InDisplayPass() : (dps && point.ps == hash);
+            if (match && point.done_frame != frame) {
+                point.done_frame = frame;
+                image_list = point.images.c_str();
+                tag_prefix = std::format("f{}_{:08x}_", frame, point.ps == 0 ? 0 : u32(hash));
+                if (point.ps == 0) {
+                    tag_prefix = std::format("f{}_display_", frame);
+                }
+                fire = true;
+                break;
+            }
+        }
+    }
+    if (!fire) {
+        fire = dump_ps && dump_trigger && dps &&
+               dps->pgm_hash == std::strtoull(dump_ps, nullptr, 16) &&
+               std::remove(dump_trigger) == 0;
+    }
+    if (fire) {
         const char* dir = std::getenv("GOW3_DUMP_DIR");
         const std::string base = dir && *dir ? dir : "out/dump";
         scheduler.EndRendering();
@@ -1738,8 +1811,8 @@ void Rasterizer::DumpOnDraw(const GraphicsPipeline* pipeline) {
                                         .imageExtent = {w, h, 1}});
             });
             char path[512];
-            std::snprintf(path, sizeof(path), "%s/%s_%03d_%llx_fmt%d_%ubit_%ux%u.raw",
-                          base.c_str(), tag, dump_index,
+            std::snprintf(path, sizeof(path), "%s/%s%s_%03d_%llx_fmt%d_%ubit_%ux%u.raw",
+                          base.c_str(), tag_prefix.c_str(), tag, dump_index,
                           (unsigned long long)image.info.guest_address,
                           int(image.info.pixel_format), image.info.num_bits, w, h);
             std::printf("ucndc: dump %s (flags %#x, mips %u, layers %u)\n", path,
@@ -1764,7 +1837,7 @@ void Rasterizer::DumpOnDraw(const GraphicsPipeline* pipeline) {
             }
         }
         // GOW3_DUMP_IMAGES=<hex addr>/<hex addr>/...: GPU images at these guest addresses.
-        if (const char* list = std::getenv("GOW3_DUMP_IMAGES")) {
+        if (const char* list = image_list) {
             for (const char* p = list; p && *p;) {
                 char* end = nullptr;
                 const VAddr addr = std::strtoull(p, &end, 16);
@@ -2271,6 +2344,33 @@ bool Rasterizer::HelperEligible(const Pipeline* pipeline) const {
     return true;
 }
 
+// uc3: GOW3_UC3_MOVIE_FIX (see Shader::Uc3MovieFixKey). The movie NV12->RGB compute reads the
+// decoded 1920x1080 picture through two of the game's screen-sized render targets (luma R8 and
+// chroma R8G8, chroma at luma + W * align(H, 64)). Above 1080p their T#s are pointed back at the
+// picture as the decoder lays it out: luma 1920x1080 with pitch 1920, chroma 960x540 at +1920*1088.
+static bool Uc3MovieSharp(const Shader::Info& stage, u32 image_index, AmdGpu::Image& tsharp) {
+    if (stage.pgm_hash != Shader::Uc3MovieShaderHash || image_index > 1 ||
+        !Shader::Uc3MovieFixKey() || tsharp.Address() == 0) {
+        return false;
+    }
+    const u32 scale = image_index == 1 ? 2u : 1u;
+    const u32 luma_w = u32(tsharp.width + 1) * scale, luma_h = u32(tsharp.height + 1) * scale;
+    if (luma_w == 1920 && luma_h == 1080) {
+        return false;
+    }
+    VAddr luma = tsharp.Address();
+    if (image_index == 1) {
+        luma -= u64(luma_w) * ((luma_h + 63u) & ~63u);
+    }
+    const u32 w = 1920 / scale, h = 1080 / scale;
+    const VAddr base = image_index == 1 ? luma + 1920u * 1088u : luma;
+    tsharp.base_address = base >> 8;
+    tsharp.width = w - 1;
+    tsharp.height = h - 1;
+    tsharp.pitch = w - 1;
+    return true;
+}
+
 bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
                                           const PreparedStage* prepared) {
     const u64 generation = texture_cache.RegistryGeneration();
@@ -2279,8 +2379,12 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
         if (image_desc.is_written) {
             return false;
         }
-        const auto tsharp =
-            prepared ? prepared->image_sharps[image_index] : image_desc.GetSharp(stage);
+        bool movie_sharp = false;
+        const auto tsharp = [&] {
+            auto sharp = prepared ? prepared->image_sharps[image_index] : image_desc.GetSharp(stage);
+            movie_sharp = Uc3MovieSharp(stage, image_index, sharp);
+            return sharp;
+        }();
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid ||
@@ -2289,8 +2393,9 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
             continue; // null descriptor
         }
         const auto& entry =
-            prepared ? CachedImageDescEntry(tsharp, image_desc, prepared->image_hashes[image_index])
-                     : CachedImageDescEntry(tsharp, image_desc);
+            prepared && !movie_sharp
+                ? CachedImageDescEntry(tsharp, image_desc, prepared->image_hashes[image_index])
+                : CachedImageDescEntry(tsharp, image_desc);
         if (entry.found_generation != generation) {
             return false;
         }
@@ -2901,7 +3006,24 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, buffer_index) : nullptr;
         if (ring) {
             // Copied by the GPU command thread into the constant ring (read-only).
-            if (FrameCapture::Active() && memory->IsValidGpuMapping(ring->address, 0)) {
+            if (FrameCapture::Active() && ring->address == 0 && constant_ring) {
+                // uc3 (sand diagnosis): a flat buffer, copied into the ring by stage A. Its
+                // GPU-written dwords are still 0 there; they are read from guest memory instead
+                // (the value before this submission's GPU work).
+                FrameCapture::CapturedBytes bytes{};
+                const u64 n = std::min<u64>(ring->size, bytes.size());
+                std::memcpy(bytes.data(), constant_ring->Data(ring->offset), n);
+                for (u32 i = 0; i < num_ring_stages; ++i) {
+                    for (u32 j = 0; j < ring_stages[i].num_leaves; ++j) {
+                        const auto& leaf = ring_stages[i].leaves[j];
+                        if (leaf.ring_offset >= ring->offset && leaf.ring_offset + 4 <= ring->offset + n &&
+                            memory->IsValidGpuMapping(leaf.src, 0)) {
+                            memory->CopySparseMemory(leaf.src, bytes.data() + (leaf.ring_offset - ring->offset), 4);
+                        }
+                    }
+                }
+                FrameCapture::Buffer(stage.pgm_hash, buffer_index, 0, bytes.data(), ring->size);
+            } else if (FrameCapture::Active() && memory->IsValidGpuMapping(ring->address, 0)) {
                 // uc3: through the backing view, never the guest pointer: in precise mode a
                 // GPU-written page is read-protected and the fault would be handled inline on
                 // this thread, inside the binding (a deadlock after the F11 capture).
@@ -3201,8 +3323,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
 
     for (u32 image_index = 0; image_index < stage.images.size(); ++image_index) {
         const auto& image_desc = stage.images[image_index];
-        const auto tsharp =
-            prepared ? prepared->image_sharps[image_index] : image_desc.GetSharp(stage);
+        bool movie_sharp = false;
+        const auto tsharp = [&] {
+            auto sharp = prepared ? prepared->image_sharps[image_index] : image_desc.GetSharp(stage);
+            movie_sharp = Uc3MovieSharp(stage, image_index, sharp);
+            return sharp;
+        }();
         // gow3: a hash lookup per texture per draw for a diagnostic only.
         static const bool warn_meta = std::getenv("GOW3_WARN_META_TEXTURE") != nullptr;
         if (warn_meta && texture_cache.IsMeta(tsharp.Address())) {
@@ -3244,8 +3370,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                                      mip_fallback_mode == Shader::MipStorageFallbackMode::None;
 
         auto& desc_entry =
-            prepared ? CachedImageDescEntry(tsharp, image_desc, prepared->image_hashes[image_index])
-                     : CachedImageDescEntry(tsharp, image_desc);
+            prepared && !movie_sharp
+                ? CachedImageDescEntry(tsharp, image_desc, prepared->image_hashes[image_index])
+                : CachedImageDescEntry(tsharp, image_desc);
         // GOW3_SCENE_DEBUG: proxied scene targets this binding reads at the native size, and why.
         const auto debug_native = [&](const VideoCore::Image& image) {
             if (!scene_debug_frame || proxy_candidate || !image.scene_proxy) return;
@@ -3400,7 +3527,15 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             image.usage.storage |= is_storage;
             image.usage.texture |= !is_storage;
             if (FrameCapture::Active()) {
-                FrameCapture::Sampled(image.info, is_storage);
+                const auto& used = image_view.info.range;
+                FrameCapture::Sampled(
+                    image.info, is_storage,
+                    std::format("image mips {} layers {}, T# mips {} layers {}, view mip {}+{} "
+                                "layer {}+{} min_lod {}",
+                                image.info.resources.levels, image.info.resources.layers,
+                                desc.info.resources.levels, desc.info.resources.layers,
+                                used.base.level, used.extent.levels, used.base.layer,
+                                used.extent.layers, image_view.info.min_lod));
             }
 
             vk::ImageView view = *image_view.image_view;
@@ -3483,8 +3618,49 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
                         Regs().ta_bc_base.Address());
             ssharp = AmdGpu::Sampler{};
         }
-        const auto vk_sampler = texture_cache.GetSampler(
-            ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
+        // ucndc (GOW3_TEX_LOD_BIAS=<float>, test): extra LOD bias for the linear-mip non-depth
+        // samplers of the shaders in GOW3_TEX_LOD_BIAS_PS (hex hashes, default the desert sand
+        // material). Applied to every shader it blacked the screen: render targets with
+        // unwritten lower mips. Off when absent or 0; the sampler cache keys on the extra bias.
+        static const float tex_lod_bias = [] {
+            const char* env = std::getenv("GOW3_TEX_LOD_BIAS");
+            return env ? static_cast<float>(std::atof(env)) : 0.0f;
+        }();
+        static const std::vector<u32> tex_lod_bias_ps = [] {
+            const char* env = std::getenv("GOW3_TEX_LOD_BIAS_PS");
+            std::string list = env ? env : "6f7f9e2d,3aac2caf";
+            std::vector<u32> out;
+            for (size_t at = 0; at < list.size();) {
+                const size_t end = std::min(list.find(',', at), list.size());
+                if (end > at) {
+                    out.push_back(static_cast<u32>(std::strtoul(list.substr(at, end - at).c_str(), nullptr, 16)));
+                }
+                at = end + 1;
+            }
+            return out;
+        }();
+        const bool mipmapped =
+            tex_lod_bias != 0.0f &&
+            ssharp.mip_filter.Value() == AmdGpu::MipFilter::Linear &&
+            std::find(tex_lod_bias_ps.begin(), tex_lod_bias_ps.end(), u32(stage.pgm_hash)) !=
+                tex_lod_bias_ps.end();
+        const float extra_bias =
+            sampler.is_depth ? 0.0f : sampler_lod_bias + (mipmapped ? tex_lod_bias : 0.0f);
+        const auto vk_sampler =
+            texture_cache.GetSampler(ssharp, Regs().ta_bc_base, sampler.is_depth, extra_bias);
+        if (FrameCapture::Active()) {
+            FrameCapture::SamplerState(std::format(
+                "sampler {} raw {:016x} {:016x}: mag {} min {} mip {} aniso {} (threshold {}) "
+                "lod bias {:.3f} (secondary {}) + extra {:.2f}, lod {:.3f}..{:.3f}, perf_mip {}, "
+                "filter_mode {}, depth {}",
+                sampler_index, u64(ssharp.raw0), u64(ssharp.raw1), u32(ssharp.xy_mag_filter.Value()),
+                u32(ssharp.xy_min_filter.Value()), u32(ssharp.mip_filter.Value()),
+                u32(ssharp.max_aniso.Value()), u32(ssharp.aniso_threshold.Value()),
+                ssharp.LodBias(), u32(ssharp.lod_bias_sec.Value()),
+                extra_bias, ssharp.MinLod(), ssharp.MaxLod(),
+                u32(ssharp.perf_mip.Value()), u32(ssharp.filter_mode.Value()),
+                int(sampler.is_depth)));
+        }
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         auto& set_write = set_writes[write_index++];
         set_write.dstSet = VK_NULL_HANDLE;

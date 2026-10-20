@@ -3,7 +3,7 @@
 **English** | [Português (Brasil)](README.pt-BR.md)
 
 A native Windows 10 and 11 port of the games in **Uncharted: The Nathan Drake Collection** (PS4,
-Bluepoint, 2015). The focus is **Uncharted 3: Drake's Deception**, which runs at 60 FPS in 1080p with no upscaling or frame generation;
+Bluepoint, 2015). The focus is **Uncharted 3: Drake's Deception**, playable from start to end at 60 FPS in 1080p with no upscaling or frame generation;
 Uncharted 2 is playable and Uncharted 1 runs (experimental).
 
 > **No game files are included.** You need a dump from your own PS4
@@ -63,15 +63,20 @@ Uncharted 1 came later almost for free, and the goal is now the whole trilogy.
 
 ## Status
 
-Updated 2026-10-17.
+Updated 2026-10-20.
 
 | Game | Executable | Status |
 |---|---|---|
 | Uncharted 1 | `eboot.bin` | Runs at **60 FPS** with sound (gunshots included); lightly tested past the start |
 | Uncharted 2 | `big2-ps4_Shipping.elf` | Playable, 51–60 FPS, with its own saves |
-| Uncharted 3 | `big3-ps4_Shipping.elf` | Playable at **60 FPS in 1080p, with no upscaling or frame generation** (the Cartagena streets and the museum); around 50 FPS in heavy vegetation (the Chateau). A few known issues, listed below. Being played start to end on the port |
+| Uncharted 3 | `big3-ps4_Shipping.elf` | **100% playable from start to end**, at **60 FPS in 1080p, with no upscaling or frame generation**. Some parts still need optimization and drop below 60 (around 50 in heavy vegetation, the Chateau), always staying above 30 FPS. One crash in the whole playthrough, not reproduced or fixed yet. Known issues listed below |
 
-Fixed in UC3 over the last few days: young Drake's white hair (addr64 `BUFFER_LOAD`), swapped
+New in 0.3.4:
+- **1440p and 4K** in all three games (launcher, Options > Resolution). The games render natively at the chosen size (no upscaling), and the intro videos are scaled to fill the screen. **Not fully tested yet**: tried in short sessions of each game, not through a whole game. Above 1080p the GPU works harder and the game uses more video memory (4K: about 8 GB of game memory). On a 4K monitor, "Borderless" fills the screen with the same FPS as a window.
+- UC3: the light cones' fog no longer shows black wedges and white specks, and walls and lights no longer flash where shadow maps are rebuilt (on by default in the launcher).
+- UC3: Drake's scarf no longer jumps around in the desert.
+
+Fixed in UC3 earlier: young Drake's white hair (addr64 `BUFFER_LOAD`), swapped
 textures (bartender's vest, museum floor, bathroom door) and performance, which went from 18–24 FPS
 in the streets and the Chateau to 60.
 
@@ -85,12 +90,13 @@ games; and black screen on Intel GPUs fixed (from Supermedo's 0.3.3, untested he
 
 Known issues:
 **Uncharted 3**
-- **Rare crash after long sessions (GPU driver timeout).** After about 30 minutes of play, the port can send a very large block of memory (~1.5 GB) to the GPU in one go. The frame stalls and Windows/AMD reports a driver timeout, closing the game. It is rare and has not been reproduced on demand yet. Save often.
-- **Some walls flash dark for an instant while turning the camera.** A layered (array) texture is rebuilt from scratch instead of reused, and it is blank for a frame while it is rebuilt. The same stretches also cause short dips in 1% low FPS (frames of 25-50 ms). Seen in The Citadel (chapter at 37%).
+- **One crash in a full playthrough, not fixed yet.** It could not be reproduced. A likely cause is a GPU driver timeout after long sessions: the port can send a very large block of memory (~1.5 GB) to the GPU in one go, the frame stalls and Windows/AMD closes the game. Save often.
+- **Short dips in 1% low FPS where shadow maps are rebuilt.** A shadow map array is rebuilt one layer at a time instead of reused (frames of 25-50 ms). The dark flash on walls and the flickering lights these rebuilds caused are fixed (`UC_DEPTH_KEEP_CLEAR`). Seen in The Citadel (chapter at 37%).
 - **Brief texture flicker the first time you enter a new area.** New shaders are compiled in the background, and objects using them are skipped for a few frames. Shaders are cached, so it does not repeat on later visits.
-- **Heavy vegetation areas (The Chateau) run around 50 FPS** instead of 60. The limit is the emulated GPU command processor on the CPU.
+- **Some parts still need optimization.** FPS drops below 60 in a few places (heavy vegetation such as The Chateau runs around 50), always above 30. The limit is the emulated GPU command processor on the CPU.
 - The game is locked to 60 FPS. Higher frame rates speed up the game logic.
-- Internal resolution scaling (FSR/DLSS) does not work for Uncharted: the inherited hooks are specific to God of War III.
+- Upscaling (FSR/DLSS) does not work for Uncharted: the inherited hooks are specific to God of War III. 1440p and 4K render natively instead (see above).
+- **1440p and 4K are not fully tested yet** (all three games): only short sessions so far. If a game crashes or looks wrong above 1080p, go back to 1920x1080 in Options and please report it.
 
 **Uncharted 2**
 - In the train prologue the carriage can fall too early, so you may need to jump sooner than on PS4. UC2 runs without `UC_COMPUTE_PIPE` for this reason. If the train still fails, turn off `UC_HLE_INORDER` and `UC_ACB_DISPATCH_PIPE` in the launcher (Options > Advanced) for that part; they keep the rooftop chase at 60 FPS.

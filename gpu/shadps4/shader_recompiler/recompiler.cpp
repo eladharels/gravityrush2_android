@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <utility>
+#include <vector>
+
 #include "common/logging/classes.h"
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/decode.h"
@@ -60,8 +67,76 @@ void EmitControlFlowGraph(IR::Program& program, Pools& pools, Gcn::CFG& cfg,
     program.post_order_blocks = Shader::IR::PostOrder(program.blocks.front());
 }
 
-IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Info& info,
+// uc3: GOW3_UC3_MOVIE_FIX=1. The movie NV12->RGB compute (cs c85d9816) runs over the whole output
+// and samples the decoded picture at ((x+0.5)/1920, (y+0.5)/1088), literals in its code. Above
+// 1080p (GOW3_UC3_RES) the four literals are scaled to the output, so the picture covers it; the
+// rasterizer points the shader's T#s back at the 1920x1080 picture (Uc3MovieSharp). Off by default.
+static u32 movie_width = 1920, movie_height = 1080;
+u32 Uc3MovieFixKey() {
+    static const u32 key = [] {
+        const char* on = std::getenv("GOW3_UC3_MOVIE_FIX");
+        const char* res = std::getenv("GOW3_UC3_RES");
+        unsigned w = 0, h = 0;
+        if (!on || on[0] != '1' || !res || std::sscanf(res, "%ux%u", &w, &h) != 2 || w < 640 ||
+            h < 360 || w > 7680 || h > 4320 || (w == 1920 && h == 1080)) {
+            return 0u;
+        }
+        movie_width = w;
+        movie_height = h;
+        std::printf("Shader recompiler: movie picture scaled to %ux%u (GOW3_UC3_MOVIE_FIX)\n", w, h);
+        return 0x20000u | (((w * 31u + h) & 0xfffu) << 18);
+    }();
+    return key;
+}
+void Uc3MovieSize(u32& width, u32& height) {
+    Uc3MovieFixKey();
+    width = movie_width;
+    height = movie_height;
+}
+static std::vector<u32> Uc3MovieCode(std::span<const u32> code) {
+    const auto bits = [](float f) {
+        u32 u;
+        std::memcpy(&u, &f, sizeof(u));
+        return u;
+    };
+    u32 w, h;
+    Uc3MovieSize(w, h);
+    const float su = 1.0f / float(w), sv = (1.0f / 1088.0f) * (1080.0f / float(h));
+    const std::pair<u32, u32> literals[] = {{0x3a088889u, bits(su)},
+                                            {0x39888889u, bits(0.5f * su)},
+                                            {0x3a70f0f1u, bits(sv)},
+                                            {0x39f0f0f1u, bits(0.5f * sv)}};
+    // Every literal is found in the original code before any is replaced: a new value can equal
+    // another original one (1/3840 is 0.5/1920).
+    std::vector<u32> out(code.begin(), code.end());
+    size_t at[4];
+    for (size_t i = 0; i < 4; ++i) {
+        const u32 from = literals[i].first;
+        if (std::count(code.begin(), code.end(), from) != 1) {
+            std::printf("Shader recompiler: movie literal %08x not found once, shader left alone\n", from);
+            return {};
+        }
+        at[i] = size_t(std::find(code.begin(), code.end(), from) - code.begin());
+    }
+    for (size_t i = 0; i < 4; ++i) {
+        out[at[i]] = literals[i].second;
+    }
+    return out;
+}
+
+IR::Program TranslateProgram(const std::span<const u32>& code_in, Pools& pools, Info& info,
                              RuntimeInfo& runtime_info, const Profile& profile) {
+    std::vector<u32> movie_code;
+    if (info.pgm_hash == Uc3MovieShaderHash && Uc3MovieFixKey()) {
+        movie_code = Uc3MovieCode(code_in);
+    } else if (Uc3MovieFixKey() &&
+               std::find(code_in.begin(), code_in.end(), 0x3a088889u) != code_in.end() &&
+               std::find(code_in.begin(), code_in.end(), 0x3a70f0f1u) != code_in.end()) {
+        // Another game's movie shader (UC2, UC1)? It holds 1/1920 and 1/1088 too.
+        std::printf("Shader recompiler: shader %016llx has the movie literals 1/1920 and 1/1088, not "
+                    "patched\n", static_cast<unsigned long long>(info.pgm_hash));
+    }
+    const std::span<const u32> code = movie_code.empty() ? code_in : std::span<const u32>(movie_code);
     // Ensure first instruction is expected.
     constexpr u32 token_mov_vcchi = 0xBEEB03FF;
     if (code[0] != token_mov_vcchi) {

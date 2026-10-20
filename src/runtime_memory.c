@@ -464,6 +464,7 @@ static int32_t map_direct_locked(void **out, uint64_t size, int prot, int flags,
 static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, int64_t physical, uint64_t alignment) {
     write_lock();
     size_t replaced=fixed_replaced;
+    void *asked=out ? *out : NULL;
     int32_t result=map_direct_locked(out,size,prot,flags,physical,alignment);
     replaced=fixed_replaced-replaced;
     /* uc3: physical pages seen through another address too (GPU tracking is per address). */
@@ -475,8 +476,8 @@ static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, in
                 alias=vmas[i].start+((uint64_t)physical>vmas[i].phys ? (uint64_t)physical-vmas[i].phys : 0);
     write_unlock();
     flush_hooks();
-    if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x, phys=0x%" PRIx64 "%s",
-                        *out, size, prot, (uint64_t)physical, replaced ? " (over a mapping)" : "");
+    if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x, phys=0x%" PRIx64 " (asked %p, flags 0x%x)%s",
+                        *out, size, prot, (uint64_t)physical, asked, flags, replaced ? " (over a mapping)" : "");
     if (!result) { if (alias) printf(" alias of %p\n", (void *)alias); else printf("\n"); }
     return result;
 }
@@ -554,11 +555,12 @@ static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int fl
     return result;
 }
 static ABI int32_t map_flexible(void **inout, uint64_t size, int prot, int flags) {
+    void *asked=inout ? *inout : NULL;
     write_lock();
     int32_t result=map_flexible_locked(inout,size,prot,flags);
     write_unlock();
     flush_hooks();
-    if (!result) printf("Runtime: mapped flexible memory %p, size=%" PRIu64 ", prot=0x%x\n", *inout, size, prot);
+    if (!result) printf("Runtime: mapped flexible memory %p, size=%" PRIu64 ", prot=0x%x (asked %p, flags 0x%x)\n", *inout, size, prot, asked, flags);
     else fprintf(stderr,"Runtime: flexible map of %" PRIu64 " bytes failed (0x%x), in use=%" PRIu64 "\n",
                  size, (unsigned)result, flexible_bytes);
     return result;

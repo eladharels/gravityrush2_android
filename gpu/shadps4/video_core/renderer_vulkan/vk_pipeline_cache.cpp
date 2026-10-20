@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstdio>
+#include <ctime>
 #include <cstring>
 #include <mutex>
 #include <ranges>
@@ -454,6 +455,36 @@ static bool A1DivergenceLog() {
     }();
     return on;
 }
+// uc3 R.10.17 (Fable): GOW3_A1_PENDING_CHECK=1 - a draw is trusted only when no GPU write is
+// still pending (not landed in guest memory) over the guest ranges its walks read, whatever the
+// stamps say: the stamp at emission says a write happened, the A's walk syncs it before reading.
+static bool A1PendingCheck() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_A1_PENDING_CHECK");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+// uc3 R.10.17 (Fable): GOW3_A1_STRICT_VALUE=1 - by value only with clean pages: a page the walks
+// read, written since the snapshot (even outside the ranges read), is a miss after a global
+// stamp or a wait instead of a value compare.
+static bool A1StrictValue() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_A1_STRICT_VALUE");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+// uc3 R.10.17: wall clock for the divergence lines (local time, ms).
+static void A1Clock(char (&text)[16]) {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t t = std::chrono::system_clock::to_time_t(now);
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+    const std::tm* tm = std::localtime(&t);
+    std::snprintf(text, sizeof(text), "%02d:%02d:%02d.%03d", tm ? tm->tm_hour : 0,
+                  tm ? tm->tm_min : 0, tm ? tm->tm_sec : 0, int(ms));
+}
 struct A1TrustContext {
     u32 stamp_why = ~0u; ///< why from the stamps, before the value check
     u32 origin = ~0u;
@@ -462,6 +493,11 @@ struct A1TrustContext {
     bool after_wait = false;
     bool label_unmet = false;
     u32 num_checks = 0;
+    // R.10.17 diagnostics, at the trust decision: guest runs with a GPU write still pending.
+    u32 pending_runs = 0;
+    u64 pending_addr = 0;
+    u32 pending_size = 0;
+    char pending_what[96] = {};
 };
 static A1TrustContext g_a1_ctx;
 std::atomic<u32> g_gow3_pending_draws;
@@ -745,8 +781,11 @@ bool PipelineCache::PrepareGraphicsPipeline(PipelineSelection& worker_sel) {
 
 void PipelineCache::NotePrepTrustDivergence(const char* what, u64 hash, VAddr base) {
     if (++prep_trust_divergences <= 20) {
-        std::printf("uc3 R.22 prep trust divergence: %s, shader %#llx at %#llx\n", what,
-                    static_cast<unsigned long long>(hash), static_cast<unsigned long long>(base));
+        char clock[16];
+        A1Clock(clock);
+        std::printf("uc3 R.22 prep trust divergence: %s, shader %#llx at %#llx (%s)\n", what,
+                    static_cast<unsigned long long>(hash), static_cast<unsigned long long>(base),
+                    clock);
     }
 }
 
@@ -789,7 +828,7 @@ void PipelineCache::ReportPrepTrust() {
     prep_trust_pipe_reused = 0;
     {
         static constexpr const char* names[] = {"other",   "packet",  "guest write", "pending gpu",
-                                                "landing", "binding", "rewrite"};
+                                                "landing", "binding", "rewrite", "readback"};
         std::printf("uc3 R.10 page write misses (why 3) %llu, by stamp origin (misses: flat "
                     "same/different): ",
                     (ull)prep_trust_why[3]);
@@ -824,6 +863,17 @@ void PipelineCache::ReportPrepTrust() {
             g_srt_num_wait_sites = 0;
             g_srt_wait_sites_lost = 0;
         }
+    }
+    if (A1PendingCheck() || A1StrictValue()) {
+        std::printf("uc3 R.10.17 A1: pending GPU write misses %llu (%llu runs tested, %.0f cycles "
+                    "each), strict value misses %llu\n",
+                    (ull)prep_trust_pending, (ull)prep_trust_pending_runs,
+                    prep_trust_pending_runs ? double(prep_trust_pending_cycles) /
+                                                  double(prep_trust_pending_runs)
+                                            : 0.0,
+                    (ull)prep_trust_strict);
+        prep_trust_pending = prep_trust_pending_runs = prep_trust_pending_cycles = 0;
+        prep_trust_strict = 0;
     }
     prep_trust_wait_validated = prep_trust_wait_changed = prep_trust_label_page = 0;
     prep_trust_label_unmet = prep_trust_check_calls = prep_trust_checks = 0;
@@ -869,6 +919,39 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         } else {
             const bool split = GfxPipeSplit();
             const u64 c0 = split ? __rdtsc() : 0;
+            u32 range_hits = 2; ///< R.10.17: 0 when pages read were written outside the ranges
+            // R.10.17 (Fable): a GPU write still pending over the runs read is a miss for every
+            // draw about to be trusted (stamps or values), tested before the stamps: a landing
+            // stamps its pages before it stops being pending, so one that lands after this test
+            // is seen by the stamps below.
+            const bool pending_log = A1DivergenceLog();
+            A1TrustContext pending_ctx{};
+            bool pending_hit = false;
+            if ((A1PendingCheck() || pending_log) && prepared.num_guest_runs != 0) {
+                auto* const rasterizer = liverpool->GetRasterizer();
+                const u64 p0 = __rdtsc();
+                u32 tested = 0;
+                for (u32 r = 0; rasterizer && r < prepared.num_guest_runs; ++r) {
+                    const auto& run = prepared.guest_runs[r];
+                    ++tested;
+                    if (!rasterizer->IsGpuWritten(run.guest, run.size)) {
+                        continue;
+                    }
+                    pending_hit = true;
+                    if (pending_ctx.pending_runs++ == 0 && pending_log) {
+                        pending_ctx.pending_addr = run.guest;
+                        pending_ctx.pending_size = run.size;
+                        const char* what = rasterizer->DescribeGpuWritten(run.guest, run.size);
+                        std::snprintf(pending_ctx.pending_what, sizeof(pending_ctx.pending_what),
+                                      "%s", what ? what : "");
+                    }
+                    if (!pending_log) {
+                        break;
+                    }
+                }
+                prep_trust_pending_runs += tested;
+                prep_trust_pending_cycles += __rdtsc() - p0;
+            }
             why = SrtChangedSince(prepared.srt_snap, prepared.read_pages.data(),
                                   prepared.num_read_pages);
             const u64 c1 = split ? __rdtsc() : 0;
@@ -891,6 +974,7 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
                     why = SrtChangedSinceRanges(prepared.srt_snap, prepared.read_pages.data(),
                                                 prepared.num_read_pages, prepared.guest_runs,
                                                 prepared.num_guest_runs, page_hits);
+                    range_hits = page_hits;
                     u64* const resolved = page_hits == 0   ? prep_trust_pw_missed
                                           : page_hits == 1 ? prep_trust_pw_hit
                                                            : prep_trust_pw_unknown;
@@ -900,6 +984,14 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
                     pw_origin = origin;
                     ++prep_trust_pw_origin[origin];
                 }
+            }
+            if (A1StrictValue() && range_hits == 0 && (why == 1 || prepared.after_wait)) {
+                ++prep_trust_strict;
+                why = 3;
+            }
+            if (A1PendingCheck() && pending_hit && why < 2) {
+                ++prep_trust_pending;
+                why = 3;
             }
             // R.10 A1 (Fable): the label pages are not in the read set: labels share pages
             // densely, so a write to one of them only matters when a met wait no longer holds.
@@ -953,6 +1045,11 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             if (A1DivergenceLog()) {
                 g_a1_ctx = {why, origin, by_value, values_hold, wait_check, label_unmet,
                             prepared.num_checks};
+                g_a1_ctx.pending_runs = pending_ctx.pending_runs;
+                g_a1_ctx.pending_addr = pending_ctx.pending_addr;
+                g_a1_ctx.pending_size = pending_ctx.pending_size;
+                std::memcpy(g_a1_ctx.pending_what, pending_ctx.pending_what,
+                            sizeof(g_a1_ctx.pending_what));
             }
             if (by_value && values_hold) {
                 why = 0;
@@ -1070,16 +1167,29 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
                 NotePrepTrustDivergence("flat", stage.hash, info.pgm_base);
                 if (A1DivergenceLog()) {
                     const auto& ctx = g_a1_ctx;
-                    std::printf("uc3 A1 divergence detail: shader %#llx stage %u base %#llx->%#llx "
+                    char clock[16];
+                    A1Clock(clock);
+                    std::printf("uc3 A1 divergence detail (%s): shader %#llx stage %u base %#llx->%#llx "
                                 "flat dwords %u->%zu; stamps why %u origin %u pw_origin %d, by value %d "
-                                "(values held %d, %u checks), after a wait %d, label unmet %d; differ:",
-                                (unsigned long long)stage.hash, i,
+                                "(values held %d, %u checks), after a wait %d, label unmet %d; "
+                                "pending GPU write at trust: %u of %u runs (first %#llx+%u: %s); runs:",
+                                clock, (unsigned long long)stage.hash, i,
                                 (unsigned long long)stage.pgm_base,
                                 (unsigned long long)info.pgm_base, u32(stage.flat_size),
                                 info.flattened_ud_buf.size(), ctx.stamp_why, ctx.origin,
                                 pw_origin == ~0u ? -1 : int(pw_origin), int(ctx.by_value),
                                 int(ctx.values_hold), ctx.num_checks, int(ctx.after_wait),
-                                int(ctx.label_unmet));
+                                int(ctx.label_unmet), ctx.pending_runs, prepared.num_guest_runs,
+                                (unsigned long long)ctx.pending_addr, ctx.pending_size,
+                                ctx.pending_what);
+                    for (u32 r = 0; r < prepared.num_guest_runs && r < 8; ++r) {
+                        const auto& run = prepared.guest_runs[r];
+                        const u64 page = run.guest >> 12;
+                        std::printf(" %#llx+%u(o%u)", (unsigned long long)run.guest, run.size,
+                                    u32(g_srt_page_origin[page % SrtPageSlots].load(
+                                        std::memory_order_relaxed)));
+                    }
+                    std::printf("; differ:");
                     const size_t n = std::min<size_t>(stage.flat_size, info.flattened_ud_buf.size());
                     u32 shown = 0;
                     u32 total = 0;

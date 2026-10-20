@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstdlib>
+#include <thread>
 #include <magic_enum/magic_enum.hpp>
 #include "gow3_copy.h"
 #include "gow3_toggles.h"
@@ -413,6 +414,32 @@ void BufferCache::NoteGpuWrite(VAddr device_addr, u64 size) {
                 diag_page_tick[index].store(tick, std::memory_order_relaxed);
             }
         }
+    }
+}
+
+// uc3 (Drake's scarf, Opus causa-sideq.md): only written bindings note a write tick, but
+// uploads, metadata fills and image tiling also write arenas. With GOW3_SIDEQ_ARENA_TICK=1
+// they note one too, so the side queue never copies a window before those land.
+static bool SideqArenaTick() {
+    static const bool enabled = EmulatorSettingsImpl::Flag("GOW3_SIDEQ_ARENA_TICK", false);
+    return enabled;
+}
+
+void BufferCache::NoteArenaWrite(VAddr device_addr, u64 size) {
+    if (!SideqArenaTick() || size == 0) {
+        return;
+    }
+    const u64 tick = scheduler.CurrentTick();
+    const VAddr first = device_addr >> WriteTickShift;
+    const VAddr last = (device_addr + size - 1) >> WriteTickShift;
+    if (last - first >= 64) {
+        big_write_tick.store(tick, std::memory_order_relaxed);
+        return;
+    }
+    for (VAddr window = first; window <= last; ++window) {
+        auto& slot = write_ticks[window % write_ticks.size()];
+        slot.window.store(window, std::memory_order_relaxed);
+        slot.tick.store(tick, std::memory_order_relaxed);
     }
 }
 
@@ -969,6 +996,22 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             WaitAsyncReadbacks(window.start, window.start + window.size);
         }
         if (async) {
+            // uc3 (Drake's scarf, diagnosis): a side-queue readback lets the guest go on before
+            // the work recorded so far runs; the graphics path waited for all of it, deferred
+            // host copies of guest memory included. GOW3_SIDEQ_HOST_COPIES=1 finishes those
+            // copies first (as before a guest-visible write); 2 also the pending image downloads.
+            static const int host_copies = [] {
+                const char* env = std::getenv("GOW3_SIDEQ_HOST_COPIES");
+                return env ? std::atoi(env) : 0;
+            }();
+            if (host_copies > 0) {
+                if (auto* rasterizer = liverpool->GetRasterizer()) {
+                    rasterizer->WaitHostCopies();
+                    if (host_copies > 1) {
+                        rasterizer->ProcessDownloadImages();
+                    }
+                }
+            }
             // The faulting thread marks the written range itself, after the data lands.
             pending = DownloadWindowsAsync(windows);
             if (pending) {
@@ -1014,6 +1057,14 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             ReadMemory(device_addr, size, is_write, false, false);
         }
     }
+}
+
+// uc3 (Drake's scarf, diagnosis): GOW3_SIDEQ_VERIFY=1 also copies side-queue readbacks on the
+// graphics queue and compares both on landing. The game still gets the side-queue bytes, but
+// only once the graphics copy has landed (the timing of the path without the side queue).
+static bool SideqVerify() {
+    static const bool enabled = EmulatorSettingsImpl::Flag("GOW3_SIDEQ_VERIFY", false);
+    return enabled;
 }
 
 std::shared_ptr<BufferCache::AsyncReadback> BufferCache::DownloadWindowsAsync(
@@ -1083,6 +1134,75 @@ std::shared_ptr<BufferCache::AsyncReadback> BufferCache::DownloadWindowsAsync(
         async_pending.push_back(readback);
     }
     async_count.fetch_add(1, std::memory_order_release);
+    // uc3 (Drake's scarf, diagnosis): GOW3_SIDEQ_WAIT_GFX=1 makes a side-queue readback land
+    // only once the graphics work recorded so far has run (the verify wait, without its copy).
+    // GOW3_SIDEQ_LOG_WINDOWS=1 prints the first side-queue windows (address, size).
+    static const bool wait_gfx = EmulatorSettingsImpl::Flag("GOW3_SIDEQ_WAIT_GFX", false);
+    static const bool log_windows = EmulatorSettingsImpl::Flag("GOW3_SIDEQ_LOG_WINDOWS", false);
+    if (side && log_windows) {
+        static std::atomic<u32> logged{0};
+        const u32 n = logged.fetch_add(1, std::memory_order_relaxed);
+        if (n < 400) {
+            for (const auto& window : readback->windows) {
+                std::printf("uc3: side queue window %#llx+%#llx (%zu copies)\n",
+                            (unsigned long long)window.start, (unsigned long long)window.size,
+                            readback->copies.size());
+            }
+        }
+    }
+    // GOW3_SIDEQ_WAIT_RANGE=lo-hi[,lo-hi...] (hex): the same wait, only for windows that touch
+    // one of these ranges (bisection of which guest data races).
+    static const std::vector<std::pair<VAddr, VAddr>> wait_ranges = [] {
+        std::vector<std::pair<VAddr, VAddr>> ranges;
+        const char* env = std::getenv("GOW3_SIDEQ_WAIT_RANGE");
+        while (env && *env) {
+            char* end = nullptr;
+            const VAddr lo = std::strtoull(env, &end, 16);
+            if (!end || *end != '-') {
+                break;
+            }
+            const VAddr hi = std::strtoull(end + 1, &end, 16);
+            ranges.emplace_back(lo, hi);
+            std::printf("uc3: side queue wait range %#llx-%#llx\n", (unsigned long long)lo,
+                        (unsigned long long)hi);
+            env = end && *end == ',' ? end + 1 : nullptr;
+        }
+        return ranges;
+    }();
+    bool range_hit = false;
+    if (side && !wait_ranges.empty()) {
+        for (const auto& window : readback->windows) {
+            for (const auto& [lo, hi] : wait_ranges) {
+                range_hit |= window.start < hi && lo < window.start + window.size;
+            }
+        }
+        if (range_hit) {
+            static std::atomic<u32> hits{0};
+            const u32 n = hits.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 2 || (n & 1023) == 0) {
+                std::printf("uc3: side queue wait range hits: %u\n", n);
+            }
+        }
+    }
+    if (side && (wait_gfx || range_hit) && !SideqVerify()) {
+        readback->verify_tick = scheduler.CurrentTick();
+        readback->has_wait_gfx = true;
+        scheduler.Flush();
+    }
+    if (side && SideqVerify()) {
+        readback->verify =
+            staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached, 0, true);
+        for (const auto& entry : work) {
+            auto copies = entry.copies;
+            for (auto& copy : copies) {
+                copy.dstOffset = copy.dstOffset - readback->download.offset + readback->verify.offset;
+            }
+            runtime.CopyBuffer(entry.window->arena, readback->verify.buffer, copies);
+        }
+        readback->verify_tick = scheduler.CurrentTick();
+        readback->has_verify = true;
+        scheduler.Flush();
+    }
     if (side) {
         Gow3Stats::uc3_rb_side.fetch_add(1, std::memory_order_relaxed);
         Gow3Stats::uc3_rb_async.fetch_add(1, std::memory_order_relaxed);
@@ -1104,10 +1224,26 @@ bool BufferCache::SideQueueCopy(
         }
         write_tick = std::max(write_tick, tick);
     }
+    // uc3 (Drake's scarf, diagnosis): GOW3_SIDEQ_MARGIN=N requires the N ticks after the noted
+    // write tick to be finished (default 1). If a larger margin fixes the frozen cloth, the noted
+    // tick can lag the submission that really holds the write.
+    static const u64 margin = [] {
+        const char* env = std::getenv("GOW3_SIDEQ_MARGIN");
+        const long value = env ? std::atol(env) : 1;
+        return u64(value < 1 ? 1 : value);
+    }();
     auto* semaphore = scheduler.GetWorkSemaphore();
-    if (semaphore->KnownGpuTick() < write_tick + 1) {
+    if (semaphore->KnownGpuTick() < write_tick + margin) {
         semaphore->Refresh();
-        if (semaphore->KnownGpuTick() < write_tick + 1) {
+        if (semaphore->KnownGpuTick() < write_tick + margin) {
+            static const bool log = EmulatorSettingsImpl::Flag("GOW3_SIDEQ_ARENA_LOG", false);
+            if (log) {
+                static std::atomic<u32> refused{0};
+                const u32 n = refused.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 4 || (n & 255) == 0) {
+                    std::printf("uc3: side queue copies refused (write not landed): %u\n", n);
+                }
+            }
             return false;
         }
     }
@@ -1159,7 +1295,7 @@ bool BufferCache::SideQueueCopy(
     });
     Vulkan::Check(slot.cmdbuf.end());
     // The finished tick carries the writes' memory dependency (already signalled: no wait).
-    const u64 wait_value = write_tick + 1;
+    const u64 wait_value = write_tick + margin;
     const vk::Semaphore wait_semaphore = semaphore->Handle();
     const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eAllCommands;
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
@@ -1189,8 +1325,64 @@ void BufferCache::CompleteAsyncReadback(AsyncReadback& readback, VAddr device_ad
         const vk::Device device = instance.GetDevice();
         Vulkan::Check(device.waitForFences(slot.fence, true, std::numeric_limits<u64>::max()));
         Vulkan::Check(device.resetFences(slot.fence));
-        std::scoped_lock lk{sideq_mutex};
-        slot.busy = false;
+        {
+            std::scoped_lock lk{sideq_mutex};
+            slot.busy = false;
+        }
+        if (readback.has_wait_gfx) {
+            scheduler.GetWorkSemaphore()->Wait(readback.verify_tick);
+        }
+        // uc3 (Drake's scarf, diagnosis): GOW3_SIDEQ_SLEEP_US=N holds a side-queue readback
+        // N microseconds before the guest goes on: a timing control with no ordering.
+        static const long sleep_us = [] {
+            const char* env = std::getenv("GOW3_SIDEQ_SLEEP_US");
+            return env ? std::atol(env) : 0L;
+        }();
+        if (sleep_us > 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+        }
+        if (readback.has_verify) {
+            scheduler.GetWorkSemaphore()->Wait(readback.verify_tick);
+            readback.download.buffer->Invalidate(readback.download.offset, readback.download.size);
+            readback.verify.buffer->Invalidate(readback.verify.offset, readback.verify.size);
+            static std::atomic<u64> checked{0}, differing{0};
+            u64 diff_bytes = 0;
+            VAddr first_diff = 0;
+            for (const auto& copy : readback.copies) {
+                const u8* side_bytes = readback.download.mapped + copy.staging_offset;
+                const u8* gfx_bytes = readback.verify.mapped + copy.staging_offset;
+                for (u64 i = 0; i < copy.size; ++i) {
+                    if (side_bytes[i] != gfx_bytes[i]) {
+                        if (diff_bytes++ == 0) {
+                            first_diff = copy.address + i;
+                        }
+                    }
+                }
+            }
+            bool dirty;
+            {
+                std::scoped_lock lk{async_mutex};
+                dirty = readback.dirty;
+                async_free.push_back(readback.verify);
+                async_free_count.fetch_add(1, std::memory_order_release);
+            }
+            const u64 n = checked.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (diff_bytes) {
+                const u64 d = differing.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (d <= 40 || (d & 63) == 0) {
+                    std::printf("uc3: side queue verify DIFF %llu/%llu: %llu bytes differ, first at "
+                                "%#llx, window %#llx+%#llx, dirty %d\n",
+                                (unsigned long long)d, (unsigned long long)n,
+                                (unsigned long long)diff_bytes, (unsigned long long)first_diff,
+                                (unsigned long long)readback.windows[0].start,
+                                (unsigned long long)readback.windows[0].size, int(dirty));
+                }
+            } else if (n <= 2 || (n & 1023) == 0) {
+                std::printf("uc3: side queue verify: %llu checked, %llu differing\n",
+                            (unsigned long long)n,
+                            (unsigned long long)differing.load(std::memory_order_relaxed));
+            }
+        }
     } else {
         scheduler.GetWorkSemaphore()->Wait(readback.tick);
     }
@@ -1217,6 +1409,7 @@ void BufferCache::CompleteAsyncReadback(AsyncReadback& readback, VAddr device_ad
                 if (begin > cursor) {
                     memory->TryWriteBacking(std::bit_cast<u8*>(cursor), src + (cursor - copy.address),
                                             begin - cursor);
+                    Vulkan::SrtNoteReadback(cursor, begin - cursor);
                 }
                 cursor = std::max(cursor, hole_end);
                 label_guard_hits.fetch_add(1, std::memory_order_relaxed);
@@ -1224,6 +1417,7 @@ void BufferCache::CompleteAsyncReadback(AsyncReadback& readback, VAddr device_ad
             if (cursor < end) {
                 memory->TryWriteBacking(std::bit_cast<u8*>(cursor), src + (cursor - copy.address),
                                         end - cursor);
+                Vulkan::SrtNoteReadback(cursor, end - cursor);
             }
         }
         const u64 hits = label_guard_hits.load(std::memory_order_relaxed);
@@ -1238,6 +1432,7 @@ void BufferCache::CompleteAsyncReadback(AsyncReadback& readback, VAddr device_ad
             auto* dst_addr = std::bit_cast<u8*>(copy.address);
             Gow3WriteLog::NoteDownload(copy.address, download.mapped + copy.staging_offset, copy.size);
             memory->TryWriteBacking(dst_addr, download.mapped + copy.staging_offset, copy.size);
+            Vulkan::SrtNoteReadback(copy.address, copy.size);
         }
     }
     {
@@ -1366,6 +1561,7 @@ void BufferCache::CompleteLeafDownloads() {
         auto* dst = std::bit_cast<u8*>(leaf.address);
         Gow3WriteLog::NoteDownload(leaf.address, data, leaf.size);
         memory->TryWriteBacking(dst, data, leaf.size);
+        Vulkan::SrtNoteReadback(leaf.address, leaf.size);
         gpu_modified_ranges.Subtract(leaf.address, leaf.size);
         // The page keeps its GPU state while other GPU bytes on it are still not downloaded.
         const VAddr page = leaf.address & ~VAddr{0xfff};
@@ -1475,6 +1671,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
                                    download.mapped + (copy.dstOffset - download.offset), copy.size);
         memory->TryWriteBacking(dst_addr, download.mapped + (copy.dstOffset - download.offset),
                                 copy.size);
+        Vulkan::SrtNoteReadback(reinterpret_cast<VAddr>(dst_addr), copy.size);
     }
     memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
 }
@@ -1539,6 +1736,7 @@ void BufferCache::DownloadWindows(std::span<const DownloadWindow> windows) {
                                        download.mapped + (copy.dstOffset - download.offset), copy.size);
             memory->TryWriteBacking(dst_addr, download.mapped + (copy.dstOffset - download.offset),
                                     copy.size);
+            Vulkan::SrtNoteReadback(reinterpret_cast<VAddr>(dst_addr), copy.size);
         }
     }
     for (const auto& window : windows) {
@@ -1597,6 +1795,7 @@ void BufferCache::DownloadAllGpuModified() {
                                        download.mapped + (copy.dstOffset - download.offset), copy.size);
             memory->TryWriteBacking(dst_addr, download.mapped + (copy.dstOffset - download.offset),
                                     copy.size);
+            Vulkan::SrtNoteReadback(reinterpret_cast<VAddr>(dst_addr), copy.size);
         }
         memory_tracker->UnmarkRegionAsGpuModified(entry.arena->cpu_addr, entry.arena->size_bytes,
                                                   false);
@@ -1930,6 +2129,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
     memory_tracker->ForEachUploadRange(device_addr, size, is_written, [&](u64 addr, u64 size) {
         copies.emplace_back(total_size_bytes, addr, size);
         total_size_bytes += size;
+        NoteArenaWrite(addr, size);
     });
     if (const Buffer* src_buffer = UploadCopies(arena, copies, total_size_bytes)) {
         runtime.CopyBuffer(src_buffer, arena, copies);
@@ -2039,6 +2239,7 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
         if (meta->type == TextureCache::MetaType::HTile) {
             static constexpr u32 ZmaskUncompressed = 0xf;
             runtime.FillBuffer(arena, arena->Offset(device_addr), size, ZmaskUncompressed);
+            NoteArenaWrite(device_addr, size);
             return true;
         } else if (meta->type == TextureCache::MetaType::CMask) {
             const auto expanded_value = CmaskColorExpandedValue(meta->num_samples);
@@ -2051,6 +2252,7 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
                 return false;
             }
             runtime.FillBuffer(arena, arena->Offset(device_addr), size, *expanded_value);
+            NoteArenaWrite(device_addr, size);
             return true;
         } else {
             LOG_WARNING(Render_Vulkan, "Unhandled metadata type {}",
@@ -2105,6 +2307,7 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
     }
     auto& tile_manager = texture_cache.GetTileManager();
     tile_manager.TileImage(image, buffer_copies, arena, arena_offset);
+    NoteArenaWrite(device_addr, size);
     return true;
 }
 

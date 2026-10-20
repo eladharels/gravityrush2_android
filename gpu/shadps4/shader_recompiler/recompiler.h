@@ -27,6 +27,13 @@ struct Pools {
     }
 };
 
+// uc3: GOW3_UC3_MOVIE_FIX=1 with GOW3_UC3_RES=WxH (see recompiler.cpp). Uc3MovieFixKey() is 0 when
+// off or at 1920x1080, otherwise a value that changes with the resolution (part of the shader
+// cache version); Uc3MovieSize gives the resolution.
+constexpr u64 Uc3MovieShaderHash = 0xc85d9816ull;
+u32 Uc3MovieFixKey();
+void Uc3MovieSize(u32& width, u32& height);
+
 [[nodiscard]] IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools,
                                            Info& info, RuntimeInfo& runtime_info,
                                            const Profile& profile);

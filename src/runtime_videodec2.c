@@ -225,7 +225,8 @@ static int32_t picture(Decoder *d, FrameBuffer *buffer, OutputInfo *out) {
     info.frame_crop_bottom_offset=rows-height;
     info.colour_primaries=(uint8_t)d->frame->color_primaries;
     memcpy(luma+size,&info,sizeof(info));
-    if (!decoded_frames++) printf("Runtime: Videodec2 first picture %ux%u (pitch %u)\n",width,height,pitch);
+    if (!decoded_frames++) printf("Runtime: Videodec2 first picture %ux%u (pitch %u), game buffer %p, %llu bytes\n",width,height,pitch,
+                                  buffer->frame_buffer,(unsigned long long)buffer->frame_buffer_size);
     return 0;
 }
 static int32_t receive(Decoder *d, FrameBuffer *buffer, OutputInfo *out) {

@@ -120,6 +120,7 @@ enum SrtOrigin : u8 {
     SrtOriginLanding,    ///< a PM4 write landing (DmaData, WriteData, fences)
     SrtOriginBinding,    ///< a written buffer binding of a draw or dispatch
     SrtOriginRewrite,    ///< stamped again once written (DMA copy, HLE, constant RAM)
+    SrtOriginReadback,   ///< GPU-written bytes landing from a readback (R.10.17)
     SrtNumOrigins,
 };
 inline std::atomic<u8> g_srt_page_origin[SrtPageSlots];
@@ -192,6 +193,21 @@ inline void SrtNoteLanding(u64 address, u64 size, u8 origin = SrtOriginLanding) 
         return;
     }
     SrtNoteWrite(address, size, origin);
+}
+/// uc3 R.10.17 (Fable): GOW3_A1_READBACK_STAMP=1 - GPU-written bytes landing in guest memory from
+/// a readback (buffer or image) stamp their pages. The stamp at emission says a write happened,
+/// not that it landed: a worker reading before the landing walked the old bytes.
+inline bool SrtReadbackStamp() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_A1_READBACK_STAMP");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+inline void SrtNoteReadback(u64 address, u64 size) noexcept {
+    if (SrtReadbackStamp()) {
+        SrtNoteLanding(address, size, SrtOriginReadback);
+    }
 }
 /// uc3 R.10 A1 (a): labels written by graphics packets (EOP/EOS/ReleaseMem/WriteData of a
 /// label), with the value and the submission, noted by the prep worker while it walks a

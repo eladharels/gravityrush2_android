@@ -27,6 +27,7 @@
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "shader_recompiler/recompiler.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
@@ -39,7 +40,8 @@ static constexpr u32 PipelineKeyVersion = 7u;   // uc3: shadPS4 nightly 23c4133 
 // uc3: translator options that change the shaders it produces are part of the cached version, so
 // switching one retranslates the shaders instead of reusing the cached ones.
 static u32 TranslatedBinaryVersion() {
-    return ShaderBinaryVersion | (Shader::Gcn::ScopeSplitScalar() ? 0x10000u : 0u);
+    return ShaderBinaryVersion | (Shader::Gcn::ScopeSplitScalar() ? 0x10000u : 0u) |
+           Shader::Uc3MovieFixKey();
 }
 } // namespace Serialization
 

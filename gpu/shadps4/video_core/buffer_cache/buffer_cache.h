@@ -250,6 +250,8 @@ private:
     /// Writes too large to note per window (whole arenas) raise this instead.
     std::atomic<u64> big_write_tick{};
     void NoteGpuWrite(VAddr device_addr, u64 size);
+    /// uc3 (GOW3_SIDEQ_ARENA_TICK): copies into an arena that bind no written buffer.
+    void NoteArenaWrite(VAddr device_addr, u64 size);
     void ClassifyFault(VAddr window_start);
     /// Tick of the last GPU write noted in [start, start + size); ~0 when a window's slot
     /// belongs to another window.
@@ -289,6 +291,11 @@ private:
         std::atomic<bool> done{};
         u32 side_slot{~0u};           ///< R.9.6: copied on the side queue, waits on this slot
         u32 fast_slot{~0u};           ///< GOW3_READBACK_DONE_FAST: staging slot of its own
+        /// uc3 GOW3_SIDEQ_VERIFY=1: the same copies on the graphics queue, compared on landing.
+        Vulkan::StagingBufferRef verify{};
+        u64 verify_tick{};
+        bool has_verify{};
+        bool has_wait_gfx{};   ///< GOW3_SIDEQ_WAIT_GFX=1: waits verify_tick, no copy
     };
     /// gow3 R.9.6: side-queue copies of windows whose last GPU write has finished.
     struct SideQueueSlot {

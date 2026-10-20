@@ -469,7 +469,11 @@ bool Instance::CreateDevice() {
     // gow3 R.9.6: GOW3_READBACK_SIDEQ=1 adds a transfer-only queue (else a compute one) so a
     // readback of finished GPU writes does not wait behind the graphics queue's work.
     if (const char* env = std::getenv("GOW3_READBACK_SIDEQ"); env && env[0] == '1') {
-        for (u32 pass = 0; pass < 2 && side_queue_family == ~0u; ++pass) {
+        // uc3 (Drake's scarf): GOW3_SIDEQ_COMPUTE=1 takes a compute family (same caches as
+        // graphics) instead of the transfer-only one.
+        const char* compute_env = std::getenv("GOW3_SIDEQ_COMPUTE");
+        const u32 first_pass = compute_env && compute_env[0] == '1' ? 1 : 0;
+        for (u32 pass = first_pass; pass < 2 && side_queue_family == ~0u; ++pass) {
             for (std::size_t i = 0; i < family_properties.size(); i++) {
                 const auto flags = family_properties[i].queueFlags;
                 if (flags & vk::QueueFlagBits::eGraphics) {

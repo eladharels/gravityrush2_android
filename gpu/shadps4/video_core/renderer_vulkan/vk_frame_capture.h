@@ -42,12 +42,22 @@ public:
                           const VideoCore::ImageInfo* depth);
     static void Draw(u64 vs_hash, u64 ps_hash, u32 num_indices, u32 num_instances);
     static void Dispatch(u64 cs_hash, u32 x, u32 y, u32 z);
-    static void Sampled(const VideoCore::ImageInfo& info, bool storage);
+    /// `detail`: mips and layers of the cache image, the T# and the view (uc3 sand sparkle).
+    static void Sampled(const VideoCore::ImageInfo& info, bool storage,
+                        const std::string& detail = {});
+    /// uc3: the S# of a sampler bound for the next draw/dispatch, as text.
+    static void SamplerState(std::string text);
     /// Contents of a bound buffer (first 1 KiB), kept for small passes and a pass's first draw.
     /// uc3: callers copy at most this much of a guest buffer (Buffer prints 1 KiB).
     using CapturedBytes = std::array<u8, 1024>;
     static void Buffer(u64 stage_hash, u32 slot, VAddr address, const void* data, u64 size);
     static void Note(const char* text);
+
+    /// uc3 (GOW3_DUMP_CAPTURE): the number of the captured frame the GPU stream is in (its
+    /// passes or the display pass that ends it), 0 outside captures; and whether the current
+    /// pass is that display pass.
+    static u32 DumpFrame();
+    static bool InDisplayPass();
 
     /// In-game menu: records the next full frame (as the trigger file does).
     static void Request();
@@ -55,7 +65,8 @@ public:
     static std::string LastResult();
 
 private:
-    enum : u32 { Idle, Armed, Recording };
+    /// Tail: after the last frame is written, until its display pass ends (GOW3_DUMP_CAPTURE).
+    enum : u32 { Idle, Armed, Recording, Tail };
     static inline std::atomic<u32> state{Idle};
     static inline std::atomic<u64> flips{0};
     static inline std::atomic<VAddr> last_presented{0};

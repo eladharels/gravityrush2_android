@@ -4,6 +4,15 @@ Diário do projeto: o que foi feito, o que foi decidido e por quê. Entradas mai
 
 ---
 
+## 2026-10-20 — v0.3.4: 1440p e 4K nos três jogos, cachecol, UC3 jogável do início ao fim
+
+- **UC3 100% jogável do início ao fim** (jogado do início ao fim no port). Um único travamento no jogo inteiro, ainda não reproduzido. Algumas partes caem abaixo de 60 FPS, sempre acima de 30.
+- **Resolução** (estudo do Opus, `uc3/resolucao/`). O jogo guarda os tamanhos de vídeo numa estrutura iniciada por uma função que é igual byte a byte em UC1, UC2 e UC3, nas versões 1.00 e 1.02. `GOW3_UC3_RES=LxA` troca os imediatos dela, e `GOW3_UC3_RES_ALL=1` troca também a saída. O UC3 1.02 usa endereços fixos; os outros executáveis são achados pelos bytes. A tabela de memória do jogo foi feita para 1080p: `GOW3_UC3_RTHEAP_MB` e `GOW3_UC3_RT_MB` aumentam os heaps de render targets, a região de GPU e o total que o jogo confere. Acima de 4 GiB a init do heap da GPU cortava o tamanho para 32 bits: na 1.02 vira um nop (`mov eax,eax`), na 1.00 uma troca de 33 bytes do Opus. O vídeo de abertura (cs c85d9816, NV12→RGB) tinha 1/1920 e 1/1088 fixos e lia T#s do tamanho da tela: `GOW3_UC3_MOVIE_FIX` troca os literais e aponta os T#s de volta para a imagem 1920x1080.
+- **Testado** (1.02): UC3 em 1440p e 4K, UC2 e UC1 em 1440p e 4K, vídeos certos em todos. Sessões curtas, não um jogo inteiro. No monitor 4K, janela e janela sem borda deram o mesmo FPS (~40 parado no mesmo save). A 1.00 só foi conferida fora do jogo.
+- **Launcher:** opção Resolução (1080p, 1440p, 4K) para os três jogos, com os valores testados (1440p: heap +512 MB e memória 6144 MB; 4K: +1792/+448 MB e 8192 MB). Desligado no código.
+- **Cachecol do Drake no deserto** pulava com a fila lateral de readback: o launcher deixa `GOW3_READBACK_SIDEQ` desligado no UC3 (UC1 e UC2 continuam com ela).
+- **Desligados, para estudo:** correção do A1 em sessões longas (readback avisa o A1), `GOW3_RING_COPY_STEAL`/`SPIN_US`, testes da fila lateral (`GOW3_SIDEQ_*`), captura por draw e dumps (`GOW3_CAPTURE_PER_DRAW`, `GOW3_DUMP_CAPTURE`), `GOW3_TEX_LOD_BIAS`.
+
 ## 2026-10-19 — Luzes, sombras e paredes piscando corrigidas
 
 - **Sintoma.** No castelo e em outros lugares, uma parede ficava escura ou uma luz piscava por um instante. No log apareciam muitos avisos `SanitizeCopyLayers` com a contagem de camadas subindo (1→2→3…→8).

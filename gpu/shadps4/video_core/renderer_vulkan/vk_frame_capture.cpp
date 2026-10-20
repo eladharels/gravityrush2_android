@@ -19,6 +19,7 @@ struct Target {
     VAddr address{};
     vk::Format format{};
     u32 width{}, height{};
+    std::string detail;
     bool operator==(const Target&) const = default;
 };
 
@@ -32,12 +33,43 @@ struct Entry {
     std::vector<std::pair<Target, bool>> sampled; ///< textures (false) and storage images (true)
     std::string note;
     std::vector<std::string> buffers; ///< dumped constants, per draw
+    std::vector<std::string> samplers; ///< S#s bound in the pass, first few
+    std::vector<std::string> draw_lines; ///< GOW3_CAPTURE_PER_DRAW: each draw/dispatch
 };
+
+// uc3 (GOW3_CAPTURE_PER_DRAW=1, diagnosis): every draw and dispatch with its own textures,
+// samplers and the start of its constants, not just the pass summary.
+bool PerDraw() {
+    static const bool value = [] {
+        const char* env = std::getenv("GOW3_CAPTURE_PER_DRAW");
+        return env && env[0] == '1';
+    }();
+    return value;
+}
 
 // GPU thread only.
 std::vector<Entry> entries;
 std::vector<std::pair<Target, bool>> pending_sampled;
 std::vector<std::string> pending_buffers;
+std::vector<std::string> pending_samplers;
+// uc3 (GOW3_CAPTURE_FRAMES=<n>, diagnosis): one trigger records n consecutive frames.
+std::atomic<u32> frames_left{0};
+// GPU thread: GOW3_CAPTURE_FRAMES continuation (the frame after a written one) and the frame
+// numbers for GOW3_DUMP_CAPTURE.
+bool continuation = false;
+u32 frame_counter = 0;
+u32 dump_frame = 0;
+bool in_display = false;
+bool display_is_end = false; ///< the display pass that ended a written frame (not a tail one)
+bool next_frame_pending = false;
+u32 display_draws_to_log = 0;
+u32 CaptureFrames() {
+    static const u32 value = [] {
+        const char* env = std::getenv("GOW3_CAPTURE_FRAMES");
+        return env && env[0] ? std::max(1u, u32(std::strtoul(env, nullptr, 10))) : 1u;
+    }();
+    return value;
+}
 
 void AddBuffers(Entry& entry) {
     // Constants of full-screen passes (post-processing: camera matrices) and of the first draw
@@ -64,7 +96,31 @@ std::string Describe(const Target& t) {
     if (!t.address) {
         return "-";
     }
-    return std::format("{:#x} {} {}x{}", t.address, vk::to_string(t.format), t.width, t.height);
+    std::string text =
+        std::format("{:#x} {} {}x{}", t.address, vk::to_string(t.format), t.width, t.height);
+    if (!t.detail.empty()) {
+        text += ", " + t.detail;
+    }
+    return text;
+}
+
+// One draw/dispatch for GOW3_CAPTURE_PER_DRAW, from what was bound for it; constants are cut
+// to their first 64 dwords.
+void AddDrawLine(Entry& entry, std::string head) {
+    for (const auto& [t, storage] : pending_sampled) {
+        head += std::format("\n    {} {}", storage ? "writes " : "samples", Describe(t));
+    }
+    for (const auto& s : pending_samplers) {
+        head += "\n    " + s;
+    }
+    for (const auto& b : pending_buffers) {
+        size_t end = 0;
+        for (int line = 0; line < 9 && end != std::string::npos; ++line) {
+            end = b.find('\n', end + 1);
+        }
+        head += "\n  " + b.substr(0, end);
+    }
+    entry.draw_lines.push_back(std::move(head));
 }
 
 void AddSampled(Entry& entry) {
@@ -75,6 +131,12 @@ void AddSampled(Entry& entry) {
         }
     }
     pending_sampled.clear();
+    for (auto& s : pending_samplers) {
+        if (entry.samplers.size() < 32 && std::ranges::find(entry.samplers, s) == entry.samplers.end()) {
+            entry.samplers.push_back(std::move(s));
+        }
+    }
+    pending_samplers.clear();
 }
 
 void AddShader(Entry& entry, u64 hash) {
@@ -138,11 +200,17 @@ void Write(VAddr presented) {
         for (const auto& [t, storage] : e.sampled) {
             std::fprintf(f, "  %s %s\n", storage ? "writes " : "samples", Describe(t).c_str());
         }
+        for (const auto& s : e.samplers) {
+            std::fprintf(f, "  %s\n", s.c_str());
+        }
         if (!e.note.empty()) {
             std::fprintf(f, "  note: %s\n", e.note.c_str());
         }
         for (const auto& b : e.buffers) {
             std::fprintf(f, "%s\n", b.c_str());
+        }
+        for (const auto& d : e.draw_lines) {
+            std::fprintf(f, "%s\n", d.c_str());
         }
     }
     std::fclose(f);
@@ -166,6 +234,7 @@ void FrameCapture::OnFlip(VAddr presented_address) {
         arm = true;
     }
     if (arm) {
+        frames_left.store(CaptureFrames() - 1, std::memory_order_relaxed);
         state.store(Armed, std::memory_order_release);
         std::printf("Frame capture: armed\n");
     }
@@ -229,31 +298,82 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     // uc3: Uncharted 3 renders its scene into other targets and only composites into a display
     // buffer at the end, so waiting for a display pass to start missed the whole scene. Once
     // armed (at a flip), recording starts at the next pass and ends at the next display pass.
+    if (!display && new_pass) {
+        in_display = false;
+        if (next_frame_pending) {
+            next_frame_pending = false;
+            dump_frame = ++frame_counter;
+        }
+        if (state.load(std::memory_order_relaxed) == Tail) {
+            dump_frame = 0;
+            state.store(Idle, std::memory_order_release);
+            return;
+        }
+    }
+    if (state.load(std::memory_order_relaxed) == Tail) {
+        return;
+    }
     if (!display && new_pass && state.load(std::memory_order_relaxed) == Armed) {
         entries.clear();
         pending_sampled.clear();
         pending_buffers.clear();
+        pending_samplers.clear();
         pass_open = false;
+        dump_frame = ++frame_counter;
         state.store(Recording, std::memory_order_release);
     }
     if (display && new_pass) {
+        if (state.load(std::memory_order_relaxed) == Recording && continuation &&
+            entries.size() < 8) {
+            // uc3: Uncharted 3 draws a few passes (UI) and a second display pass after the one
+            // that ends the scene; they are the tail of the frame just written. The next frame
+            // starts after them.
+            std::printf("Frame capture: skipped %zu passes after the display pass\n",
+                        entries.size());
+            entries.clear();
+            pending_sampled.clear();
+            pending_buffers.clear();
+            pending_samplers.clear();
+            pass_open = false;
+            in_display = true;
+            display_is_end = false;
+            display_draws_to_log = 2;
+            return;
+        }
         if (state.load(std::memory_order_relaxed) == Recording) {
+            in_display = true;
+            display_is_end = true;
+            display_draws_to_log = 2;
             Write(last_presented.load(std::memory_order_relaxed));
             entries.clear();
             pending_sampled.clear();
             pending_buffers.clear();
-            state.store(Idle, std::memory_order_release);
+            pending_samplers.clear();
+            if (frames_left.load(std::memory_order_relaxed) > 0) {
+                // Record on: the passes after this display pass belong to the next frame (or,
+                // below 8 of them, are this frame's tail and get dropped).
+                frames_left.fetch_sub(1, std::memory_order_relaxed);
+                pass_open = false;
+                continuation = true;
+                next_frame_pending = true;
+                state.store(Recording, std::memory_order_release);
+            } else {
+                continuation = false;
+                state.store(Tail, std::memory_order_release);
+            }
             return;
         }
         entries.clear();
         pending_sampled.clear();
         pending_buffers.clear();
+        pending_samplers.clear();
         pass_open = false;
         state.store(Recording, std::memory_order_release);
     }
     if (state.load(std::memory_order_relaxed) != Recording) {
         pending_sampled.clear();
         pending_buffers.clear();
+        pending_samplers.clear();
         return;
     }
     const Target d = depth ? ToTarget(*depth) : Target{};
@@ -266,6 +386,12 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
 }
 
 void FrameCapture::Draw(u64 vs_hash, u64 ps_hash, u32 num_indices, u32 num_instances) {
+    if (in_display && display_draws_to_log > 0) {
+        --display_draws_to_log;
+        std::printf("Frame capture: display pass draw vs %016llx ps %016llx indices %u\n",
+                    static_cast<unsigned long long>(vs_hash),
+                    static_cast<unsigned long long>(ps_hash), num_indices);
+    }
     if (state.load(std::memory_order_relaxed) != Recording || entries.empty() ||
         entries.back().compute) {
         return;
@@ -273,6 +399,10 @@ void FrameCapture::Draw(u64 vs_hash, u64 ps_hash, u32 num_indices, u32 num_insta
     auto& e = entries.back();
     ++e.draws;
     e.indices += u64(num_indices) * std::max(num_instances, 1u);
+    if (PerDraw()) {
+        AddDrawLine(e, std::format("  draw {} vs {:016x} ps {:016x} indices {} instances {}",
+                                   e.draws, vs_hash, ps_hash, num_indices, num_instances));
+    }
     AddShader(e, vs_hash);
     AddShader(e, ps_hash);
     AddSampled(e);
@@ -283,6 +413,7 @@ void FrameCapture::Dispatch(u64 cs_hash, u32 x, u32 y, u32 z) {
     if (state.load(std::memory_order_relaxed) != Recording) {
         pending_sampled.clear();
         pending_buffers.clear();
+        pending_samplers.clear();
         return;
     }
     if (!entries.empty() && entries.back().compute && !entries.back().shaders.empty() &&
@@ -291,6 +422,10 @@ void FrameCapture::Dispatch(u64 cs_hash, u32 x, u32 y, u32 z) {
     } else {
         entries.push_back({.compute = true, .draws = 1, .shaders = {cs_hash}});
         entries.back().note = std::format("groups {}x{}x{}", x, y, z);
+    }
+    if (PerDraw()) {
+        AddDrawLine(entries.back(), std::format("  dispatch {} cs {:016x} groups {}x{}x{}",
+                                                entries.back().draws, cs_hash, x, y, z));
     }
     AddSampled(entries.back());
     AddBuffers(entries.back());
@@ -316,10 +451,27 @@ void FrameCapture::Buffer(u64 stage_hash, u32 slot, VAddr address, const void* d
     pending_buffers.push_back(std::move(out));
 }
 
-void FrameCapture::Sampled(const VideoCore::ImageInfo& info, bool storage) {
+void FrameCapture::Sampled(const VideoCore::ImageInfo& info, bool storage,
+                           const std::string& detail) {
     if (pending_sampled.size() < 64) {
-        pending_sampled.emplace_back(ToTarget(info), storage);
+        auto t = ToTarget(info);
+        t.detail = detail;
+        pending_sampled.emplace_back(std::move(t), storage);
     }
+}
+
+void FrameCapture::SamplerState(std::string text) {
+    if (pending_samplers.size() < 32) {
+        pending_samplers.push_back(std::move(text));
+    }
+}
+
+u32 FrameCapture::DumpFrame() {
+    return dump_frame;
+}
+
+bool FrameCapture::InDisplayPass() {
+    return in_display && display_is_end;
 }
 
 void FrameCapture::Note(const char* text) {

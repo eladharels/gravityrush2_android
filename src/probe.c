@@ -274,6 +274,270 @@ static void patch_job_spin(uint64_t image_size, const char *value, int sleep) {
     printf("Job spin: job workers spin %ld times before they sleep (was 1000)%s, at %#" PRIx64 "\n", n,
            sleep ? ", and may sleep in gameplay too" : "", found);
 }
+/* GOW3_UC3_RES=WxH (ucndc, off; Opus's resolution study, uc3/resolucao/estudo-resolucao.md):
+ * Uncharted 3's video settings (a structure at 0x18c6b34, written by the function at 0xe39690)
+ * hold the output size (+0x08), the render sizes (+0x18, +0x24, +0x38, 1920x1080) and the largest
+ * buffer size (+0x30, 2560x1216, also written at 0x565002 and 0x565043). Each is a
+ * mov dword [rax/rcx+off], imm32 whose immediate is replaced here, only when every one of them
+ * holds the expected bytes. GOW3_UC3_RES_ALL=1 also changes the output size.
+ * GOW3_UC3_RES_LOG=1 prints the structure's first 0x88 bytes once mapped and on each change. */
+typedef struct { uint64_t at; unsigned char reg, off; uint32_t value; int kind; } Uc3ResSite;
+enum { UC3_RES_OUT, UC3_RES_W, UC3_RES_H, UC3_RES_MAXW, UC3_RES_MAXH, UC3_RES_OUTH };
+static const Uc3ResSite uc3_res_sites[] = {
+    {0xe396b3, 0x40, 0x08, 0x780, UC3_RES_OUT},  {0xe396ba, 0x40, 0x0c, 0x438, UC3_RES_OUTH},
+    {0xe396c8, 0x40, 0x18, 0x780, UC3_RES_W},    {0xe396cf, 0x40, 0x1c, 0x438, UC3_RES_H},
+    {0xe396dd, 0x40, 0x24, 0x780, UC3_RES_W},    {0xe396e4, 0x40, 0x28, 0x438, UC3_RES_H},
+    {0xe39715, 0x40, 0x30, 0xa00, UC3_RES_MAXW}, {0xe3971c, 0x40, 0x34, 0x4c0, UC3_RES_MAXH},
+    {0xe39723, 0x40, 0x38, 0x780, UC3_RES_W},    {0xe3972a, 0x40, 0x3c, 0x438, UC3_RES_H},
+    {0x565002, 0x40, 0x30, 0xa00, UC3_RES_MAXW}, {0x565009, 0x40, 0x34, 0x4c0, UC3_RES_MAXH},
+    {0x56504a, 0x41, 0x30, 0xa00, UC3_RES_MAXW}, {0x565051, 0x41, 0x34, 0x4c0, UC3_RES_MAXH},
+};
+/* Uncharted 2 and 1 (Opus, uc3/resolucao/estudo-uc1-uc2.md): the same init (update: UC2 0xbd2300,
+ * UC1 0x4d0710), found by its first two stores; the sites sit at the same distances as UC3's from 0xe396b3,
+ * and the options code has no second write of the largest buffer size. The structure's address comes
+ * from the lea rax,[rip+disp] that starts the init, 0x23 bytes before. */
+static const Uc3ResSite uc2_res_sites[] = {
+    {0x00, 0x40, 0x08, 0x780, UC3_RES_OUT},  {0x07, 0x40, 0x0c, 0x438, UC3_RES_OUTH},
+    {0x15, 0x40, 0x18, 0x780, UC3_RES_W},    {0x1c, 0x40, 0x1c, 0x438, UC3_RES_H},
+    {0x2a, 0x40, 0x24, 0x780, UC3_RES_W},    {0x31, 0x40, 0x28, 0x438, UC3_RES_H},
+    {0x62, 0x40, 0x30, 0xa00, UC3_RES_MAXW}, {0x69, 0x40, 0x34, 0x4c0, UC3_RES_MAXH},
+    {0x70, 0x40, 0x38, 0x780, UC3_RES_W},    {0x77, 0x40, 0x3c, 0x438, UC3_RES_H},
+};
+#define UC3_RES_STRUCT 0x18c6b34u
+#define UC_RES_MAX_SITES 16
+static uint64_t uc_find_unique(uint64_t image_size, const void *bytes, size_t len) {
+    const unsigned char *b = bytes;
+    uint64_t found = 0, count = 0;
+    for (uint64_t at = 0; at + len <= image_size; ++at)
+        if (image[at] == b[0] && !memcmp(image + at, b, len)) { found = at; ++count; }
+    return count == 1 ? found : 0;
+}
+static int uc_res_site_ok(uint64_t image_size, const Uc3ResSite *s) {
+    unsigned char expect[7] = {0xc7, s->reg, s->off};
+    memcpy(expect + 3, &s->value, 4);
+    return s->at + 7 <= image_size && !memcmp(image + s->at, expect, 7);
+}
+/* The video settings' sites and structure: UC3's at fixed addresses, else UC2's by the init's bytes.
+ * Returns the number of sites, 0 when neither matches. */
+static size_t uc_res_find(uint64_t image_size, Uc3ResSite *sites, uint64_t *structure, const char **game) {
+    size_t n = sizeof(uc3_res_sites) / sizeof(uc3_res_sites[0]);
+    int ok = 1;
+    for (size_t i = 0; i < n; ++i) ok &= uc_res_site_ok(image_size, &uc3_res_sites[i]);
+    if (ok) {
+        memcpy(sites, uc3_res_sites, sizeof(uc3_res_sites));
+        *structure = UC3_RES_STRUCT;
+        *game = "UC3";
+        return n;
+    }
+    static const unsigned char init[] = {0xc7, 0x40, 0x08, 0x80, 0x07, 0, 0, 0xc7, 0x40, 0x0c, 0x38, 0x04, 0, 0};
+    const uint64_t base = uc_find_unique(image_size, init, sizeof(init));
+    if (base < 0x23 || memcmp(image + base - 0x23, "\x48\x8d\x05", 3)) return 0;
+    n = sizeof(uc2_res_sites) / sizeof(uc2_res_sites[0]);
+    for (size_t i = 0; i < n; ++i) {
+        sites[i] = uc2_res_sites[i];
+        sites[i].at += base;
+        if (!uc_res_site_ok(image_size, &sites[i])) return 0;
+    }
+    int32_t disp;
+    memcpy(&disp, image + base - 0x23 + 3, 4);
+    *structure = base - 0x23 + 7 + (int64_t)disp;
+    *game = "UC1/UC2";
+    /* UC3 1.00 rewrites the largest buffer size in its options code once (0x15e18c, mov [rbx+0x30/0x34]). */
+    static const unsigned char max[] = {0xc7, 0x43, 0x30, 0x00, 0x0a, 0, 0, 0xc7, 0x43, 0x34, 0xc0, 0x04, 0, 0};
+    const uint64_t at = uc_find_unique(image_size, max, sizeof(max));
+    if (at) {
+        sites[n++] = (Uc3ResSite){at, 0x43, 0x30, 0xa00, UC3_RES_MAXW};
+        sites[n++] = (Uc3ResSite){at + 7, 0x43, 0x34, 0x4c0, UC3_RES_MAXH};
+        *game = "UC3";
+    }
+    return n;
+}
+static void patch_uc3_resolution(const Uc3ResSite *sites, size_t n, const char *game, const char *value, int all) {
+    unsigned w = 0, h = 0;
+    char extra = 0;
+    if (sscanf(value, "%ux%u%c", &w, &h, &extra) != 2 || w < 640 || h < 360 || w > 7680 || h > 4320) {
+        printf("UC3 resolution: bad GOW3_UC3_RES=%s (WxH)\n", value);
+        return;
+    }
+    if (!n) {
+        printf("UC3 resolution: the video settings were not found as expected, not patched (another game or version)\n");
+        return;
+    }
+    const uint32_t maxw = w > 0xa00 ? w : 0xa00, maxh = h > 0x4c0 ? h : 0x4c0;
+    for (size_t i = 0; i < n; ++i) {
+        const Uc3ResSite *s = &sites[i];
+        uint32_t v = s->value;
+        switch (s->kind) {
+        case UC3_RES_W: v = w; break;
+        case UC3_RES_H: v = h; break;
+        case UC3_RES_MAXW: v = maxw; break;
+        case UC3_RES_MAXH: v = maxh; break;
+        case UC3_RES_OUT: if (all) v = w; break;
+        case UC3_RES_OUTH: if (all) v = h; break;
+        }
+        memcpy(image + s->at + 3, &v, 4);
+    }
+    printf("%s resolution: render %ux%u, largest buffer %ux%u, output %s (%zu sites from %#" PRIx64 ")\n", game, w, h,
+           maxw, maxh, all ? value : "1920x1080 (unchanged)", n, sites[0].at);
+}
+/* GOW3_UC3_RTHEAP_MB=N and GOW3_UC3_RT_MB=M (Opus, 1440p/4K): the memory map table in .data
+ * (0x16f8d90..0x16fa050, 32-byte entries {u32 id, u32 group, u64 size, u64 align, u64 0}) sizes the
+ * game's heaps for 1080p. N MB are added to the Render Target Heap (group 6, id 0x85, 0x2310bc00) and
+ * M MB to the Render Target heap (id 0x84, 0x8bc4000), and N+M to their region (group 2, id 3,
+ * 0xbec00000 = 3052 MB, the sum of group 6), so the GPU memory the game allocates grows by N+M; the
+ * rest (id 0xe, used later by the game) is left alone. All sizes must read as expected. The group 2
+ * context total (0x120000000 = 4608 MB, the movabs imm64 at 0x316e95 passed to the context setup at
+ * 0xd9dec0) grows by N+M as well, or ValidateContext asserts "Size Does Not Add Up". The direct
+ * memory pool (5056 MiB) had about 468 MiB free at 1080p; above that GOW3_DMEM_MB must grow too.
+ * The game places its memory areas one after another, each at the next 4 GiB boundary (the next
+ * address at 0x16e7920, aligned up after each AllocateMemory at 0xdaaa80), so a GPU region above
+ * 4 GiB moves the flexible memory after it; the game asserts that each lands where it asked.
+ * Above 4 GiB the heap init at 0xd9b1b0 truncates the size to 32 bits (mov eax, eax at 0xd9b269,
+ * found by Opus) before it sets the arena's end and size fields; that move becomes a 2-byte nop
+ * (the bytes must read as expected; the other heap inits are left alone). */
+#define UC3_RT_SIZE 0x16f9bf8u
+#define UC3_RTHEAP_SIZE 0x16f9c18u
+#define UC3_GPU_REGION_SIZE 0x16f8dd8u
+#define UC3_DIRECT_TOTAL_IMM 0x316e95u
+#define UC3_HEAP_SIZE_TRUNC 0xd9b269u
+static int uc3_mb(const char *name, unsigned long *mb) {
+    const char *value = getenv(name);
+    *mb = 0;
+    if (!value || !value[0]) return 1;
+    char *end = NULL;
+    *mb = strtoul(value, &end, 10);
+    if (!end || *end || *mb > 4096) {
+        printf("UC3 render target heap: bad %s=%s (0-4096)\n", name, value);
+        return 0;
+    }
+    return 1;
+}
+/* Uncharted 2 and 1 (Opus, uc3/resolucao/estudo-uc1-uc2.md; the update's executables): the same table
+ * with their own sizes (Render Target Heap 0x1f10bc00, region 0xbac00000), each entry found by its id,
+ * group and size, the same movabs for the total, and the same GPU Mem heap init as UC3's 0xd9b1b0
+ * (UC2 0xb2f9b0, UC1 0x4503a0), whose mov eax, eax is found by the bytes around it: jmp back to the
+ * spinlock, lfence, mov [r13+0x60], r14, mov rax, [rbp-0x40]. */
+static const unsigned char uc_heap_trunc[] = {0xeb, 0xd2, 0x0f, 0xae, 0xe8, 0x4d, 0x89, 0x75,
+                                              0x60, 0x48, 0x8b, 0x45, 0xc0, 0x89, 0xc0};
+/* The 1.00 executables (Opus, "Desenho para a 1.00") truncate elsewhere: the inner heap init (UC3
+ * 0x4957b0, UC2 0x4e1ef0, UC1 0x35c8d0) keeps the size in a 32-bit local. Opus's 33-byte rewrite at
+ * its +0x6e reads the 64-bit size the GPU Mem wrapper stored at [obj+0xc8] (r13+0x78) when its low
+ * half matches the size passed, and the 32-bit one otherwise (another class calls the same init);
+ * the lfence after the spinlock's lock cmpxchg goes to make room. Used only when the update's
+ * mov eax, eax is not there (the update has these bytes too, in an init that is not GPU Mem's). */
+static const unsigned char uc_heap_trunc_100[] = {
+    0x0f, 0xae, 0xe8, 0x4d, 0x89, 0x75, 0x10, 0x8b, 0x45, 0xc4, 0x49, 0x8b, 0x4d, 0x18, 0x48, 0x8d, 0x14,
+    0x85, 0x00, 0x00, 0x00, 0x00, 0x48, 0x83, 0xe1, 0x03, 0x48, 0x09, 0xd1, 0x49, 0x89, 0x4d, 0x18};
+static const unsigned char uc_heap_wide_100[] = {
+    0x4d, 0x89, 0x75, 0x10, 0x49, 0x8b, 0x45, 0x78, 0x3b, 0x45, 0xc4, 0x74, 0x03, 0x8b, 0x45, 0xc4, 0x49,
+    0x8b, 0x4d, 0x18, 0x83, 0xe1, 0x03, 0x48, 0x8d, 0x0c, 0x81, 0x49, 0x89, 0x4d, 0x18, 0x66, 0x90};
+static uint64_t uc_find_entry(uint64_t image_size, uint32_t id, uint32_t group, uint64_t size) {
+    unsigned char entry[16];
+    memcpy(entry, &id, 4);
+    memcpy(entry + 4, &group, 4);
+    memcpy(entry + 8, &size, 8);
+    const uint64_t at = uc_find_unique(image_size, entry, sizeof(entry));
+    return at ? at + 8 : 0;
+}
+static void patch_uc3_rt_heap(uint64_t image_size) {
+    unsigned long mb_heap = 0, mb_rt = 0;
+    if (!uc3_mb("GOW3_UC3_RTHEAP_MB", &mb_heap) || !uc3_mb("GOW3_UC3_RT_MB", &mb_rt) || !(mb_heap + mb_rt))
+        return;
+    uint64_t at_heap = UC3_RTHEAP_SIZE, at_rt = UC3_RT_SIZE, at_region = UC3_GPU_REGION_SIZE,
+             at_total = UC3_DIRECT_TOTAL_IMM;
+    uint64_t heap = 0, rt = 0, region = 0, total = 0;
+    const char *game = "UC3";
+    int fixed = 1;
+    if (UC3_RTHEAP_SIZE + 8 <= image_size) {
+        memcpy(&heap, image + at_heap, 8);
+        memcpy(&rt, image + at_rt, 8);
+        memcpy(&region, image + at_region, 8);
+        memcpy(&total, image + at_total, 8);
+    }
+    if (heap != 0x2310bc00u || rt != 0x8bc4000u || region != 0xbec00000u || total != 0x120000000ull ||
+        memcmp(image + at_total - 2, "\x48\xba", 2)) {
+        at_heap = uc_find_entry(image_size, 0x85, 6, 0x2310bc00u);
+        at_region = uc_find_entry(image_size, 3, 2, 0xbec00000u);
+        game = "UC3";
+        if (!at_heap || !at_region) {
+            at_heap = uc_find_entry(image_size, 0x85, 6, 0x1f10bc00u);
+            at_region = uc_find_entry(image_size, 3, 2, 0xbac00000u);
+            game = "UC1/UC2";
+        }
+        at_rt = uc_find_entry(image_size, 0x84, 6, 0x8bc4000u);
+        at_total = uc_find_unique(image_size, "\x48\xba\x00\x00\x00\x20\x01\x00\x00\x00", 10);
+        if (!at_heap || !at_rt || !at_region || !at_total) {
+            printf("UC3 render target heap: unexpected sizes %#" PRIx64 "/%#" PRIx64 "/%#" PRIx64 "/%#" PRIx64
+                   " and no table found by its bytes, not patched\n", heap, rt, region, total);
+            return;
+        }
+        at_total += 2;
+        memcpy(&heap, image + at_heap, 8);
+        memcpy(&rt, image + at_rt, 8);
+        memcpy(&region, image + at_region, 8);
+        memcpy(&total, image + at_total, 8);
+        fixed = 0;
+    }
+    const uint64_t add_heap = (uint64_t)mb_heap << 20, add_rt = (uint64_t)mb_rt << 20;
+    const uint64_t new_heap = heap + add_heap, new_rt = rt + add_rt;
+    const uint64_t new_region = region + add_heap + add_rt, new_total = total + add_heap + add_rt;
+    memcpy(image + at_heap, &new_heap, 8);
+    memcpy(image + at_rt, &new_rt, 8);
+    memcpy(image + at_region, &new_region, 8);
+    memcpy(image + at_total, &new_total, 8);
+    const char *trunc = "";
+    if (new_region > (UINT64_C(1) << 32) && fixed) {
+        if (!memcmp(image + UC3_HEAP_SIZE_TRUNC - 4, "\x48\x8b\x45\xc0\x89\xc0", 6)) {
+            memcpy(image + UC3_HEAP_SIZE_TRUNC, "\x66\x90", 2);
+            trunc = " (above 4 GiB: 64-bit heap size at 0xd9b269)";
+        } else {
+            trunc = " (above 4 GiB, but the heap init at 0xd9b269 is not as expected: sizes wrap)";
+        }
+    } else if (new_region > (UINT64_C(1) << 32)) {
+        const uint64_t at = uc_find_unique(image_size, uc_heap_trunc, sizeof(uc_heap_trunc));
+        const uint64_t at_100 = at ? 0 : uc_find_unique(image_size, uc_heap_trunc_100, sizeof(uc_heap_trunc_100));
+        if (at) {
+            memcpy(image + at + sizeof(uc_heap_trunc) - 2, "\x66\x90", 2);
+            trunc = " (above 4 GiB: 64-bit heap size in the GPU Mem heap init)";
+        } else if (at_100) {
+            memcpy(image + at_100, uc_heap_wide_100, sizeof(uc_heap_wide_100));
+            trunc = " (above 4 GiB: 64-bit heap size in the 1.00 heap init)";
+        } else {
+            trunc = " (above 4 GiB, but the GPU Mem heap init is not as expected: sizes wrap)";
+        }
+    }
+    printf("%s render target heap: %" PRIu64 " -> %" PRIu64 " bytes (+%lu MB), render targets %" PRIu64 " -> %" PRIu64
+           " (+%lu MB), GPU region %" PRIu64 " -> %" PRIu64 ", direct total %" PRIu64 " -> %" PRIu64 "%s\n",
+           game, heap, new_heap, mb_heap, rt, new_rt, mb_rt, region, new_region, total, new_total, trunc);
+}
+static uint64_t uc_res_struct = UC3_RES_STRUCT;
+static void *uc3_res_log(void *unused) {
+    (void)unused;
+    uint32_t last[0x22] = {0};
+    int printed = 0;
+    for (;;) {
+#ifdef _WIN32
+        Sleep(500);
+#else
+        usleep(500000);
+#endif
+        uint32_t now[0x22];
+        memcpy(now, image + uc_res_struct, sizeof(now));
+        if (printed && !memcmp(now, last, sizeof(now))) continue;
+        int nonzero = 0;
+        for (size_t i = 0; i < 0x22; ++i) nonzero |= now[i] != 0;
+        if (!nonzero) continue;
+        char line[1024];
+        int k = snprintf(line, sizeof(line), "UC3 resolution struct %s:", printed ? "changed" : "");
+        for (size_t i = 0; i < 0x22 && k < (int)sizeof(line) - 16; ++i)
+            k += snprintf(line + k, sizeof(line) - k, "%s+%02zx=%u", i % 8 ? " " : "\n  ", i * 4, now[i]);
+        printf("%s\n", line);
+        fflush(stdout);
+        memcpy(last, now, sizeof(now));
+        printed = 1;
+    }
+    return NULL;
+}
 /* Mouse camera callbacks (runtime_guest_callbacks in runtime_pad.c; from SuperMedo's uncharted_pc,
  * GPL): a guest function found by its code calls a host function first, with rdi, rsi, the image
  * base and r14 (Microsoft x64 convention on every host). The thunk keeps the guest's registers and
@@ -1397,6 +1661,24 @@ int main(int argc, char **argv) {
     if ((getenv("GOW3_JOB_SPIN") && getenv("GOW3_JOB_SPIN")[0]) || (getenv("GOW3_JOB_SLEEP") && getenv("GOW3_JOB_SLEEP")[0] == '1'))
         patch_job_spin(size, getenv("GOW3_JOB_SPIN") && getenv("GOW3_JOB_SPIN")[0] ? getenv("GOW3_JOB_SPIN") : NULL,
                        getenv("GOW3_JOB_SLEEP") && getenv("GOW3_JOB_SLEEP")[0] == '1');
+#ifdef _WIN32
+    const int res_set = gpu_enabled && getenv("GOW3_UC3_RES") && getenv("GOW3_UC3_RES")[0];
+    const int res_log = gpu_enabled && getenv("GOW3_UC3_RES_LOG") && getenv("GOW3_UC3_RES_LOG")[0] == '1';
+    Uc3ResSite res_sites[UC_RES_MAX_SITES];
+    const char *res_game = "UC3";
+    size_t res_n = 0;
+    if (res_set || res_log) res_n = uc_res_find(size, res_sites, &uc_res_struct, &res_game);
+    if (res_set)
+        patch_uc3_resolution(res_sites, res_n, res_game, getenv("GOW3_UC3_RES"),
+                             getenv("GOW3_UC3_RES_ALL") && getenv("GOW3_UC3_RES_ALL")[0] == '1');
+    if (gpu_enabled)
+        patch_uc3_rt_heap(size);
+    if (res_log && res_n && mapped(segments, ns, uc_res_struct, 0x88)) {
+        pthread_t res_log_thread;
+        if (!pthread_create(&res_log_thread, NULL, uc3_res_log, NULL)) pthread_detach(res_log_thread);
+        printf("%s resolution: logging the video structure at %#" PRIx64 "\n", res_game, uc_res_struct);
+    }
+#endif
     /* ucndc: mouse camera (input.ini with mouse_look=1; GOW3_MOUSE_CAMERA=0 keeps the mouse a stick) */
     if (gpu_enabled && runtime_pad_mouse_camera()) install_game_callbacks(segments, ns, size);
 #ifdef _WIN32
