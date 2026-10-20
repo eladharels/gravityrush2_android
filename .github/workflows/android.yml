@@ -62,22 +62,26 @@ jobs:
 
     steps:
       - name: Check out source
+        id: s_check_out_source
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Set up JDK
+        id: s_set_up_jdk
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Python
+        id: s_set_up_python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Restore Android SDK package cache
+        id: s_restore_android_sdk_package_cache
         uses: actions/cache@v4
         with:
           path: |
@@ -87,6 +91,7 @@ jobs:
           key: android-sdk-${{ runner.os }}-${{ env.ANDROID_PLATFORM }}-${{ env.ANDROID_BUILD_TOOLS }}
 
       - name: Set up native dependency environment
+        id: s_set_up_native_dependency_environment
         uses: mamba-org/setup-micromamba@v2
         with:
           environment-file: ci/environment.yml
@@ -94,6 +99,7 @@ jobs:
           init-shell: bash
 
       - name: Set up Android SDK
+        id: s_set_up_android_sdk
         uses: android-actions/setup-android@v3
         with:
           packages: >-
@@ -102,6 +108,7 @@ jobs:
             build-tools;${{ env.ANDROID_BUILD_TOOLS }}
 
       - name: Install Android and native build tools
+        id: s_install_android_and_native_build_tools
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
@@ -109,6 +116,7 @@ jobs:
             libxml2-utils unzip xz-utils zstd
 
       - name: Restore reproducible build caches
+        id: s_restore_reproducible_build_caches
         uses: actions/cache@v4
         with:
           path: |
@@ -120,18 +128,21 @@ jobs:
           restore-keys: android-${{ runner.os }}-
 
       - name: Restore fexdroid APK cache
+        id: s_restore_fexdroid_apk_cache
         uses: actions/cache@v4
         with:
           path: .local-deps/android/fexdroid-legacy.apk
           key: fexdroid-apk-${{ vars.GOW3_FEXDROID_APK_SHA256 || '21bed34092f698e39e77138589ebdab8d3498577ffc4fdc3bfef1c711b50d3bf' }}
 
       - name: Build pinned host dependencies
+        id: s_build_pinned_host_dependencies
         shell: bash -el {0}
         run: |
           set -o pipefail
           bash ci/setup-deps.sh "$CONDA_PREFIX" 2>&1 | tee "$RUNNER_TEMP/ci-log-1-host-deps.log"
 
       - name: Configure temporary paths
+        id: s_configure_temporary_paths
         shell: bash
         run: |
           {
@@ -140,6 +151,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Restore signing keystore
+        id: s_restore_signing_keystore
         shell: bash
         run: |
           set +x
@@ -153,6 +165,7 @@ jobs:
           bash tools/android/inputs/prepare_signing.sh "$GOW3_KEYSTORE"
 
       - name: Fetch Steam libraries
+        id: s_fetch_steam_libraries
         shell: bash
         run: |
           set -euo pipefail
@@ -162,6 +175,7 @@ jobs:
       # adrenotools 风格驱动包（下载源见 launcher assets driver_sources.json）。
 
       - name: Build the Bionic runtime
+        id: s_build_the_bionic_runtime
         shell: bash -el {0}
         run: |
           set -o pipefail
@@ -169,6 +183,7 @@ jobs:
           bash tools/android/build_bionic.sh 2>&1 | tee "$RUNNER_TEMP/ci-log-4-bionic-runtime.log"
 
       - name: Build and sign the release APK
+        id: s_build_and_sign_the_release_apk
         run: |
           set -o pipefail
           bash tools/android/apk/build_release_apk.sh 2>&1 | tee "$RUNNER_TEMP/ci-log-5-apk.log"
@@ -179,6 +194,7 @@ jobs:
           echo "APK_SHA256=$(cut -d' ' -f1 "$apk.sha256")" >> "$GITHUB_ENV"
 
       - name: Publish build summary
+        id: s_publish_build_summary
         run: |
           {
             echo '## Android build/package verified'
@@ -192,6 +208,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload signed APK and checksum
+        id: s_upload_signed_apk_and_checksum
         uses: actions/upload-artifact@v4
         with:
           name: gow3-android-arm64-${{ github.sha }}
@@ -204,23 +221,45 @@ jobs:
       # uncharted_android: the failing build's error lines as check annotations, readable through
       # the checks API (the last log written is the step that failed).
       - name: Report build errors
+        id: s_report_build_errors
         if: failure()
-        shell: bash
+        shell: bash {0}
+        env:
+          STEP_OUTCOMES: |
+            checkout=${{ steps.s_check_out_source.outcome }}
+            jdk=${{ steps.s_set_up_jdk.outcome }}
+            python=${{ steps.s_set_up_python.outcome }}
+            micromamba=${{ steps.s_set_up_native_dependency_environment.outcome }}
+            android_sdk=${{ steps.s_set_up_android_sdk.outcome }}
+            apt=${{ steps.s_install_android_and_native_build_tools.outcome }}
+            host_deps=${{ steps.s_build_pinned_host_dependencies.outcome }}
+            signing=${{ steps.s_restore_signing_keystore.outcome }}
+            steam_libs=${{ steps.s_fetch_steam_libraries.outcome }}
+            bionic=${{ steps.s_build_the_bionic_runtime.outcome }}
+            apk=${{ steps.s_build_and_sign_the_release_apk.outcome }}
         run: |
-          log=$(ls -1 "$RUNNER_TEMP"/ci-log-*.log 2>/dev/null | sort | tail -n 1)
-          [[ -n $log ]] || { echo "::error title=Build failed::before any build step (setup or signing)"; exit 0; }
+          annotate() { # title, text: one annotation, newlines encoded
+            printf '::error title=%s::%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r' | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}')"
+          }
+          annotate "step outcomes" "$STEP_OUTCOMES"
+          logs=$(ls -1 "$RUNNER_TEMP"/ci-log-*.log 2>/dev/null | sort)
+          if [ -z "$logs" ]; then
+            annotate "Build failed" "before any logged build step (checkout, setup, deps or signing)"
+            exit 0
+          fi
+          log=$(printf '%s\n' "$logs" | tail -n 1)
           name=$(basename "$log" .log)
-          errors=$(grep -n -iE 'error|fatal|undefined reference|failed|STOP:|No such file' "$log" | grep -v -iE 'werror|-Wno-error|error_count|errors\.h' | head -n 120)
-          [[ -n $errors ]] || errors=$(tail -n 60 "$log")
-          part=0
-          while IFS= read -r -d '' chunk && (( part < 8 )); do
-            part=$((part + 1))
-            body=${chunk//'%'/'%25'}; body=${body//$'\r'/}; body=${body//$'\n'/'%0A'}
-            echo "::error title=$name ($part)::$body"
-          done < <(printf '%s\n' "$errors" | split -l 15 --filter='cat; printf "\0"')
-          echo "::error title=$name (tail)::$(tail -n 25 "$log" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+          annotate "steps logged" "$logs"
+          errors=$(grep -n -iE 'error|fatal|undefined reference|failed|STOP:|No such file|not found' "$log" | grep -v -iE 'werror|-Wno-error|error_count|errors\.h' | head -n 105)
+          for part in 1 2 3 4 5 6 7; do
+            chunk=$(printf '%s\n' "$errors" | sed -n "$(( (part - 1) * 15 + 1 )),$(( part * 15 ))p")
+            [ -n "$chunk" ] && annotate "$name errors $part" "$chunk"
+          done
+          annotate "$name tail" "$(tail -n 30 "$log")"
+          exit 0
 
       - name: Remove signing material
+        id: s_remove_signing_material
         if: always()
         shell: bash
         run: |
@@ -236,11 +275,13 @@ jobs:
       contents: write
     steps:
       - name: Download signed APK and checksum
+        id: s_download_signed_apk_and_checksum
         uses: actions/download-artifact@v4
         with:
           name: gow3-android-arm64-${{ github.sha }}
 
       - name: Publish the release
+        id: s_publish_the_release
         uses: softprops/action-gh-release@v2
         with:
           files: |
