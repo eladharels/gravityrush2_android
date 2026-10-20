@@ -211,11 +211,16 @@ if [ "${1:-game}" = game ]; then
     # 身份校验：boot-linked.bin / content.bin / patches.bin 是针对某一个 eboot 派生的。换了游戏
     # 目录或游戏版本后旧产物仍会被原样加载（app0 却指向另一个版本），所以比对摘要不符即拒绝启动，
     # 而不是把 A 的映像配 B 的 app0 用。
+    # uncharted_android: the image is derived from the chosen executable (GOW3_EXECUTABLE:
+    # big3-ps4_Shipping.elf for Uncharted 3), so that is the file the digest is checked against.
+    executable=${GOW3_EXECUTABLE:-eboot.bin}
+    case $executable in */*|..*) echo "Invalid GOW3_EXECUTABLE: $executable" >&2; exit 2 ;; esac
+    [ -f "$game_dir/$executable" ] || { echo "Game executable missing: $game_dir/$executable" >&2; exit 2; }
     if [ -n "${GOW3_EBOOT_SHA256:-}" ]; then
-        actual=$(sha256sum "$game_dir/eboot.bin" 2>/dev/null | cut -d' ' -f1)
+        actual=$(sha256sum "$game_dir/$executable" 2>/dev/null | cut -d' ' -f1)
         if [ "$actual" != "$GOW3_EBOOT_SHA256" ]; then
             echo "The derived runtime is for a different game build ($GOW3_EBOOT_SHA256) but" >&2
-            echo "  $game_dir/eboot.bin is $actual" >&2
+            echo "  $game_dir/$executable is $actual" >&2
             echo "Re-run launch_env.py for this game before starting." >&2
             exit 2
         fi
