@@ -98,12 +98,7 @@ internal fun FirstRunScreen(
     val ready = identity is GameIdentityState.Ready
 
     Box(modifier = Modifier.fillMaxSize()) {
-        Image(
-            painter = painterResource(R.drawable.bg_wallpaper),
-            contentDescription = null,
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop,
-        )
+        com.gow3.android.ui.GameArtBackground(modifier = Modifier.fillMaxSize())
         Box(
             modifier = Modifier
                 .fillMaxSize()

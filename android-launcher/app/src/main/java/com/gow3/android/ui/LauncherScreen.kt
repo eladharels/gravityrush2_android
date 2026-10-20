@@ -148,12 +148,7 @@ internal fun LauncherScreen(
 
 @Composable
 private fun ScreenBackground() {
-    Image(
-        painter = painterResource(R.drawable.bg_wallpaper),
-        contentDescription = null,
-        modifier = Modifier.fillMaxSize(),
-        contentScale = ContentScale.Crop,
-    )
+    GameArtBackground(modifier = Modifier.fillMaxSize())
     Box(
         modifier = Modifier
             .fillMaxSize()
