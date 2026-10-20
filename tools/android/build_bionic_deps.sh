@@ -8,6 +8,11 @@
 set -euo pipefail
 cd -- "$(dirname -- "$0")/../.."
 root=$PWD/.local-deps/android
+# CI activates the conda host environment (ci/environment.yml), whose x86-64 compiler packages
+# export CC/CFLAGS/LDFLAGS (-march=nocona, -L$CONDA_PREFIX/lib, ...). FFmpeg's configure and CMake
+# take those as flags for the NDK cross compiler, which then cannot build a test program.
+unset CC CXX CPP LD AR AS NM RANLIB STRIP OBJCOPY OBJDUMP READELF \
+      CFLAGS CXXFLAGS CPPFLAGS LDFLAGS DEBUG_CFLAGS DEBUG_CXXFLAGS DEBUG_CPPFLAGS
 
 # NDK r29：优先 GOW3_NDK 环境变量；其次 .local-deps/android/sdk（构建机本地拷贝）；
 # 再回落宿主机 Android SDK 常见位置。默认与 BB 固定版本一致。
@@ -120,7 +125,10 @@ if [[ ! -f $prefix/.done-ffmpeg ]]; then
         --ar="$tc/bin/llvm-ar" --ranlib="$tc/bin/llvm-ranlib" --strip="$tc/bin/llvm-strip" --nm="$tc/bin/llvm-nm" \
         --enable-static --disable-shared --enable-pic --disable-programs --disable-doc --disable-debug \
         --disable-avdevice --disable-avfilter --disable-network --disable-autodetect --disable-mediacodec --disable-jni >"$bld/ffmpeg-configure.log" 2>&1 \
-        || { tail -30 "$bld/ffmpeg-configure.log" >&2; exit 1; }
+        || { tail -30 "$bld/ffmpeg-configure.log" >&2
+             echo "---- ffbuild/config.log (tail) ----" >&2
+             tail -60 "$bld/ffmpeg/ffbuild/config.log" >&2 2>/dev/null || true
+             exit 1; }
     run make -j"$J" >"$bld/ffmpeg.log" 2>&1 || { tail -30 "$bld/ffmpeg.log" >&2; exit 1; }
     make install >/dev/null
     # configure 的 Android 目标会为 MediaCodec/JNI 链接 libandroid/libmediandk，这里都禁用了。

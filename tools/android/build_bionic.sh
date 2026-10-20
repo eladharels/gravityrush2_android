@@ -10,6 +10,9 @@ set -euo pipefail
 cd -- "$(dirname -- "$0")/../.."
 out=out/bionic
 root=$PWD/.local-deps/android
+# As build_bionic_deps.sh: the conda host environment's x86-64 compiler flags must not reach the NDK.
+unset CC CXX CPP LD AR AS NM RANLIB STRIP OBJCOPY OBJDUMP READELF \
+      CFLAGS CXXFLAGS CPPFLAGS LDFLAGS DEBUG_CFLAGS DEBUG_CXXFLAGS DEBUG_CPPFLAGS
 
 # NDK r29：优先 GOW3_NDK，其次 .local-deps/android/sdk，再回落宿主机 Android SDK。
 ndk=${GOW3_NDK:-}
