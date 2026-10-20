@@ -167,6 +167,9 @@ links=(-L"$out/lib" -lgow3gpu -lgow3cpu -Wl,-rpath,'$ORIGIN/../lib' -rdynamic -p
     src/probe.c src/runtime*.c src/vulkan_smoke.c "$out/libatrac9.a" -lm "${links[@]}" \
     "${pv_libraries[@]}" \
     -o "$out/bin/gow3-probe"
+# uncharted_android: libSDL3.so always (stage_bionic_runtime.sh requires it in the payload; the
+# check above runs before the probe is built, which only worked with a probe from an earlier build).
+cp -f "$prefix/lib/libSDL3.so" "$out/lib/"
 "${cc[@]}" -std=c11 -O2 -Wall -Wextra -Werror tools/android/build/kgsl_chip_id.c -pie \
     -o "$out/bin/kgsl-chip-id"
 # 帧生成引擎（change add-native-frame-generation）：libbloodframe.so（MIT，钉 commit，
