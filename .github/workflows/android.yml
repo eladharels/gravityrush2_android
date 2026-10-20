@@ -127,7 +127,9 @@ jobs:
 
       - name: Build pinned host dependencies
         shell: bash -el {0}
-        run: bash ci/setup-deps.sh "$CONDA_PREFIX"
+        run: |
+          set -o pipefail
+          bash ci/setup-deps.sh "$CONDA_PREFIX" 2>&1 | tee "$RUNNER_TEMP/ci-log-1-host-deps.log"
 
       - name: Configure temporary paths
         shell: bash
@@ -143,7 +145,7 @@ jobs:
           set +x
           for name in ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD ANDROID_KEYSTORE_BASE64; do
             if [[ -z ${!name:-} ]]; then
-              echo "Missing required GitHub secret: $name" >&2
+              echo "::error title=Signing::Missing required GitHub secret: $name"
               exit 1
             fi
             printf '::add-mask::%s\n' "${!name}"
@@ -154,7 +156,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash tools/android/inputs/fetch_steam_libs.sh
+          bash tools/android/inputs/fetch_steam_libs.sh 2>&1 | tee "$RUNNER_TEMP/ci-log-2-steam-libs.log"
 
       # Vulkan 驱动不进 payload：设备侧由 DriverManager / install_bionic_driver.sh 安装
       # adrenotools 风格驱动包（下载源见 launcher assets driver_sources.json）。
@@ -162,12 +164,14 @@ jobs:
       - name: Build the Bionic runtime
         shell: bash -el {0}
         run: |
-          bash tools/android/build_bionic_deps.sh
-          bash tools/android/build_bionic.sh
+          set -o pipefail
+          bash tools/android/build_bionic_deps.sh 2>&1 | tee "$RUNNER_TEMP/ci-log-3-bionic-deps.log"
+          bash tools/android/build_bionic.sh 2>&1 | tee "$RUNNER_TEMP/ci-log-4-bionic-runtime.log"
 
       - name: Build and sign the release APK
         run: |
-          bash tools/android/apk/build_release_apk.sh
+          set -o pipefail
+          bash tools/android/apk/build_release_apk.sh 2>&1 | tee "$RUNNER_TEMP/ci-log-5-apk.log"
           apk=out/release/*.apk
           test -e $apk || { echo 'No APK was produced' >&2; exit 1; }
           sha256sum $apk > "$apk.sha256"
@@ -196,6 +200,25 @@ jobs:
             out/release/*.apk.sha256
           if-no-files-found: error
           retention-days: 14
+
+      # uncharted_android: the failing build's error lines as check annotations, readable through
+      # the checks API (the last log written is the step that failed).
+      - name: Report build errors
+        if: failure()
+        shell: bash
+        run: |
+          log=$(ls -1 "$RUNNER_TEMP"/ci-log-*.log 2>/dev/null | sort | tail -n 1)
+          [[ -n $log ]] || { echo "::error title=Build failed::before any build step (setup or signing)"; exit 0; }
+          name=$(basename "$log" .log)
+          errors=$(grep -n -iE 'error|fatal|undefined reference|failed|STOP:|No such file' "$log" | grep -v -iE 'werror|-Wno-error|error_count|errors\.h' | head -n 120)
+          [[ -n $errors ]] || errors=$(tail -n 60 "$log")
+          part=0
+          while IFS= read -r -d '' chunk && (( part < 8 )); do
+            part=$((part + 1))
+            body=${chunk//'%'/'%25'}; body=${body//$'\r'/}; body=${body//$'\n'/'%0A'}
+            echo "::error title=$name ($part)::$body"
+          done < <(printf '%s\n' "$errors" | split -l 15 --filter='cat; printf "\0"')
+          echo "::error title=$name (tail)::$(tail -n 25 "$log" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
 
       - name: Remove signing material
         if: always()
