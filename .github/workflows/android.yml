@@ -188,9 +188,13 @@ jobs:
         run: |
           set -o pipefail
           bash tools/android/apk/build_release_apk.sh 2>&1 | tee "$RUNNER_TEMP/ci-log-5-apk.log"
-          apk=out/release/*.apk
-          test -e $apk || { echo 'No APK was produced' >&2; exit 1; }
-          sha256sum $apk > "$apk.sha256"
+          # uncharted_android: the packaging names the APK after the app ("God of War III-...apk",
+          # with spaces); give it a plain name before the checksum and the upload.
+          built=$(ls -1 out/release/*.apk 2>/dev/null | head -n 1)
+          test -n "$built" || { echo 'No APK was produced' >&2; exit 1; }
+          apk=out/release/uncharted-android-${GITHUB_SHA::8}.apk
+          [ "$built" = "$apk" ] || mv -f "$built" "$apk"
+          sha256sum "$apk" > "$apk.sha256"
           echo "APK=$apk" >> "$GITHUB_ENV"
           echo "APK_SHA256=$(cut -d' ' -f1 "$apk.sha256")" >> "$GITHUB_ENV"
 
@@ -212,7 +216,7 @@ jobs:
         id: s_upload_signed_apk_and_checksum
         uses: actions/upload-artifact@v4
         with:
-          name: gow3-android-arm64-${{ github.sha }}
+          name: uncharted-android-arm64-${{ github.sha }}
           path: |
             out/release/*.apk
             out/release/*.apk.sha256
@@ -279,7 +283,7 @@ jobs:
         id: s_download_signed_apk_and_checksum
         uses: actions/download-artifact@v4
         with:
-          name: gow3-android-arm64-${{ github.sha }}
+          name: uncharted-android-arm64-${{ github.sha }}
 
       - name: Publish the release
         id: s_publish_the_release
