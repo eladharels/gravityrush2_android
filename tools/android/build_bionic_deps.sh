@@ -79,6 +79,14 @@ fetch() { # name url archive-extension
         tar -xf "$src/$1.tar" -C "$dir.tmp" --strip-components=1 \
         && mv "$dir.tmp" "$dir" && rm "$src/$1.tar"
 }
+fetch_git() { # name url tag commit: a shallow clone of the tag, checked against the pinned commit
+    local dir=$src/$1
+    [[ -d $dir ]] && return
+    rm -rf "$dir.tmp"
+    git clone -q --depth 1 --branch "$3" "$2" "$dir.tmp" &&
+        [[ $(git -C "$dir.tmp" rev-parse HEAD) == "$4" ]] && mv "$dir.tmp" "$dir" ||
+        { echo "fetch_git: $1 is not commit $4" >&2; exit 1; }
+}
 cm() { # name source-dir extra cmake args...
     local name=$1 sdir=$2; shift 2
     [[ -f $prefix/.done-$name ]] && return
@@ -91,7 +99,9 @@ cm() { # name source-dir extra cmake args...
     touch "$prefix/.done-$name"
 }
 
-fetch fmt-10.1.1 https://github.com/fmtlib/fmt/archive/refs/tags/10.1.1.tar.gz
+# uncharted_android: fmt 11 (the shadPS4 v0.19 core of the Uncharted port includes <fmt/base.h>),
+# pinned by its tag commit and fetched with git.
+fetch_git fmt-11.2.0 https://github.com/fmtlib/fmt.git 11.2.0 40626af88bd7df9a5fb80be7b25ac85b122d6c21
 fetch zycore-1.5.2 https://github.com/zyantific/zycore-c/archive/refs/tags/v1.5.2.tar.gz
 fetch zydis-4.1.1 https://github.com/zyantific/zydis/archive/refs/tags/v4.1.1.tar.gz
 fetch xxhash-0.8.3 https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.3.tar.gz
@@ -104,7 +114,7 @@ fetch ffmpeg-7.1.5 https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
 # 仅头文件：vulkan-hpp（NDK 自带 Vulkan 1.3.275 C 头但没有它）与 SPIR-V。
 cm vulkan-headers "$src/Vulkan-Headers-1.4.363"
 cm spirv-headers "$src/SPIRV-Headers-1.4.309"
-cm fmt "$src/fmt-10.1.1" -DFMT_TEST=OFF -DFMT_DOC=OFF
+cm fmt11 "$src/fmt-11.2.0" -DFMT_TEST=OFF -DFMT_DOC=OFF
 cm zycore "$src/zycore-1.5.2" -DBUILD_SHARED_LIBS=OFF
 # release 压缩包缺 zycore 子模块：直接用同一份 Zycore 源码树。
 [[ -f $src/zydis-4.1.1/dependencies/zycore/CMakeLists.txt ]] || cp -a "$src/zycore-1.5.2/." "$src/zydis-4.1.1/dependencies/zycore/"
