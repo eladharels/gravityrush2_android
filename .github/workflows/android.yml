@@ -106,6 +106,7 @@ jobs:
             platform-tools
             platforms;android-${{ env.ANDROID_PLATFORM }}
             build-tools;${{ env.ANDROID_BUILD_TOOLS }}
+            ndk;29.0.14206865
 
       - name: Install Android and native build tools
         id: s_install_android_and_native_build_tools

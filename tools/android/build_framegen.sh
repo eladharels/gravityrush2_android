@@ -27,7 +27,11 @@ if [[ -z ${GOW3_NDK:-} ]]; then
 fi
 ndk=${GOW3_NDK:-$root/sdk/ndk/29.0.14206865}
 api=${GOW3_ANDROID_API:-30}
-J=${GOW3_JOBS:-22}
+J=${GOW3_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}
+# The cores left to the build: all but the first two on big machines (the workstation this was
+# written on has 24), all of them on small ones such as a 4-core CI runner.
+ncpu=$(nproc 2>/dev/null || echo 4)
+if (( ncpu > 8 )); then build_cpus=2-$((ncpu - 1)); else build_cpus=0-$((ncpu - 1)); fi
 out=$PWD/out/bionic
 build=$out/bloodframe-build
 [[ -f $ndk/build/cmake/android.toolchain.cmake ]] || { echo "No NDK: $ndk (tools/android/build_bionic_deps.sh)" >&2; exit 1; }

@@ -32,10 +32,14 @@ prefix=$root/bionic-prefix src=$root/bionic-src bld=$root/bionic-build
     exit 1
 }
 mkdir -p "$prefix" "$src" "$bld"
-J=${GOW3_JOBS:-22}
+J=${GOW3_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}
+# The cores left to the build: all but the first two on big machines (the workstation this was
+# written on has 24), all of them on small ones such as a 4-core CI runner.
+ncpu=$(nproc 2>/dev/null || echo 4)
+if (( ncpu > 8 )); then build_cpus=2-$((ncpu - 1)); else build_cpus=0-$((ncpu - 1)); fi
 # macOS 没有 taskset；Linux 上用它限核避免拖垮机器。
 if command -v taskset >/dev/null 2>&1; then
-    run() { taskset -c 2-23 nice -n 19 "$@"; }
+    run() { taskset -c "$build_cpus" nice -n 19 "$@"; }
 else
     run() { "$@"; }
 fi

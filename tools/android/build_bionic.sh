@@ -32,8 +32,12 @@ prefix=$root/bionic-prefix
 headers=${GOW3_ARM64_HEADERS:-$PWD/.local-deps/root/usr}
 toolchain=$ndk/build/cmake/android.toolchain.cmake
 llvm=$(find "$ndk/toolchains/llvm/prebuilt" -maxdepth 1 -type d -name "*x86_64" | head -1)
-J=${GOW3_JOBS:-22}
-run() { if command -v taskset >/dev/null 2>&1; then taskset -c 2-23 nice -n 19 "$@"; else "$@"; fi; }
+J=${GOW3_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}
+# The cores left to the build: all but the first two on big machines (the workstation this was
+# written on has 24), all of them on small ones such as a 4-core CI runner.
+ncpu=$(nproc 2>/dev/null || echo 4)
+if (( ncpu > 8 )); then build_cpus=2-$((ncpu - 1)); else build_cpus=0-$((ncpu - 1)); fi
+run() { if command -v taskset >/dev/null 2>&1; then taskset -c "$build_cpus" nice -n 19 "$@"; else "$@"; fi; }
 [[ -f $toolchain ]] || { echo "No NDK: $ndk (tools/android/build_bionic_deps.sh)" >&2; exit 1; }
 [[ -f $prefix/.done-ffmpeg ]] || { echo "No Bionic deps in $prefix (tools/android/build_bionic_deps.sh)" >&2; exit 1; }
 [[ -d $headers/share/cmake/tsl-robin-map ]] || { echo "No header-only packages in $headers" >&2; exit 1; }
