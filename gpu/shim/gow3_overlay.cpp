@@ -657,6 +657,7 @@ void ImageTab() {
         ImGui::EndDisabled();
         ImGui::EndTable();
     }
+    } // GodOfWar()
     ImGui::SeparatorText("Textures (applied on restart)");
     if (BeginRows("##textures")) {
         static const char* const labels[] = {"Game default", "2x", "4x", "8x", "16x"};

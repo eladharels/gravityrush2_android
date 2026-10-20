@@ -38,6 +38,9 @@ enum {
     BTN_L3=0x2, BTN_R3=0x4, BTN_OPTIONS=0x8, BTN_UP=0x10, BTN_RIGHT=0x20, BTN_DOWN=0x40, BTN_LEFT=0x80,
     BTN_L2=0x100, BTN_R2=0x200, BTN_L1=0x400, BTN_R1=0x800, BTN_TRIANGLE=0x1000, BTN_CIRCLE=0x2000,
     BTN_CROSS=0x4000, BTN_SQUARE=0x8000, BTN_TOUCHPAD=0x100000,
+    /* Host-only sources, never shown to the game: a click on one side of the touchpad from a
+     * button or key without a touch surface (play_click turns them into a touch and a click). */
+    CLICK_LEFT=0x40000000, CLICK_RIGHT=0x80000000,
 };
 typedef struct { uint16_t x, y; uint8_t id, reserve[3]; } PadTouch;
 typedef struct {
@@ -83,6 +86,39 @@ static void touch_click(PadData *d, int right) {
     d->touch_count=1;
     d->touches[0]=(PadTouch){.x=right ? 1440 : 480,.y=471,.id=0};
 }
+
+/* A click without a touch surface (Back/View, Tab, Backspace, the pad file) is played like a
+ * finger: the touch is reported CLICK_LEAD_US before the button, the button stays at least
+ * CLICK_HOLD_US, and the touch lingers CLICK_TAIL_US after the release. God of War III opens
+ * photo mode on the release of a left click with the finger still down, and ignores a touch
+ * that comes and goes with the button. The side is chosen when the click starts and kept: the
+ * right source with L1 held is a left click (photo mode on pads without a touchpad). */
+enum { CLICK_LEAD_US=50000, CLICK_HOLD_US=50000, CLICK_TAIL_US=100000 };
+static struct { int side; uint64_t pressed, released; } click={-1,0,0};
+static void play_click(PadData *d) {
+    const uint64_t now=d->timestamp;
+    uint32_t sources=d->buttons & (CLICK_LEFT|CLICK_RIGHT);
+    d->buttons&=~(CLICK_LEFT|CLICK_RIGHT);
+    if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) { /* a replay, or a pad without fingers */
+        d->buttons&=~BTN_TOUCHPAD;
+        sources|=CLICK_LEFT;
+    }
+    const int side=(sources & CLICK_LEFT) ? 0 : (sources & CLICK_RIGHT) ? !(d->buttons & BTN_L1) : -1;
+    if (side>=0 && (click.side<0 || click.released)) { click.side=side; click.pressed=now; click.released=0; }
+    else if (side<0 && click.side>=0 && !click.released) click.released=now;
+    if (click.side<0) return;
+    const uint64_t down=click.pressed+CLICK_LEAD_US;
+    uint64_t up=down+CLICK_HOLD_US;
+    if (!click.released) up=UINT64_MAX;
+    else if (click.released>up) up=click.released;
+    if (now>=up && now-up>=CLICK_TAIL_US) { click.side=-1; return; }
+    if (d->touch_count<2) {
+        d->touches[d->touch_count]=(PadTouch){.x=click.side ? 1440 : 480,.y=471,.id=d->touch_count};
+        ++d->touch_count;
+    }
+    if (now>=down && now<up) d->buttons|=BTN_TOUCHPAD;
+}
+
 
 /* Opens the first gamepad SDL knows about; called under lock. */
 static SDL_Gamepad *current_gamepad(void) {

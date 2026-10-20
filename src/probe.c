@@ -1719,19 +1719,21 @@ int main(int argc, char **argv) {
     } else if (gpu_enabled) {
         printf("Game hooks: none for title %s (God of War III cheats and multipliers off)\n", title_id[0] ? title_id : "?");
     }
+#else
+    (void)game_hooks;
+#endif
+    /* ucndc's game patches and code hooks below are defined in the Windows-only part of this file
+     * (android port TODO: GOW3_EOP_TICK_WAIT, which Uncharted 1 needs, and GOW3_JOB_SPIN/SLEEP). */
+#ifdef _WIN32
     if (gpu_enabled && getenv("GOW3_SCREAM_LOG") && getenv("GOW3_SCREAM_LOG")[0]=='1')
         install_scream_log(size);
     /* ucndc: mouse camera (input.ini with mouse_look=1; GOW3_MOUSE_CAMERA=0 keeps the mouse a stick) */
     if (gpu_enabled && runtime_pad_mouse_camera()) install_game_callbacks(segments, ns, size);
-#else
-    (void)game_hooks;
-#endif
     if (gpu_enabled && getenv("GOW3_EOP_TICK_WAIT") && getenv("GOW3_EOP_TICK_WAIT")[0]=='1')
         patch_eop_tick_wait(size);
     if ((getenv("GOW3_JOB_SPIN") && getenv("GOW3_JOB_SPIN")[0]) || (getenv("GOW3_JOB_SLEEP") && getenv("GOW3_JOB_SLEEP")[0] == '1'))
         patch_job_spin(size, getenv("GOW3_JOB_SPIN") && getenv("GOW3_JOB_SPIN")[0] ? getenv("GOW3_JOB_SPIN") : NULL,
                        getenv("GOW3_JOB_SLEEP") && getenv("GOW3_JOB_SLEEP")[0] == '1');
-#ifdef _WIN32
     const int res_set = gpu_enabled && getenv("GOW3_UC3_RES") && getenv("GOW3_UC3_RES")[0];
     const int res_log = gpu_enabled && getenv("GOW3_UC3_RES_LOG") && getenv("GOW3_UC3_RES_LOG")[0] == '1';
     Uc3ResSite res_sites[UC_RES_MAX_SITES];

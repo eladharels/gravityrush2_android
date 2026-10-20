@@ -90,6 +90,10 @@ bool IsExecuteError(void* ctx) {
     return ((ucontext_t*)ctx)->uc_mcontext.mc_err & 0x10;
 #elif defined(ARCH_X86_64)
     return ((ucontext_t*)ctx)->uc_mcontext.gregs[REG_ERR] & 0x10;
+#elif defined(__linux__) && defined(ARCH_ARM64)
+    // android port: an instruction abort (ESR_ELx.EC 0x20 lower EL, 0x21 same EL).
+    const uint64_t ec = (FaultEsr(ctx) >> 26) & 0x3f;
+    return ec == 0x20 || ec == 0x21;
 #else
 #error "Unsupported architecture"
 #endif

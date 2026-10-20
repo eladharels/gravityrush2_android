@@ -236,9 +236,8 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
                 else { int16_t v; memcpy(&v,(const char *)data+from*2,2); v=(int16_t)((float)v*gain); memcpy(converted+to*2,&v,2); }
             }
         }
-        /* GOW3_AUDIO_DUMP: the game's own buffer (PS4 channel order, before volume and downmix). */
-        if (p->dump) fwrite(data,1,bytes,p->dump);
-        if (p->downmix) bytes=downmix_stereo(converted,(size_t)p->frames,p->is_float);
+        /* gow3_android mixes to the output channels in the loop above (output_channels). */
+        if (p->dump) fwrite(converted,1,bytes,p->dump);
         if (p->stats) {
             uint64_t now=now_ns();
             if (!p->stat_start_ns) { p->stat_start_ns=now; p->stat_min_queued=1<<30; }
