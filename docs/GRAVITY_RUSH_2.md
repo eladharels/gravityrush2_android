@@ -203,6 +203,22 @@ Build 7ef1b1b sends the game's allocators, file callbacks and event callback thr
 `GuestCall` (`avplayer_common.h`, over `guest_cpu_call`). Not run yet. Other shadPS4 HLE
 libraries in `gpu/` may have the same direct calls; the new fault line names them.
 
+## Fifth and sixth boots (2026-10-27, builds 7ef1b1b and 99c34d7 on Turnip): ~280 draws, 4.5 FPS
+
+7ef1b1b: the logo videos play (AvPlayer), save data `system0020` is created and mounted, then
+libc++ terminated: `HLE thread: join failed (thread::detach failed: Invalid argument)`. An
+AvPlayer is stopped from a game thread while its controller thread stops itself; Bionic's
+`pthread_detach` returns EINVAL there, and the fallback detached again outside the `try`.
+99c34d7 (`gpu/shim/core/libraries/kernel/threads.h`) releases the thread without throwing.
+
+99c34d7 runs without a crash for 6 minutes: about 280 draws and 37 dispatches per frame
+(title screen or menu; autorun's Cross presses did not reach more), **4.5 FPS**. GPU-bound: each
+frame waits 100-145 ms on GPU ticks, stage A/B ~210 ms, while the process uses 0.8 cores and the
+GPU thread ~8 ms per frame. Next: find the expensive draws (shader dumps, `GOW3_DUMP_SHADERS=1`;
+a geometry-shader or LDS path is the first suspect: gr2_pc's renderer fixes from inFAMOUS cover
+geometry-shader outlines and LDS barriers), then the renderer-side merge of gr2_pc's `gpu/`.
+No screenshot of that screen yet.
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
