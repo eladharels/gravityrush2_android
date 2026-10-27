@@ -186,6 +186,23 @@ show no CP faults. Next: install the Standard Turnip build in this app (or make 
 use one by default, blocker 4 below) and run again; only if Turnip fails too is the detiler
 shader itself the problem.
 
+## Fourth boot (2026-10-27, build f0432b0 on Turnip): first frames, then AvPlayer
+
+With Turnip selected (the app had `v27.0.0-20261027-r4-8G2-OneUI` installed; HOME → GPU
+DRIVER) the detiler builds and the game renders: 11-29 draws per frame (logos), the first
+frame 466 ms, then ~67 ms. So the detiler stop was the stock driver. Then:
+
+```
+Host jumped into guest code (signal 4) at guest offset 0x111af60: a host function called a guest function pointer without guest_cpu_call
+  thread 'BGFiberWorkerSy', ... guest stack, image offsets: +0x111a384 ...
+```
+
++0x111a384 returns from the stub of `KMcEa+rHsIo` = `sceAvPlayerAddSource`: shadPS4's AvPlayer
+(`gpu/shadps4/core/libraries/avplayer`) forwarded to the game's replacement allocator directly.
+Build 7ef1b1b sends the game's allocators, file callbacks and event callback through
+`GuestCall` (`avplayer_common.h`, over `guest_cpu_call`). Not run yet. Other shadPS4 HLE
+libraries in `gpu/` may have the same direct calls; the new fault line names them.
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
@@ -208,7 +225,7 @@ shader itself the problem.
    `sysdata/libSceSecure.prx`; NpToolkit is served by the runtime, as on PC).
 3. **Audio:** gr2_pc uses the console firmware's `libSceNgs2.sprx` (`system_lib/`, the player's
    own) or its own experimental mixer.
-4. **Turnip on first start:** install the Standard Turnip build in this app (Settings → DRIVER).
+4. **Turnip on first start (needed: the stock driver fails the detiler):** install the Standard Turnip build in this app (Settings → DRIVER).
    Better, make the launcher pick an installed Turnip by default, since the stock driver is
    unsupported.
 5. **autorun.sh:** a `STOP:` line counts as a crash, so it takes a 3-minute bug report for GPU
