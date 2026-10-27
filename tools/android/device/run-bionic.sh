@@ -11,7 +11,7 @@
 # usage: run-bionic.sh [game|vulkan]   env from the app: GOW3_SCREEN_W/SCREEN_H、GOW3_GAME_DIR、
 #        GOW3_APP0_DIR、GOW3_ANDROID_INPUT=1
 set -eu
-files=${FXD_FILES:-/data/user/0/com.uncharted.android/files}
+files=${FXD_FILES:-/data/user/0/com.gravityrush2.android/files}
 base="$files/gow3port"
 bionic="$base/bionic"
 export FXD_FILES="$files"
@@ -55,27 +55,28 @@ if [ -f "$launch_env" ]; then
         value=$(derived "$key")
         [ -n "$value" ] && export "$key=$value"
     done
-    # uncharted_android: the chosen game's executable and runtime options (Gow3Prepare.kt,
-    # UnchartedGames.kt), listed in GOW3_UC_KEYS. Only GOW3_* names are taken.
-    for key in $(derived GOW3_UC_KEYS); do
+    # gravityrush2_android: the game's executable and runtime options (Gow3Prepare.kt,
+    # GravityRush2.kt), listed in GOW3_GAME_KEYS. Only GOW3_* names are taken.
+    for key in $(derived GOW3_GAME_KEYS); do
         case $key in GOW3_[A-Z0-9_]*) ;; *) continue ;; esac
         value=$(derived "$key")
         [ -n "$value" ] && export "$key=$value"
     done
-    [ -n "$(derived GOW3_UC_GAME)" ] && echo "Uncharted: $(derived GOW3_UC_GAME) ($GOW3_EXECUTABLE)"
+    [ -n "$(derived GOW3_GAME_KEY)" ] && echo "Game: $(derived GOW3_GAME_KEY) ($GOW3_EXECUTABLE)"
     # uncharted_android: Turnip on the Adreno 750 faults in its command processor with the
     # Uncharted games (kgsl, 2026-10-24): "CP opcode error, opcode=0" without nocb, "CP BV opcode
     # error 0x70970001" (binning stream) without sysmem; three within 2 s end in a device loss.
     # Gameplay, 2 runs each: default 10 faults, nocb 4, sysmem 5, both 0, all at the same FPS.
-    # Other drivers ignore TU_DEBUG; uncharted-env.txt below can change or clear it (TU_DEBUG=).
-    [ -n "$(derived GOW3_UC_GAME)" ] && export TU_DEBUG=nocb,sysmem
-    # uncharted_android: player overrides for experiments, without a new APK: uncharted-env.txt
+    # Other drivers ignore TU_DEBUG; gr2-env.txt below can change or clear it (TU_DEBUG=).
+    # gravityrush2_android: Gravity Rush 2 starts with the same setting.
+    [ -n "$(derived GOW3_GAME_KEY)" ] && export TU_DEBUG=nocb,sysmem
+    # Player overrides for experiments, without a new APK: gr2-env.txt
     # in the game folder (a file manager can edit it), one NAME=value per line; an empty
     # value unsets the option; lines starting with # are ignored. Applied after the game's own
     # options; the start script's screen, driver and frame settings below still win. Besides
     # the port's GOW3_* options the Turnip driver's own are accepted: TU_DEBUG (e.g. sysmem,
     # gmem, nolrz, noubwc), FD_DEV_FEATURES, IR3_SHADER_DEBUG and MESA_* (the shader cache).
-    uc_env_file="${GOW3_GAME_DIR%/}/uncharted-env.txt"
+    uc_env_file="${GOW3_GAME_DIR%/}/gr2-env.txt"
     if [ -n "${GOW3_GAME_DIR:-}" ] && [ -f "$uc_env_file" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
             line=$(printf '%s' "$line" | tr -d '\r')
@@ -83,16 +84,16 @@ if [ -f "$launch_env" ]; then
             key=${line%%=*}
             value=${line#*=}
             case $key in GOW3_[A-Z0-9_]*|TU_[A-Z0-9_]*|FD_[A-Z0-9_]*|IR3_[A-Z0-9_]*|MESA_[A-Z0-9_]*) ;;
-                *) echo "uncharted-env.txt: ignored: $line"; continue ;; esac
-            case $key in *[!A-Z0-9_]*) echo "uncharted-env.txt: ignored: $line"; continue ;; esac
+                *) echo "gr2-env.txt: ignored: $line"; continue ;; esac
+            case $key in *[!A-Z0-9_]*) echo "gr2-env.txt: ignored: $line"; continue ;; esac
             # FD_DEV_FEATURES=name=1 carries '=' in its value; MESA_SHADER_CACHE_DIR a path.
-            case $value in *[!A-Za-z0-9._,:+=/-]*) echo "uncharted-env.txt: ignored: $line"; continue ;; esac
+            case $value in *[!A-Za-z0-9._,:+=/-]*) echo "gr2-env.txt: ignored: $line"; continue ;; esac
             if [ -z "$value" ]; then
                 unset "$key"
-                echo "uncharted-env.txt: $key unset"
+                echo "gr2-env.txt: $key unset"
             else
                 export "$key=$value"
-                echo "uncharted-env.txt: $key=$value"
+                echo "gr2-env.txt: $key=$value"
             fi
         done < "$uc_env_file"
     fi
@@ -138,26 +139,19 @@ export GOW3_OUTPUT_RES=$output GOW3_LIVE_RES=0
 # scaled_session 标记 + camera 常量就绪前的场景尺寸回退（真实值见上方 render_res 映射）。
 # 桌面 live 路径在 Android 不可达（本脚本恒导出 GOW3_RENDER_RES）。
 export GOW3_RENDER_RES=$render_res
+# gravityrush2_android: Gravity Rush 2 presents as uncharted_android's games did (HayatoG/gr2_pc
+# outputs 1920x1080 too), without their GOW3_UC3_RES resolution patch.
 # uncharted_android: the Uncharted games present the way they were tested on the PC: no scaled
 # session (GOW3_RENDER_RES unset) and the game's own 1920x1080 output, which the presenter scales
 # to the screen. The scaled session's UI composition is God of War III's: it takes the first
 # native-viewport draw into a 1080p RGBA8 target for the UI and redirects that target to an
 # output-size image, so the scene the Uncharted games composite into such a target never
 # reaches the screen (black gameplay under a working HUD). GOW3_UC_SCALED=1 restores it.
-uc_game=$(derived GOW3_UC_GAME)
+uc_game=$(derived GOW3_GAME_KEY)
 if [ -n "$uc_game" ] && [ "${GOW3_UC_SCALED:-0}" != 1 ]; then
     unset GOW3_RENDER_RES
     export GOW3_OUTPUT_RES=1920x1080 GOW3_WINDOW_SIZE=1920x1080
     echo "Presentation: native 1920x1080 output scaled to the screen (no UI composition)"
-    # The game's own render and output size (ucndc's GOW3_UC3_RES patch, probe.c), from the
-    # render_resolution setting; 960x540 when it is unset (the Android default for these games:
-    # 20-30 FPS on a Galaxy S24 Ultra, against 12-15 at 1920x1080). uncharted-env.txt wins.
-    uc_res=$render_res
-    [ -z "$(setting render_resolution)" ] && uc_res=960x540
-    if [ "$uc_res" != 1920x1080 ] && [ -z "${GOW3_UC3_RES:-}" ]; then
-        export GOW3_UC3_RES=$uc_res GOW3_UC3_RES_ALL=1 GOW3_UC3_MOVIE_FIX=1
-        echo "Resolution: the game renders and outputs $uc_res (render_resolution)"
-    fi
 fi
 # GPU 内存是手机的系统 RAM，和游戏的 DMEM 及 Android 共享；纹理收集器按预算工作，
 # 空闲的游戏内存拷贝延后回收。

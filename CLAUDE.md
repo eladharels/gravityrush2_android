@@ -11,4 +11,4 @@ Rules that always apply:
 - Commit as `Claude <noreply@anthropic.com>`.
 - Record every measurement in `docs/ANDROID_PORT.md` and `CHANGELOG.md`, including settings
   that were tried and rejected.
-- The phone (Galaxy S24 Ultra) is reachable with `adb`; the app is `com.uncharted.android`.
+- The phone (Galaxy S24 Ultra) is reachable with `adb`; the app is `com.gravityrush2.android`.

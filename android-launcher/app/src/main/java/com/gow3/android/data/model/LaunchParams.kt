@@ -219,11 +219,10 @@ internal object LaunchParams {
     /** 补丁类快捷入口只展示当前目录真正提供的档位；无目录时禁止修改。 */
     fun forCatalog(catalog: PatchCatalog?): List<LaunchParam> = all.map { param ->
         when (param.key) {
-            // uncharted_android: the collection's sizes are the ones the runtime patch was tested
-            // with (run-bionic.sh maps them to GOW3_UC3_RES); 540p is the Android default.
-            "render_resolution" -> if (catalog?.uncharted == true) param.copy(
-                options = param.options.filter { it.value in UNCHARTED_RESOLUTIONS },
-                defaultValue = "540p",
+            // gravityrush2_android: no resolution patch for Gravity Rush 2 yet: native only.
+            "render_resolution" -> if (catalog?.gr2 == true) param.copy(
+                options = param.options.filter { it.value == "native" },
+                defaultValue = "native",
             ) else param.copy(
                 options = param.options.filter { option ->
                     option.value == "native" || catalog?.patches?.any { it.resolution == option.value } == true
@@ -239,9 +238,6 @@ internal object LaunchParams {
             else -> param
         }
     }
-
-    /** The Nathan Drake Collection's render sizes: native 1920x1080 and the smaller ones. */
-    private val UNCHARTED_RESOLUTIONS = setOf("native", "480p", "540p", "720p")
 
     fun isPatchSetting(key: String): Boolean = key == "render_resolution" || key == "engine_fps"
 

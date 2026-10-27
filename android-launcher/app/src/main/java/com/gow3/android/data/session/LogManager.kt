@@ -40,7 +40,7 @@ internal class LogManager(private val activity: Activity) {
         /** 区别于 GameFolderManager 的 1001/1002、LosslessDllManager 的 1003 和 SaveManager 的 1004/1005。 */
         const val REQUEST_EXPORT = 1006
         private const val PROFILE_CAP = 24 shl 20 // profile.txt: at most 24 MB in the export
-        val DEFAULT_EXPORT_NAME = "Uncharted-Logs"
+        val DEFAULT_EXPORT_NAME = "GravityRush2-Logs"
     }
 
     /** 由 [launchExport] 设置，由 [onActivityResult] 消费。 */

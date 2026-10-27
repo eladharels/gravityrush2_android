@@ -4,7 +4,7 @@
 #   tools/android/pull-logs.ps1 -Debug_    # the .debug package
 param([string]$Out = "logs-$(Get-Date -Format yyyyMMdd-HHmmss)", [switch]$Debug_)
 
-$package = if ($Debug_) { "com.uncharted.android.debug" } else { "com.uncharted.android" }
+$package = if ($Debug_) { "com.gravityrush2.android.debug" } else { "com.gravityrush2.android" }
 $remote = "/sdcard/Android/data/$package/files/logs"
 
 New-Item -ItemType Directory -Force $Out | Out-Null

@@ -898,7 +898,7 @@ public final class GameActivity extends Activity implements SaveDialogHost {
         }
         // uncharted_android: a copy of the game log and profile.txt in the app's external folder
         // (/sdcard/Android/data/<package>/files/logs), which adb can pull from a release build, and
-        // the game log in logcat (tag UnchartedGame) to follow a run live. The private folder stays
+        // the game log in logcat (tag GravityRush2Game) to follow a run live. The private folder stays
         // the source for the in-app export.
         final File shared=getExternalFilesDir("logs");
         if (shared!=null) {
@@ -916,7 +916,7 @@ public final class GameActivity extends Activity implements SaveDialogHost {
                      PrintWriter copy=shared!=null?new PrintWriter(new File(shared,"android-game.log")):null) {
                     String line; while ((line=r.readLine())!=null) {
                         out.println(line); out.flush();
-                        android.util.Log.i("UnchartedGame",line);
+                        android.util.Log.i("GravityRush2Game",line);
                         if (copy!=null) {
                             copy.println(line); copy.flush();
                             // The profiler prints this line after each window it wrote to profile.txt.

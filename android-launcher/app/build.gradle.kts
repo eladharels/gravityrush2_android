@@ -19,11 +19,11 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.uncharted.android"
+        applicationId = "com.gravityrush2.android"
         minSdk = 28
         targetSdk = 28
         versionCode = 3
-        versionName = "2.1.7-bionic-v2"
+        versionName = "0.1.0-gr2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

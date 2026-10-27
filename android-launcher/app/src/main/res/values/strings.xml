@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 桌面名称（Manifest android:label）。debug 变体经 src/debug 资源覆盖加 Debug 标识。 -->
-    <string name="app_name">Uncharted Collection</string>
+    <string name="app_name">Gravity Rush 2</string>
 
     <!-- 品牌与关键动作按钮：双语同值，不翻译 -->
-    <string name="title_god_of_war_iii">UNCHARTED</string>
-    <string name="title_remastered">REMASTERED</string>
+    <string name="title_god_of_war_iii">GRAVITY RUSH 2</string>
+    <string name="title_remastered">EXPERIMENTAL</string>
     <string name="launch_button">LAUNCH</string>
     <string name="start_game_button">START GAME</string>
 

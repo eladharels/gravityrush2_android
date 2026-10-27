@@ -4,7 +4,7 @@
 Bionic counterpart of the retired glibc validator. The differences that matter:
 the runtime payload carries the Bionic runtime tree (no rootfs), the APK ships
 libgow3prepare.so/libgow3present.so instead of the retired fexdroid bridges, and
-the application id is com.uncharted.android.
+the application id is com.gravityrush2.android.
 """
 import argparse
 import hashlib
@@ -17,7 +17,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-APPLICATION_ID = 'com.uncharted.android'
+APPLICATION_ID = 'com.gravityrush2.android'
 JAVA_PACKAGE = 'com/gow3/android/game'
 REQUIRED_LIBS = ('lib/arm64-v8a/libgow3prepare.so', 'lib/arm64-v8a/libgow3present.so')
 FORBIDDEN_LIBS = ('lib/arm64-v8a/libfxdisplay.so', 'lib/arm64-v8a/libfxio.so')

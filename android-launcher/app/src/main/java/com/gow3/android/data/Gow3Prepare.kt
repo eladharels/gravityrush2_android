@@ -23,7 +23,7 @@ import java.io.File
  * the selected folder.
  */
 object Gow3Prepare {
-    private const val TAG = "Uncharted"
+    private const val TAG = "GravityRush2"
     private const val BASE_DMEM_MB = 7104 // the same base run-gow3.sh passes on Android
 
     /** link_modules.py's DEFAULT_MODULES. libc.prx first: it becomes module id 2. */
@@ -109,9 +109,9 @@ object Gow3Prepare {
             return Result(false, "prepare-failed", emptyList(), emptyMap(), BASE_DMEM_MB, 60, "native", 0,
                 "cannot create ${outDir.path}")
         }
-        // uncharted_android: the collection holds one executable per game (UnchartedGames).
-        val uncharted = UnchartedGames.selected(gameDir, ini)
-        val executable = uncharted?.executable ?: "eboot.bin"
+        // gravityrush2_android: the game's executable and runtime options (GravityRush2).
+        val gr2 = GravityRush2.selected(gameDir)
+        val executable = gr2?.executable ?: "eboot.bin"
         val eboot = File(gameDir, executable)
         if (!eboot.isFile) {
             return Result(false, "prepare-failed", emptyList(), emptyMap(), BASE_DMEM_MB, 60, "native", 0,
@@ -211,13 +211,13 @@ object Gow3Prepare {
             appendLine("export GOW3_DMEM_MB='$dmem'")
             appendLine("export GOW3_VBLANK_HZ='$vblank'")
             appendLine("export GOW3_PATCH_INPUTS='{}'")
-            // uncharted_android: the executable and the runtime options of the chosen game.
-            // run-bionic.sh imports the keys listed in GOW3_UC_KEYS (after the ones above).
-            if (uncharted != null) {
-                appendLine("export GOW3_EXECUTABLE='${uncharted.executable}'")
-                for ((key, value) in uncharted.env) appendLine("export $key='$value'")
-                appendLine("export GOW3_UC_KEYS='GOW3_EXECUTABLE ${uncharted.env.keys.joinToString(" ")}'")
-                appendLine("export GOW3_UC_GAME='${uncharted.key}'")
+            // gravityrush2_android: the executable and the runtime options of the game.
+            // run-bionic.sh imports the keys listed in GOW3_GAME_KEYS (after the ones above).
+            if (gr2 != null) {
+                appendLine("export GOW3_EXECUTABLE='${gr2.executable}'")
+                for ((key, value) in gr2.env) appendLine("export $key='$value'")
+                appendLine("export GOW3_GAME_KEYS='GOW3_EXECUTABLE ${gr2.env.keys.joinToString(" ")}'")
+                appendLine("export GOW3_GAME_KEY='${gr2.key}'")
             }
         }
         File(outDir, "launch.env").writeText(launchEnv)

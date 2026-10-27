@@ -28,7 +28,7 @@ done
 [[ -f $pack ]] || { echo "no such pack: $pack" >&2; exit 2; }
 adb_dev=(adb)
 [[ -n $serial ]] && adb_dev=(adb -s "$serial")
-pkg=com.uncharted.android
+pkg=com.gravityrush2.android
 
 # The pack holds the driver library and a meta.json naming it; pick the library the pack declares,
 # falling back to the single .so inside.

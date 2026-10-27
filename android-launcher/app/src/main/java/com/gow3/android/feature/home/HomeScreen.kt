@@ -98,13 +98,10 @@ internal fun HomeScreen(
     // 游戏身份状态：catalog 或 CatalogProblem（不再吞错），驱动 Home 身份卡三态。
     var identity by remember { mutableStateOf<GameIdentityState>(GameIdentityState.Loading) }
     var identityRevision by remember { mutableIntStateOf(0) }
-    // uncharted_android: the collection's folder gets a game picker instead of the God of War III
-    // presets, and the identity card names the chosen game.
-    val uncharted = remember(gameDir) {
-        com.gow3.android.data.UnchartedGames.isCollection(gameDir?.let { java.io.File(it) })
-    }
-    val ucGame = remember(gameDir, iniValues) {
-        com.gow3.android.data.UnchartedGames.selected(gameDir?.let { java.io.File(it) }, iniValues)
+    // gravityrush2_android: the game's folder gets no God of War III presets, and the identity
+    // card names the game.
+    val gr2Game = remember(gameDir) {
+        com.gow3.android.data.GravityRush2.selected(gameDir?.let { java.io.File(it) })
     }
     // 驱动卡片的重扫信号：回到前台 / 目录变化 / 本页写入选择时都会递增。
     var driverRevision by remember { mutableIntStateOf(0) }
@@ -218,7 +215,7 @@ internal fun HomeScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                GameIdentityCard(identity, onOpenStorageCategory, ucGame)
+                GameIdentityCard(identity, onOpenStorageCategory, gr2Game)
                 LaunchButton(::launch)
             }
             Column(
@@ -226,8 +223,7 @@ internal fun HomeScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 UserSavesZone(hasSaves)
-                if (uncharted) UnchartedGamePicker(iniValues) { saveUpdates(mapOf("uc_game" to it)) }
-                else PresetSegmented(identity, iniValues, ::applyPreset)
+                if (gr2Game == null) PresetSegmented(identity, iniValues, ::applyPreset)
                 DriverSelector(
                     identity, iniValues, driverEntries,
                     // 面板只回传 id：展示名从扫描结果解析（系统驱动回退到本地化文案）。
@@ -249,9 +245,8 @@ internal fun HomeScreen(
     } else {
         ScreenColumn(horizontalAlignment = Alignment.CenterHorizontally) {
             Spacer(Modifier.height(28.dp))
-            GameIdentityCard(identity, onOpenStorageCategory, ucGame)
-            if (uncharted) UnchartedGamePicker(iniValues) { saveUpdates(mapOf("uc_game" to it)) }
-            else PresetSegmented(identity, iniValues, ::applyPreset)
+            GameIdentityCard(identity, onOpenStorageCategory, gr2Game)
+            if (gr2Game == null) PresetSegmented(identity, iniValues, ::applyPreset)
             DriverSelector(
                 identity, iniValues, driverEntries,
                 // 面板只回传 id：展示名从扫描结果解析（系统驱动回退到本地化文案）。
@@ -333,7 +328,7 @@ private fun currentUpdateDir(context: Context): String? =
 private fun GameIdentityCard(
     state: GameIdentityState,
     onOpenStorage: () -> Unit,
-    ucGame: com.gow3.android.data.UnchartedGames.Game? = null,
+    gr2Game: com.gow3.android.data.GravityRush2.Game? = null,
 ) {
     Column(
         modifier = Modifier
@@ -353,9 +348,8 @@ private fun GameIdentityCard(
             }
             is GameIdentityState.Ready -> {
                 val catalog = state.catalog
-                val title = if (ucGame != null) "UNCHARTED" else stringResource(R.string.title_god_of_war_iii)
-                val subtitle = ucGame?.title?.substringAfter(": ", ucGame.title)?.uppercase()
-                    ?: stringResource(R.string.title_remastered)
+                val title = if (gr2Game != null) "GRAVITY RUSH 2" else stringResource(R.string.title_god_of_war_iii)
+                val subtitle = gr2Game?.status?.uppercase() ?: stringResource(R.string.title_remastered)
                 Text(title, color = LauncherColors.textPrimary, fontFamily = FontFamily.Serif, fontSize = 20.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
                 Text(subtitle, color = LauncherColors.textMuted, fontSize = 11.sp, fontWeight = FontWeight.Medium, letterSpacing = 2.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

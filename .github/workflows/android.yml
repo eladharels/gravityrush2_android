@@ -192,7 +192,7 @@ jobs:
           # with spaces); give it a plain name before the checksum and the upload.
           built=$(ls -1 out/release/*.apk 2>/dev/null | head -n 1)
           test -n "$built" || { echo 'No APK was produced' >&2; exit 1; }
-          apk=out/release/uncharted-android-${GITHUB_SHA::8}.apk
+          apk=out/release/gravityrush2-android-${GITHUB_SHA::8}.apk
           [ "$built" = "$apk" ] || mv -f "$built" "$apk"
           sha256sum "$apk" > "$apk.sha256"
           echo "APK=$apk" >> "$GITHUB_ENV"
@@ -216,7 +216,7 @@ jobs:
         id: s_upload_signed_apk_and_checksum
         uses: actions/upload-artifact@v4
         with:
-          name: uncharted-android-arm64-${{ github.sha }}
+          name: gravityrush2-android-arm64-${{ github.sha }}
           path: |
             out/release/*.apk
             out/release/*.apk.sha256
@@ -229,7 +229,7 @@ jobs:
         id: s_upload_symbols
         uses: actions/upload-artifact@v4
         with:
-          name: uncharted-android-symbols-${{ github.sha }}
+          name: gravityrush2-android-symbols-${{ github.sha }}
           path: |
             out/bionic/gpu/libgow3gpu.so
             out/bionic/fex/libgow3cpu.so
@@ -298,7 +298,7 @@ jobs:
         id: s_download_signed_apk_and_checksum
         uses: actions/download-artifact@v4
         with:
-          name: uncharted-android-arm64-${{ github.sha }}
+          name: gravityrush2-android-arm64-${{ github.sha }}
 
       - name: Publish the release
         id: s_publish_the_release

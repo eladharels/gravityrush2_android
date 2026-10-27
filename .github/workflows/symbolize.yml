@@ -39,7 +39,7 @@ jobs:
       - name: Download the symbols of that build
         uses: actions/download-artifact@v4
         with:
-          name: uncharted-android-symbols-${{ steps.find.outputs.sha }}
+          name: gravityrush2-android-symbols-${{ steps.find.outputs.sha }}
           run-id: ${{ steps.find.outputs.run }}
           github-token: ${{ github.token }}
           path: symbols
