@@ -114,9 +114,7 @@ static ABI int32_t audio_init(void) {
     pthread_mutex_unlock(&table_lock);
     return r;
 }
-static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_t length, uint32_t freq, uint32_t param) {
-    (void)user; (void)index;
-    if (!initialized) return ERR_NOT_INIT;
+static int32_t open_port(int32_t type, uint32_t length, uint32_t freq, uint32_t param) {
     if (!length || length>2048 || (length & 0xff)) return ERR_INVALID_SIZE;
     if (freq!=48000) return ERR_INVALID_FREQ;
     uint32_t format=param & 0xff;
@@ -174,6 +172,11 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     printf("Runtime: audio port %d opened (type %d, %d ch %s -> %d ch s16, %u frames)\n",id,type,p->channels,
            p->is_float ? "float" : "s16",p->output_channels,length);
     return (type<<16) | id | 0x20000000;
+}
+static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_t length, uint32_t freq, uint32_t param) {
+    (void)user; (void)index;
+    if (!initialized) return ERR_NOT_INIT;
+    return open_port(type,length,freq,param);
 }
 static ABI int32_t audio_close(int32_t handle) {
     pthread_mutex_lock(&table_lock);
@@ -345,6 +348,12 @@ static ABI int32_t audio_last_time(int32_t handle, uint64_t *time) {
     if (!time) return ERR_INVALID_POINTER;
     *time=p->last_output_us; return 0;
 }
+
+/* Host-side ports for other runtime libraries (Audio3d): same device, pacing and dump path as
+   guest ports, without requiring the guest's sceAudioOutInit. */
+int32_t runtime_audio_host_open(int32_t type, uint32_t frames, uint32_t format) { return open_port(type,frames,48000,format); }
+int32_t runtime_audio_host_output(int32_t handle, const void *data, int pace) { return output_port(handle,data,pace); }
+int32_t runtime_audio_host_close(int32_t handle) { return audio_close(handle); }
 
 static const RuntimeExport exports[]={
     {"sceAudioOutInit",audio_init}, {"sceAudioOutOpen",audio_open}, {"sceAudioOutClose",audio_close},

@@ -26,8 +26,16 @@ object Gow3Prepare {
     private const val TAG = "GravityRush2"
     private const val BASE_DMEM_MB = 7104 // the same base run-gow3.sh passes on Android
 
-    /** link_modules.py's DEFAULT_MODULES. libc.prx first: it becomes module id 2. */
-    private val DEFAULT_LINKED_MODULES = listOf("libc.prx", "libSceFios2.prx")
+    /**
+     * gr2_pc's launcher (gr2_run.py game_modules): libc.prx first, it becomes module id 2. A name
+     * with a '/' is relative to the game folder, the others are in sce_module/. NpToolkit is not
+     * linked: the runtime serves it (src/runtime_gr2_np.c), as on PC.
+     */
+    private val DEFAULT_LINKED_MODULES =
+        listOf("libc.prx", "libSceFios2.prx", "libSceJobManager.prx", "sysdata/libSceSecure.prx")
+
+    private fun moduleFile(gameDir: File, name: String) =
+        if ('/' in name) File(gameDir, name) else File(gameDir, "sce_module/$name")
 
     @Volatile private var loaded = false
 
@@ -187,7 +195,7 @@ object Gow3Prepare {
         // game ships them; their imports otherwise go to the host runtime.
         val modules = (ini["linked_modules"]?.split(' ', ',', ';')?.map { it.trim() }
             ?.filter { it.isNotEmpty() }
-            ?: DEFAULT_LINKED_MODULES.filter { it == "libc.prx" || File(gameDir, "sce_module/$it").isFile })
+            ?: DEFAULT_LINKED_MODULES.filter { it == "libc.prx" || moduleFile(gameDir, it).isFile })
         try {
             nativeBootLinked(gameDir.absolutePath, outDir.absolutePath, modules.toTypedArray(), executable)
         } catch (error: Exception) {

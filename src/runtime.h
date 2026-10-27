@@ -2,6 +2,15 @@
 #define GOW3_RUNTIME_H
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+/* Detailed log mode (GR2_VERBOSE_LOG=1/2 -> GOW3_VERBOSE_LOG): 0 off, else the level. Read once per
+ * file; the extra logging of the runtime files is guarded by it, so it costs one test when off. */
+static inline int runtime_verbose(void) {
+    static int level=-1;
+    if (level<0) { const char *e=getenv("GOW3_VERBOSE_LOG"); level=e ? atoi(e) : 0; if (level<0) level=0; }
+    return level;
+}
 #ifdef _WIN32
 #include "compat_win.h"
 /* No signals on Windows: the exception handler resumes the thread in gow3_longjmp
@@ -35,6 +44,10 @@ typedef void (ABI *GuestCallback)(void);
 void runtime_start(uint64_t capabilities);
 uintptr_t runtime_resolve(const char *name, int is_data);
 void runtime_report(void);
+/* Called at the end of runtime_report (the loader adds its own counters). */
+void runtime_set_report_hook(void (*hook)(void));
+/* Called by every guest thread the runtime creates, before its entry (test hooks). */
+void runtime_set_thread_start_hook(void (*hook)(void));
 void runtime_finalize(void *dso);
 uintptr_t runtime_mutex_resolve(const char *name);
 void runtime_mutex_report(void);
@@ -65,7 +78,7 @@ void runtime_set_procparam(void *param);
 void **runtime_application_heap_api(void);
 uintptr_t runtime_thread_resolve(const char *name);
 void runtime_thread_report(void);
-int runtime_thread_snapshot(uint32_t *ids,char (*names)[32],int max);
+int runtime_thread_ids(uint32_t *ids,char (*names)[32],int max);
 void runtime_set_main_tls(const void *data, uint64_t filesz, uint64_t memsz, uint64_t align);
 void runtime_thread_attach_main(void);
 int32_t *runtime_errno(void);
@@ -79,10 +92,22 @@ void runtime_content_report(void);
 typedef struct { const char *name; void *function; } RuntimeExport;
 #define RUNTIME_LOOKUP(table, nid) runtime_lookup(table, sizeof(table)/sizeof(*(table)), nid)
 const char *runtime_symbol(const char *nid);
+uintptr_t runtime_ngs2_trace_bind(const char *nid, uintptr_t address);
+/* libSceNgs2 (runtime_ngs2.c): the built-in mixer, unless GOW3_NGS2=native links the firmware module. */
+int runtime_ngs2_native(void);
+uintptr_t runtime_ngs2_resolve(const char *name);
+void *runtime_ngs2_function(const char *symbol);
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *nid);
 uintptr_t runtime_kernel_resolve(const char *name);
 uintptr_t runtime_file_resolve(const char *name);
 uintptr_t runtime_services_resolve(const char *name);
+uintptr_t runtime_tlg_resolve(const char *name);
+uintptr_t runtime_gr2_resolve(const char *name);
+uintptr_t runtime_gr2_np_resolve(const char *name);
+uintptr_t runtime_gr2_font_resolve(const char *name);
+uintptr_t runtime_gr2_json_resolve(const char *name);
+uintptr_t runtime_gr2_audio3d_resolve(const char *name);
+void runtime_gr2_audio3d_report(void);
 void runtime_file_report(void);
 void runtime_file_configure(const char *app0, const char *user);
 int runtime_file_mount(const char *guest, const char *host);
@@ -119,6 +144,10 @@ int runtime_mp3_decode(Mp3Decoder *decoder, const unsigned char *data, int size,
 uintptr_t runtime_videodec_resolve(const char *name);
 uintptr_t runtime_audio_resolve(const char *name);
 void runtime_audio_report(void);
+/* Host-side AudioOut ports (48 kHz; format as sceAudioOutOpen's param): handle or error. */
+int32_t runtime_audio_host_open(int32_t type, uint32_t frames, uint32_t format);
+int32_t runtime_audio_host_output(int32_t handle, const void *data, int pace);
+int32_t runtime_audio_host_close(int32_t handle);
 uintptr_t runtime_pad_resolve(const char *name);
 void runtime_pad_report(void);
 uintptr_t runtime_rtc_resolve(const char *name);
@@ -130,6 +159,7 @@ void runtime_savedata_report(void);
 #define RUNTIME_SAVE_PARAM_SIZE 1328
 int runtime_savedata_param(int32_t user, const char *dir, void *param);
 int runtime_savedata_icon(int32_t user, const char *dir, char *out, size_t size);
+uint64_t runtime_savedata_size(int32_t user, const char *dir); /* bytes on disk, 0 unknown */
 void runtime_thread_attach_host(const char *name);
 /* Host functions the loader runs at the start of guest functions found by their code (probe.c,
  * mouse camera; ported from SuperMedo's uncharted_pc, GPL). `pattern` is hex bytes with ?? for
@@ -161,4 +191,74 @@ const RuntimeInputAction *runtime_input_actions(size_t *count);
 int runtime_input_get(const char *key, char *value, size_t size);
 int runtime_input_set(const char *key, const char *value);
 int runtime_input_available(void);
+
+/* Freeze report (runtime_freeze.c). Each thread keeps what it is blocked on in a wait slot:
+ * the runtime's blocking calls mark it before they block and clear it after (a few stores).
+ * Two levels are kept, so a GPU readback inside a file read shows both. */
+#define RUNTIME_WAIT_LEVELS 2
+typedef struct RuntimeWaitLevel {
+    const char *kind;           /* static text ("mutex", "semaphore", ...); NULL: none */
+    const void *object;         /* handle or address of what is waited on */
+    const void *const *owner;   /* where the holder's thread record is kept (mutexes), or NULL */
+    uintptr_t frame;            /* frame of the guest-called import: [frame] guest rbp, [frame+8] return */
+    uint64_t since_ms;          /* runtime_wait_now_ms() when the wait started */
+    char name[48];              /* object name (tail of long ones) */
+} RuntimeWaitLevel;
+typedef struct RuntimeWait {
+    unsigned depth;             /* nesting; levels past RUNTIME_WAIT_LEVELS are only counted */
+    uint32_t generation;        /* changes on every begin/end: readers detect a torn copy */
+    /* GOW3_WAIT_STATS=1 only (0 otherwise): what this thread spent blocked in marked waits, so a
+     * stutter can be attributed to a thread and to the object it waited for. The outermost wait
+     * is the one that counts (nested ones are inside it). */
+    uint64_t wait_start_ns;     /* start of the outermost wait in progress (0: none counted) */
+    uint64_t wait_ns;           /* summed time blocked */
+    uint64_t wait_max_ns;       /* the longest single wait */
+    uint64_t wait_max_end_ms;   /* runtime_wait_now_ms() when that wait ended */
+    uint32_t wait_count;        /* marked waits counted */
+    const char *wait_max_kind;  /* static text of the longest wait (NULL: none yet) */
+    char wait_max_name[48];     /* its object name, if any */
+    RuntimeWaitLevel level[RUNTIME_WAIT_LEVELS];
+} RuntimeWait;
+/* Frame of the calling (guest-called) function, for runtime_wait_begin. Use it in the ABI
+ * entry itself: there [frame+8] is the guest call site and [frame] the guest frame chain. */
+#define RUNTIME_GUEST_FRAME() ((uintptr_t)__builtin_frame_address(0))
+uint64_t runtime_wait_now_ms(void);
+/* The calling thread's slot: its guest thread record, else a host slot (NULL when all are taken). */
+RuntimeWait *runtime_wait_slot(void);
+void runtime_wait_slot_begin(RuntimeWait *w, const char *kind, const void *object, const char *name,
+                             const void *const *owner, uintptr_t frame, uint64_t now_ms);
+void runtime_wait_slot_end(RuntimeWait *w);
+void runtime_wait_begin(const char *kind, const void *object, const char *name,
+                        const void *const *owner, uintptr_t frame);
+void runtime_wait_end(void);
+/* Consistent copy of a slot another thread may be changing (0: it kept changing). */
+int runtime_wait_copy(const RuntimeWait *from, RuntimeWait *to);
+/* Thread record of the calling guest (or attached host) thread, NULL on other threads. */
+void *runtime_thread_self(void);
+typedef struct RuntimeThreadInfo {
+    const void *record;         /* guest thread record (compare with a mutex owner); NULL: host slot */
+    uint64_t os_tid;            /* gettid() / GetCurrentThreadId() */
+    char name[32];
+    int finished;
+    RuntimeWait wait;
+} RuntimeThreadInfo;
+/* Guest threads and host wait slots; returns how many were written (at most max). */
+size_t runtime_thread_snapshot(RuntimeThreadInfo *out, size_t max);
+/* One line: "waiting on mutex 'name' 0x... for 1234 ms, held by 'Main'" ("running" without a
+ * wait). threads/count resolve owners to names. */
+void runtime_freeze_describe_wait(char *out, size_t size, const RuntimeWait *wait, uint64_t now_ms,
+                                  const RuntimeThreadInfo *threads, size_t count);
+/* Monitor state machine: called with the frames shown so far; returns 1 when a report is due
+ * (once per freeze), 2 when frames resumed after a report, else 0. */
+typedef struct FreezeMonitor {
+    uint64_t seconds;           /* report after this long without a new frame (0: never) */
+    uint64_t last_frames, last_change_ms;
+    uint64_t freeze_ms;         /* after a 2: how long the frames had stopped */
+    int reported;
+} FreezeMonitor;
+int runtime_freeze_step(FreezeMonitor *m, uint64_t frames, uint64_t now_ms);
+/* Guest image range (guest offsets in the report) and the monitor thread (seconds 0: none). */
+void runtime_freeze_start(uintptr_t image, uint64_t image_size, unsigned seconds);
+/* Writes a report now (every thread: name, wait, RIP and frame chain) to out. */
+void runtime_freeze_report(FILE *out, const char *head);
 #endif

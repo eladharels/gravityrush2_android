@@ -20,6 +20,7 @@ typedef struct Sema {
     int32_t count, initial, maximum;
     unsigned active;
     int deleted;
+    char name[32];
     Waiter *first;
     struct Sema *next;
 } Sema;
@@ -54,13 +55,15 @@ static ABI int32_t sem_create(uint32_t *out,const char *name,uint32_t attr,
     if (!s) return ERR(12);
     pthread_mutex_lock(&lock);
     if (next_id==UINT32_MAX) { pthread_mutex_unlock(&lock); free(s); return ERR(28); }
+    snprintf(s->name,sizeof(s->name),"%s",name);
     s->id=next_id++; s->attr=attr; s->count=s->initial=initial; s->maximum=maximum;
     s->next=registry; registry=s; *out=s->id; ++created;
     printf("Runtime: semaphore id=%u, attr=%u, initial=%d, max=%d\n",s->id,attr,initial,maximum);
+    if (runtime_verbose()) printf("Verbose: semaphore id=%u name \"%s\" created (%zu so far)\n",s->id,s->name,created);
     pthread_mutex_unlock(&lock);
     return 0;
 }
-static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) {
+static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block,uintptr_t frame) {
     pthread_mutex_lock(&lock);
     Sema *s=find(id);
     int32_t result=0;
@@ -68,11 +71,18 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
     else if (need<=0 || need>s->maximum) result=ERR(22);
     else if (s->count>=need) { s->count-=need; ++acquired; }
     else if (!block) result=ERR(16);
-    else if (timeout && !*timeout) { result=ERR(60); ++timed_out; }
+    else if (timeout && !*timeout) {
+        result=ERR(60); ++timed_out;
+        if (runtime_verbose() && (timed_out<=64 || !(timed_out%1000))) fprintf(stderr,"Verbose: semaphore %u (%s) timed out at once (zero timeout), timeout #%zu\n",id,s->name,timed_out);
+    }
     else {
         /* Priority-ordered semaphores (attr 2) are served FIFO: there is no
            PS4 priority scheduler, host threads run at equal priority. */
-        if (getenv("GOW3_TRACE_SEMA")) fprintf(stderr,"Runtime: blocking wait on semaphore %u (need %d, count %d)\n",id,need,s->count); /* deadlock diagnosis */
+        static int trace_sema=-1;
+        static unsigned verbose_waits;
+        if (trace_sema<0) trace_sema=getenv("GOW3_TRACE_SEMA")!=NULL;
+        /* Detailed log mode caps this trace at 2000 lines; GOW3_TRACE_SEMA alone stays unlimited. */
+        if (trace_sema && (!runtime_verbose() || ++verbose_waits<=2000)) fprintf(stderr,"Runtime: blocking wait on semaphore %u (need %d, count %d)\n",id,need,s->count); /* deadlock diagnosis */
         Waiter w={.need=need};
         pthread_condattr_t attr;
         host_check(pthread_condattr_init(&attr));
@@ -84,14 +94,17 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
         *tail=&w; ++s->active;
         uint64_t deadline=timeout ? now_ns()+(uint64_t)*timeout*1000 : 0;
         struct timespec end={.tv_sec=(time_t)(deadline/1000000000),.tv_nsec=(long)(deadline%1000000000)};
+        runtime_wait_begin(timeout ? "semaphore (timed)" : "semaphore",(const void *)(uintptr_t)id,s->name,NULL,frame);
         while (!w.done) {
             int e=timeout ? pthread_cond_timedwait(&w.event,&lock,&end) : pthread_cond_wait(&w.event,&lock);
             if (e==ETIMEDOUT && !w.done) {
                 Waiter **p=&s->first;
                 while (*p!=&w) p=&(*p)->next;
                 *p=w.next; w.result=ERR(60); w.done=1; ++timed_out;
+                if (runtime_verbose() && (timed_out<=64 || !(timed_out%1000))) fprintf(stderr,"Verbose: semaphore %u (%s) wait timed out after %u us, timeout #%zu\n",id,s->name,timeout ? *timeout : 0,timed_out);
             } else if (e!=ETIMEDOUT) host_check(e);
         }
+        runtime_wait_end();
         result=w.result;
         if (!result) ++acquired;
         if (timeout) {
@@ -104,8 +117,8 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
     pthread_mutex_unlock(&lock);
     return result;
 }
-static ABI int32_t sem_wait(uint32_t id,int32_t need,uint32_t *timeout) { return wait_count(id,need,timeout,1); }
-static ABI int32_t sem_poll(uint32_t id,int32_t need) { return wait_count(id,need,NULL,0); }
+static ABI int32_t sem_wait(uint32_t id,int32_t need,uint32_t *timeout) { return wait_count(id,need,timeout,1,RUNTIME_GUEST_FRAME()); }
+static ABI int32_t sem_poll(uint32_t id,int32_t need) { return wait_count(id,need,NULL,0,0); }
 static ABI int32_t sem_signal(uint32_t id,int32_t count) {
     pthread_mutex_lock(&lock);
     Sema *s=find(id);
@@ -154,6 +167,7 @@ static ABI int32_t sem_delete(uint32_t id) {
     while (*p && (*p)->id!=id) p=&(*p)->next;
     if (!*p) { pthread_mutex_unlock(&lock); return ERR(3); }
     Sema *s=*p; *p=s->next; s->deleted=1; ++deleted;
+    if (runtime_verbose()) printf("Verbose: semaphore id=%u (%s) deleted, %zu deleted so far\n",id,s->name,deleted);
     wake_all(s,ERR(13));
     if (!s->active) free(s);
     pthread_mutex_unlock(&lock);

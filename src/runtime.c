@@ -68,6 +68,7 @@ void runtime_start(uint64_t flags) {
 #endif
     stack_canary &= ~UINT64_C(255);
 }
+static void (*report_hook)(void); /* loader extras (ISA site counts) */
 void runtime_report(void) {
     printf("Runtime: _init_env=%zu, atexit=%zu, __cxa_atexit=%zu, registered handlers=%zu\n",
            calls_init, calls_atexit, calls_cxa, handler_count);
@@ -80,12 +81,15 @@ void runtime_report(void) {
     runtime_memory_report();
     runtime_ajm_report();
     runtime_audio_report();
+    runtime_gr2_audio3d_report();
     runtime_pad_report();
     runtime_savedata_report();
     runtime_file_report();
     runtime_fiber_report();
     printf("Runtime: memory operations=%zu\n", (size_t)memory_calls);
+    if (report_hook) report_hook();
 }
+void runtime_set_report_hook(void (*hook)(void)) { report_hook = hook; }
 static ABI void init_env(void) {
     /* prepare.py verified the supplied libc export consists of exactly C3. */
     ++calls_init;
@@ -259,6 +263,21 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
     if (fiber) return fiber;
     uintptr_t videodec2 = runtime_videodec2_resolve(name);
     if (videodec2) return videodec2;
+    /* Before runtime_tlg: its Audio3d entries are placeholders kept for TLG-only builds. */
+    uintptr_t gr2_audio3d = runtime_gr2_audio3d_resolve(name);
+    if (gr2_audio3d) return gr2_audio3d;
+    uintptr_t ngs2 = runtime_ngs2_resolve(name);
+    if (ngs2) return ngs2;
+    uintptr_t tlg = runtime_tlg_resolve(name);
+    if (tlg) return tlg;
+    uintptr_t gr2 = runtime_gr2_resolve(name);
+    if (gr2) return gr2;
+    uintptr_t gr2_np = runtime_gr2_np_resolve(name);
+    if (gr2_np) return gr2_np;
+    uintptr_t gr2_font = runtime_gr2_font_resolve(name);
+    if (gr2_font) return gr2_font;
+    uintptr_t gr2_json = runtime_gr2_json_resolve(name);
+    if (gr2_json) return gr2_json;
     return gow3gpu_resolve(name);
 }
 static const struct { const char *nid, *symbol; } import_names[]={

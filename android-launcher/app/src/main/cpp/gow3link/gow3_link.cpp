@@ -794,10 +794,15 @@ bool PrepareBoot(const u8* eboot, size_t eboot_size, const u8* libc, size_t libc
 
 namespace {
 
-/// Rewrite initial-exec `mov rax, fs:[0]` to GS: glibc owns FS on Linux, so the runtime points GS
-/// at each guest thread's TCB instead.
+/// Rewrite initial-exec `mov reg, fs:[0]` to GS: glibc owns FS on Linux, so the runtime points GS
+/// at each guest thread's TCB instead. gr2_pc: games load the thread pointer into any register
+/// (64, REX.W 48/4c, 8b, ModRM mod 00 rm 100 with any reg, SIB 25, disp32 0).
+bool IsFsLoad(const u8* at) {
+    return at[0] == 0x64 && (at[1] == 0x48 || at[1] == 0x4c) && at[2] == 0x8b && (at[3] & 0xc7) == 0x04 &&
+           at[4] == 0x25 && at[5] == 0 && at[6] == 0 && at[7] == 0 && at[8] == 0;
+}
 size_t PatchFsLoads(std::vector<u8>& image, const std::vector<ProgramHeader>& ph, u64 base) {
-    static const u8 kFsLoad[9] = {0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0};
+    constexpr size_t kFsLoad = 9;
     size_t patched = 0;
     for (const ProgramHeader& p : ph) {
         if (p.type != 1u || !(p.flags & 1u)) {
@@ -808,11 +813,11 @@ size_t PatchFsLoads(std::vector<u8>& image, const std::vector<ProgramHeader>& ph
             continue;
         }
         const size_t stop = std::min(image.size(), static_cast<size_t>(base + p.vaddr + p.filesz));
-        for (size_t at = start; at + sizeof(kFsLoad) <= stop;) {
-            if (std::memcmp(image.data() + at, kFsLoad, sizeof(kFsLoad)) == 0) {
+        for (size_t at = start; at + kFsLoad <= stop;) {
+            if (IsFsLoad(image.data() + at)) {
                 image[at] = 0x65;
                 ++patched;
-                at += sizeof(kFsLoad);
+                at += kFsLoad;
             } else {
                 ++at;
             }
@@ -1068,6 +1073,14 @@ bool LinkBoot(const std::vector<u8>& boot, const std::vector<u8>& eboot,
             found = it->second;
         } else if (key != kPlain && LibraryOf(key) == "libSceLibcInternal") {
             const auto candidates = by_nid.find(NidOf(key) + "#libc");
+            if (candidates != by_nid.end() && candidates->second.size() == 1) {
+                found = candidates->second.front();
+            }
+        }
+        if (!found && key != kPlain) {
+            // gr2_pc: a module may export a newer version of the library the game imports (the
+            // firmware's libSceNgs2.sprx); the same NID and library name is the same function.
+            const auto candidates = by_nid.find(NidOf(key) + "#" + LibraryOf(key));
             if (candidates != by_nid.end() && candidates->second.size() == 1) {
                 found = candidates->second.front();
             }

@@ -248,7 +248,25 @@ static int32_t dialog_open_mode(int i, const unsigned char *param, size_t mode_o
     return mode==progress_mode ? dialog_open_progress(i) : dialog_open(i);
 }
 static ABI int32_t msg_init(void) { return dialog_init(1); }
-static ABI int32_t msg_open(const unsigned char *p) { return dialog_open_mode(1,p,56,2); }
+/* gr2_pc: the message is logged, so a game stopped at a dialog says why. */
+static void msg_log(const unsigned char *p) {
+    if (!p) return;
+    uint32_t mode; memcpy(&mode,p+56,4);
+    const unsigned char *sub=NULL;
+    if (mode==1 || mode==2) {
+        memcpy(&sub,p+(mode==1 ? 64 : 72),8);
+        const char *text=NULL; uint32_t kind=0;
+        if (sub) { memcpy(&kind,sub,4); memcpy(&text,sub+8,8); }
+        printf("Runtime: MsgDialog %s (type %u): \"%.200s\"\n",mode==1 ? "user message" : "progress bar",kind,text ? text : "");
+    } else if (mode==3) {
+        memcpy(&sub,p+80,8);
+        uint32_t kind=0; if (sub) memcpy(&kind,sub,4);
+        printf("Runtime: MsgDialog system message type %u\n",kind);
+    } else {
+        printf("Runtime: MsgDialog mode %u\n",mode);
+    }
+}
+static ABI int32_t msg_open(const unsigned char *p) { msg_log(p); return dialog_open_mode(1,p,56,2); }
 static ABI int32_t msg_status(void) { return dialog_status(1); }
 static ABI int32_t msg_term(void) { return dialog_term(1); }
 static ABI int32_t msg_close(void) { return dialog_close(1); }

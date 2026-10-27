@@ -93,26 +93,31 @@ static ABI uint64_t tsc_frequency(void) { return guest_cpu_tsc_frequency(); }
 uint64_t runtime_process_time_us(void) { return process_time(); }
 uint64_t runtime_process_time_counter(void) { return process_time_counter(); }
 uint64_t runtime_tsc_frequency(void) { return tsc_frequency(); }
-static int sleep_ns(uint64_t ns) {
+uint64_t runtime_read_tsc(void) { return read_tsc(); }
+static int sleep_ns(uint64_t ns,uintptr_t frame) {
+    int e=0;
+    runtime_wait_begin("sleep",(const void *)(uintptr_t)(ns/1000),NULL,NULL,frame); /* object: microseconds */
 #ifdef _WIN32
     compat_sleep_ns(ns);
 #else
     struct timespec t={.tv_sec=(time_t)(ns/1000000000),.tv_nsec=(long)(ns%1000000000)};
-    while (nanosleep(&t,&t)) if (errno!=EINTR) return errno;
+    while (nanosleep(&t,&t)) if (errno!=EINTR) { e=errno; break; }
 #endif
-    return 0;
+    runtime_wait_end();
+    return e;
 }
-static ABI int32_t kernel_usleep(uint32_t usec) { sleep_ns((uint64_t)usec*1000); return 0; }
-static ABI int32_t posix_usleep(uint32_t usec) { sleep_ns((uint64_t)usec*1000); return 0; }
-static ABI uint32_t posix_sleep(uint32_t seconds) { sleep_ns((uint64_t)seconds*1000000000); return 0; }
-static ABI int32_t posix_nanosleep(const GuestTimespec *rq,GuestTimespec *rem) {
+static ABI int32_t kernel_usleep(uint32_t usec) { sleep_ns((uint64_t)usec*1000,RUNTIME_GUEST_FRAME()); return 0; }
+static ABI int32_t posix_usleep(uint32_t usec) { sleep_ns((uint64_t)usec*1000,RUNTIME_GUEST_FRAME()); return 0; }
+static ABI uint32_t posix_sleep(uint32_t seconds) { sleep_ns((uint64_t)seconds*1000000000,RUNTIME_GUEST_FRAME()); return 0; }
+static int32_t nanosleep_at(const GuestTimespec *rq,GuestTimespec *rem,uintptr_t frame) {
     if (!rq || rq->nsec<0 || rq->nsec>=1000000000 || rq->sec<0) return fail_posix(EINVAL);
-    sleep_ns((uint64_t)rq->sec*1000000000+(uint64_t)rq->nsec);
+    sleep_ns((uint64_t)rq->sec*1000000000+(uint64_t)rq->nsec,frame);
     if (rem) { rem->sec=0; rem->nsec=0; }
     return 0;
 }
+static ABI int32_t posix_nanosleep(const GuestTimespec *rq,GuestTimespec *rem) { return nanosleep_at(rq,rem,RUNTIME_GUEST_FRAME()); }
 static ABI int32_t kernel_nanosleep(const GuestTimespec *rq,GuestTimespec *rem) {
-    return posix_nanosleep(rq,rem) ? ERR(*runtime_errno()) : 0;
+    return nanosleep_at(rq,rem,RUNTIME_GUEST_FRAME()) ? ERR(*runtime_errno()) : 0;
 }
 typedef struct { int32_t minuteswest, dsttime; } GuestTimezone;
 static ABI int32_t kernel_gettimezone(GuestTimezone *tz) {
@@ -152,7 +157,8 @@ static ABI __attribute__((noreturn)) void hard_exit(int status) {
 static ABI __attribute__((noreturn)) void raise_exception(uint32_t code,uint64_t argument) {
     fprintf(stderr,"STOP: guest raised debug exception code=0x%x argument=0x%llx\n",code,(unsigned long long)argument);
     runtime_report();
-    exit(23);
+    fflush(NULL);
+    _exit(23); /* no destructors: GPU, audio and guest threads are still running (#189) */
 }
 /* The process was started without arguments other than its own name. */
 static const char *guest_argv[18];
@@ -272,7 +278,8 @@ static ABI void pthread_cxa_finalize(void *dso) { (void)dso; }
 static ABI __attribute__((noreturn)) void unwind_resume(void) {
     fputs("STOP: guest C++ exception unwinding (sigreturn/__Ux86_64_setcontext) is not supported\n",stderr);
     runtime_report();
-    exit(23);
+    fflush(NULL);
+    _exit(23); /* no destructors: GPU, audio and guest threads are still running */
 }
 static ABI int32_t print_backtrace(void) {
     fputs("Runtime: guest requested a backtrace (not available)\n",stderr);
@@ -342,8 +349,14 @@ static ABI int32_t guest_sysctl(const int32_t *name,uint32_t namelen,void *old,u
 }
 
 /* ---- pthread_once and thread-specific data ---- */
+/* The routine runs once; the others wait for the state to become 1. A routine that never returns
+ * normally (thread exit, a longjmp out of it, a crash) leaves the waiters in the loop, as in
+ * FreeBSD's libthr they would stay blocked in the kernel: the loop cannot be resolved without
+ * changing the semantics. It sleeps between checks (a yield at first, then 0.1 ms, then 1 ms)
+ * instead of burning a core with sched_yield. */
 static ABI int32_t thread_once(int32_t *once,void (ABI *routine)(void)) {
     if (!once || !routine) return ERR(22);
+    unsigned turns=0;
     for (;;) {
         int32_t state=__atomic_load_n(once,__ATOMIC_ACQUIRE);
         if (state==1) return 0;
@@ -352,7 +365,14 @@ static ABI int32_t thread_once(int32_t *once,void (ABI *routine)(void)) {
             __atomic_store_n(once,1,__ATOMIC_RELEASE);
             return 0;
         }
-        sched_yield();
+        if (++turns<=8) { sched_yield(); continue; }
+        const uint64_t ns=turns<64 ? 100000 : 1000000;
+#ifdef _WIN32
+        compat_sleep_ns(ns);
+#else
+        struct timespec nap={.tv_sec=0,.tv_nsec=(long)ns};
+        nanosleep(&nap,NULL);
+#endif
     }
 }
 static ABI int32_t posix_once(int32_t *once,void (ABI *routine)(void)) { return thread_once(once,routine) ? 22 : 0; }

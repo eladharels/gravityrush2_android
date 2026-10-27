@@ -6,6 +6,7 @@
  * Metadata lives beside the directory so the guest's own files are untouched. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "gpu/gow3gpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,7 +66,7 @@ _Static_assert(sizeof(SearchCond)==64 && sizeof(SearchResult)==56,"dir name sear
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized;
 static char title_id[16]="UNKNOWN";
-static struct { int used; char host[700], meta[700]; } slots[SLOTS];
+static struct { int used, saved; char host[700], meta[700]; } slots[SLOTS]; /* saved: param written */
 static char memory_path[720];
 static uint64_t memory_size;
 static size_t mounts_done, memory_writes;
@@ -129,6 +130,29 @@ int runtime_savedata_icon(int32_t user, const char *dir, char *out, size_t size)
     snprintf(out,size,"%s/%s.sce_sys/icon0.png",base,dir);
     return 0;
 }
+/* Bytes in a save's folder (the save dialog shows it); 0 when it cannot be read. */
+static uint64_t tree_size(const char *path, int depth) {
+    DIR *d=opendir(path);
+    if (!d) return 0;
+    uint64_t total=0; struct dirent *e;
+    while ((e=readdir(d))) {
+        if (!strcmp(e->d_name,".") || !strcmp(e->d_name,"..")) continue;
+        char child[1024]; struct stat st;
+        snprintf(child,sizeof(child),"%s/%s",path,e->d_name);
+        if (stat(child,&st)) continue;
+        if (S_ISDIR(st.st_mode)) { if (depth<8) total+=tree_size(child,depth+1); }
+        else total+=(uint64_t)st.st_size;
+    }
+    closedir(d);
+    return total;
+}
+uint64_t runtime_savedata_size(int32_t user, const char *dir) {
+    if (!valid_name(dir,32)) return 0;
+    char base[600], host[680];
+    root(user,NULL,base,sizeof(base));
+    snprintf(host,sizeof(host),"%s/%s",base,dir);
+    return tree_size(host,0);
+}
 static ABI int32_t save_initialize(const void *param) { (void)param; initialized=1; return 0; }
 static ABI int32_t save_terminate(void) {
     if (!initialized) return ERR_NOT_INITIALIZED;
@@ -187,8 +211,11 @@ static ABI int32_t save_umount(const MountPoint *point) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     pthread_mutex_lock(&lock);
     int slot=slot_of(point);
-    if (slot>=0) { runtime_file_unmount(point->data); slots[slot].used=0; }
+    int saved=slot>=0 && slots[slot].saved;
+    if (slot>=0) { runtime_file_unmount(point->data); slots[slot].used=slots[slot].saved=0; }
     pthread_mutex_unlock(&lock);
+    /* gr2_pc shows "Game saved" here (its renderer's toast); ours has none yet. */
+    (void)saved;
     return slot>=0 ? 0 : ERR_NOT_FOUND;
 }
 static ABI int32_t save_set_param(const MountPoint *point, uint32_t type, const void *buffer, uint64_t size) {
@@ -207,6 +234,7 @@ static ABI int32_t save_set_param(const MountPoint *point, uint32_t type, const 
     default: goto bad;
     }
     write_param(slots[slot].meta,&p);
+    slots[slot].saved=1;
     pthread_mutex_unlock(&lock);
     return 0;
 bad:
@@ -331,6 +359,50 @@ static int32_t memory_io(void *buffer, uint64_t size, int64_t offset, int write)
 static ABI int32_t memory_get(int32_t user, void *buffer, uint64_t size, int64_t offset) { (void)user; return memory_io(buffer,size,offset,0); }
 static ABI int32_t memory_set(int32_t user, void *buffer, uint64_t size, int64_t offset) { (void)user; return memory_io(buffer,size,offset,1); }
 
+/* SaveDataMemory2 (The Last Guardian): same single blob, struct-based arguments and a slot id.
+ * Only slot 0 is stored; the game uses one 1 MiB slot plus an icon. */
+typedef struct { void *buffer; uint64_t size; int64_t offset; uint8_t reserved[40]; } MemoryData;
+typedef struct { uint32_t option; int32_t user; uint64_t memory_size, icon_memory_size;
+                 const Param *init_param; const Icon *init_icon; uint32_t slot; uint8_t reserved[20]; } MemorySetup2;
+typedef struct { uint64_t existed_size; uint8_t reserved[16]; } MemorySetupResult;
+typedef struct { int32_t user; uint8_t pad[4]; MemoryData *data; Param *param; Icon *icon;
+                 uint32_t slot; uint8_t reserved[28]; } MemoryGet2;
+typedef struct { int32_t user; uint8_t pad[4]; const MemoryData *data; const Param *param; const Icon *icon;
+                 uint32_t count, slot; uint8_t reserved[24]; } MemorySet2;
+typedef struct { int32_t user; uint32_t slot, option; uint8_t reserved[28]; } MemorySync;
+_Static_assert(sizeof(MemoryData)==64 && sizeof(MemorySetup2)==64 && sizeof(MemorySetupResult)==24,"memory2 layouts");
+_Static_assert(sizeof(MemoryGet2)==64 && sizeof(MemorySet2)==64 && sizeof(MemorySync)==40,"memory2 layouts");
+
+static ABI int32_t memory_setup2(const MemorySetup2 *setup, MemorySetupResult *result) {
+    if (!setup || setup->slot) return ERR_PARAMETER;
+    char base[600], path[700];
+    root(setup->user,NULL,base,sizeof(base));
+    snprintf(path,sizeof(path),"%s.memory/memory.dat",base);
+    struct stat st;
+    uint64_t existed=stat(path,&st) ? 0 : (uint64_t)st.st_size;
+    int32_t r=memory_setup(setup->user,setup->memory_size,existed ? NULL : setup->init_param);
+    if (!r && result) { memset(result,0,sizeof(*result)); result->existed_size=existed; }
+    return r;
+}
+static ABI int32_t memory_get2(const MemoryGet2 *get) {
+    if (!get || get->slot) return ERR_PARAMETER;
+    if (get->param) memset(get->param,0,sizeof(*get->param));
+    if (get->icon && get->icon->buffer) ((Icon *)get->icon)->data_size=0;
+    return get->data ? memory_io(get->data->buffer,get->data->size,get->data->offset,0) : 0;
+}
+static ABI int32_t memory_set2(const MemorySet2 *set) {
+    if (!set || set->slot) return ERR_PARAMETER;
+    for (uint32_t i=0;set->data && i<(set->count ? set->count : 1);++i) {
+        int32_t r=memory_io(set->data[i].buffer,set->data[i].size,set->data[i].offset,1);
+        if (r) return r;
+    }
+    return 0;
+}
+static ABI int32_t memory_sync(const MemorySync *sync) {
+    (void)sync; /* every write is flushed when its FILE is closed */
+    return memory_size ? 0 : ERR_MEMORY_NOT_READY;
+}
+
 static const RuntimeExport exports[]={
     {"sceSaveDataInitialize",save_initialize}, {"sceSaveDataInitialize2",save_initialize},
     {"sceSaveDataInitialize3",save_initialize}, {"sceSaveDataTerminate",save_terminate},
@@ -339,6 +411,8 @@ static const RuntimeExport exports[]={
     {"sceSaveDataDirNameSearch",save_search},
     {"sceSaveDataSetupSaveDataMemory",memory_setup}, {"sceSaveDataGetSaveDataMemory",memory_get},
     {"sceSaveDataSetSaveDataMemory",memory_set},
+    {"sceSaveDataSetupSaveDataMemory2",memory_setup2}, {"sceSaveDataGetSaveDataMemory2",memory_get2},
+    {"sceSaveDataSetSaveDataMemory2",memory_set2}, {"sceSaveDataSyncSaveDataMemory",memory_sync},
 };
 uintptr_t runtime_savedata_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
 void runtime_savedata_report(void) { printf("Runtime: save data mounts=%zu, memory writes=%zu\n",mounts_done,memory_writes); }

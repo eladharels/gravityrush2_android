@@ -213,7 +213,10 @@ JNIEXPORT jboolean JNICALL Java_com_gow3_android_data_Gow3Prepare_nativeBootLink
         const std::string name = ToStdString(env, element);
         env->DeleteLocalRef(element);
         std::vector<u8> bytes;
-        if (!ReadFile(game + "/sce_module/" + name, bytes)) {
+        // gravityrush2_android: a name with a '/' is relative to the game folder
+        // (sysdata/libSceSecure.prx), the others are in sce_module/.
+        const std::string path = name.find('/') != std::string::npos ? game + "/" + name : game + "/sce_module/" + name;
+        if (!ReadFile(path, bytes)) {
             // 常见误选：把 -patch 升级目录当成游戏目录（它也有 eboot.bin，能过选择器校验），
             // 但 sce_module 只在基础游戏目录里。给出可行动的提示而不是裸路径。
             std::string hint;
@@ -221,7 +224,7 @@ JNIEXPORT jboolean JNICALL Java_com_gow3_android_data_Gow3Prepare_nativeBootLink
                 hint = " (this looks like the -patch update folder: select the base game folder, e.g. CUSA01740, as the game folder)";
             else if (name != "libc.prx")
                 hint = " (check the linked_modules setting in gow3.ini)";
-            ThrowPrepare(env, "cannot read " + game + "/sce_module/" + name + hint);
+            ThrowPrepare(env, "cannot read " + path + hint);
             return JNI_FALSE;
         }
         if (i == 0) {

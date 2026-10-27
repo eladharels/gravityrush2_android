@@ -40,6 +40,14 @@ static uint64_t pool_size_bytes(void) {
 #define PAGE UINT64_C(16384)
 #define USER_MIN UINT64_C(0x1000000000)
 #define USER_MAX UINT64_C(0xfc00000000)
+/* System-reserved window (shim AddressSpace::SystemReservedVirtualBase/Size). Gnm places fixed
+ * objects there, e.g. the tessellation factor ring at 0x7f0000000 that The Last Guardian maps by
+ * hint and then verifies; an exact free hint in this window is honoured. */
+#define SYSTEM_RESERVED_MIN UINT64_C(0x700000000)
+#define SYSTEM_RESERVED_MAX UINT64_C(0x800000000)
+/* Games also map fixed addresses below the system window: Gravity Rush 2 maps 0x400000000 and
+ * 0x500000000 (3 GB) with MAP_FIXED. Windows reserves this whole low window as a placeholder too. */
+#define LOW_WINDOW_MIN UINT64_C(0x200000000)
 #define LIMIT 4096
 #define INVALID ((int32_t)UINT32_C(0x80020016))
 #define NO_MEMORY ((int32_t)UINT32_C(0x8002000c))
@@ -58,23 +66,55 @@ typedef struct { void *start; uint64_t offset, length; int8_t prot, type; int16_
 _Static_assert(sizeof(VirtualQueryInfo)==72,"PS4 virtual query info layout");
 _Static_assert(sizeof(BatchEntry)==32,"PS4 batch map entry layout");
 
+#include "rwlock_rp.h"
 /* Region table lock. Lookups (GPU per-draw queries, VirtualQuery, GPU page
  * protection) share it; map/unmap/protect take it exclusively. Both nest: code
  * under the lock may write guest memory, and a GPU-tracked page then faults into
- * runtime_memory_gpu_protect on the same thread. Readers nest because glibc's
- * default rwlock prefers readers; a thread holding it exclusively skips relocking. */
+ * runtime_memory_gpu_protect on the same thread. Readers nest because the lock prefers readers
+ * (glibc's default rwlock; rwlock_rp.h on Windows); a thread holding it exclusively skips relocking. */
+/* Windows: winpthreads' rwlock blocks new readers behind a waiting writer, so a nested reader
+ * deadlocks with it; rwlock_rp.h has glibc's reader preference. */
+#ifdef _WIN32
+static RpLock lock=RP_LOCK_INITIALIZER;
+#define table_rdlock() rp_read_lock(&lock)
+#define table_wrlock() rp_write_lock(&lock)
+#define table_rdunlock() rp_read_unlock(&lock)
+#define table_wrunlock() rp_write_unlock(&lock)
+#define table_tryrdlock() rp_try_read_lock(&lock)
+#define table_trywrlock() rp_try_write_lock(&lock)
+#else
 static pthread_rwlock_t lock=PTHREAD_RWLOCK_INITIALIZER;
+#define table_rdlock() pthread_rwlock_rdlock(&lock)
+#define table_wrlock() pthread_rwlock_wrlock(&lock)
+#define table_rdunlock() pthread_rwlock_unlock(&lock)
+#define table_wrunlock() pthread_rwlock_unlock(&lock)
+#define table_tryrdlock() pthread_rwlock_tryrdlock(&lock)
+#define table_trywrlock() pthread_rwlock_trywrlock(&lock)
+#endif
 static __thread unsigned exclusive_depth;
 /* Odd while a writer holds the lock; readers' region caches are valid for one even value. */
 static uint64_t table_generation;
+/* Contended acquisitions are marked for the freeze report (the uncontended path only adds a try). */
 static void write_lock(void) {
-    if (!exclusive_depth++) { pthread_rwlock_wrlock(&lock); __atomic_add_fetch(&table_generation,1,__ATOMIC_ACQ_REL); }
+    if (!exclusive_depth++) {
+        if (table_trywrlock()) {
+            runtime_wait_begin("runtime memory map lock (write)",&lock,NULL,NULL,0);
+            table_wrlock();
+            runtime_wait_end();
+        }
+        __atomic_add_fetch(&table_generation,1,__ATOMIC_ACQ_REL);
+    }
 }
 static void write_unlock(void) {
-    if (!--exclusive_depth) { __atomic_add_fetch(&table_generation,1,__ATOMIC_RELEASE); pthread_rwlock_unlock(&lock); }
+    if (!--exclusive_depth) { __atomic_add_fetch(&table_generation,1,__ATOMIC_RELEASE); table_wrunlock(); }
 }
-static void read_lock(void) { if (!exclusive_depth) pthread_rwlock_rdlock(&lock); }
-static void read_unlock(void) { if (!exclusive_depth) pthread_rwlock_unlock(&lock); }
+static void read_lock(void) {
+    if (exclusive_depth || !table_tryrdlock()) return;
+    runtime_wait_begin("runtime memory map lock (read)",&lock,NULL,NULL,0);
+    table_rdlock();
+    runtime_wait_end();
+}
+static void read_unlock(void) { if (!exclusive_depth) table_rdunlock(); }
 static Block blocks[LIMIT];
 static Vma *vmas; static size_t vma_count, vma_capacity;
 #ifndef _WIN32
@@ -142,8 +182,19 @@ void runtime_memory_reserve(void) {
     if (region_count) return;
     if (!VirtualAlloc2(NULL,(void *)USER_MIN,USER_MAX-USER_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0))
         win_fail("reserving the PS4 address range (link with --disable-high-entropy-va)",USER_MIN,USER_MAX-USER_MIN);
-    region_insert(0,(HostRegion){USER_MIN,USER_MAX,0,0});
+    /* The low window (0x200000000 up to the system-reserved one at 0x700000000-0x800000000) sits
+     * below USER_MIN; without its own placeholder, a fixed or hinted map there (TLG's tessellation
+     * ring, GR2's 0x400000000 and 0x500000000) stopped the game with "guest range outside the
+     * reservation". If something of Windows' already sits low, keep at least the system window. */
+    if (VirtualAlloc2(NULL,(void *)LOW_WINDOW_MIN,SYSTEM_RESERVED_MAX-LOW_WINDOW_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0))
+        region_insert(region_count,(HostRegion){LOW_WINDOW_MIN,SYSTEM_RESERVED_MAX,0,0});
+    else if (VirtualAlloc2(NULL,(void *)SYSTEM_RESERVED_MIN,SYSTEM_RESERVED_MAX-SYSTEM_RESERVED_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0)) {
+        fprintf(stderr,"Runtime: low window %p unavailable (error %lu); only the system-reserved window is kept\n",(void *)LOW_WINDOW_MIN,GetLastError());
+        region_insert(region_count,(HostRegion){SYSTEM_RESERVED_MIN,SYSTEM_RESERVED_MAX,0,0});
+    } else fprintf(stderr,"Runtime: system-reserved window %p unavailable (error %lu); hinted maps there move to the user range\n",(void *)SYSTEM_RESERVED_MIN,GetLastError());
+    region_insert(region_count,(HostRegion){USER_MIN,USER_MAX,0,0});
 }
+static int system_window_reserved(void) { return region_count && regions[0].start<=SYSTEM_RESERVED_MIN; }
 static void view_map(const HostRegion *r, DWORD protect) {
     DWORD initial=protect==PAGE_NOACCESS ? PAGE_READWRITE : protect, old;
     if (!MapViewOfFile3(section,GetCurrentProcess(),(void *)r->start,r->phys,r->end-r->start,MEM_REPLACE_PLACEHOLDER,initial,NULL,0))
@@ -255,6 +306,7 @@ static int pool(void) {
     return 0;
 }
 void runtime_memory_reserve(void) {}
+static int system_window_reserved(void) { return 1; }
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
     void *mapped = !reserved
         ? mmap((void *)address,size,prot,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)
@@ -354,7 +406,13 @@ static int overlaps(uintptr_t start, uintptr_t end, int ignore_reserved) {
     return 0;
 }
 /* First-fit search in the PS4 user range, starting from the hint. */
+static int range_free(uintptr_t start, uint64_t size) {
+    size_t i=vma_index(start);
+    return i==vma_count || vmas[i].start>=start+size;
+}
 static uintptr_t find_free(uintptr_t hint, uint64_t size, uint64_t alignment) {
+    if (hint>=SYSTEM_RESERVED_MIN && hint+size<=SYSTEM_RESERVED_MAX && !(hint%alignment) && system_window_reserved() && range_free(hint,size))
+        return hint;
     uintptr_t at=align_up(hint<USER_MIN ? USER_MIN : hint, alignment);
     for (size_t i=vma_index(at); at+size<=USER_MAX; ++i) {
         if (i==vma_count || vmas[i].start>=at+size) return at;
@@ -792,6 +850,23 @@ int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t s
         if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) { ok=0; break; }
         uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
         memcpy(backing_base+vmas[i].phys+(at-vmas[i].start),(const unsigned char *)data+(at-address),n);
+        at+=n;
+    }
+    read_unlock();
+    return ok;
+}
+/* Reads through the backing view, bypassing GPU page protection; 0 when part of the range has no
+ * backing (the caller then reads the guest address directly). GPU-internal threads use it so a
+ * read of a page protected for readback (GOW3_READBACKS=2) cannot fault into a readback that waits
+ * for the same thread (the Vulkan recorder). */
+int runtime_memory_read_backing(uintptr_t address, void *data, uint64_t size) {
+    read_lock();
+    int ok=1;
+    for (uintptr_t at=address, end=address+size; at<end && ok;) {
+        size_t i=vma_index(at);
+        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) { ok=0; break; }
+        uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
+        memcpy((unsigned char *)data+(at-address),backing_base+vmas[i].phys+(at-vmas[i].start),n);
         at+=n;
     }
     read_unlock();

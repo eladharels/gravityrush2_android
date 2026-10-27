@@ -144,6 +144,60 @@ static ABI int32_t rtc_rfc2822_local(char *out, const uint64_t *utc_tick) {
     return 0;
 }
 
+/* sceRtcTickAdd*: out = in + n units; months/years keep the day, clamped to the month's end. */
+#define TICK_ADD(name,unit) \
+    static ABI int32_t name(uint64_t *out, const uint64_t *in, int64_t n) { \
+        if (!out || !in) return ERR_INVALID_POINTER; \
+        *out=(uint64_t)((int64_t)*in+n*(int64_t)(unit)); return 0; \
+    }
+TICK_ADD(rtc_add_seconds,1000000)
+TICK_ADD(rtc_add_minutes,60000000)
+TICK_ADD(rtc_add_hours,INT64_C(3600000000))
+static ABI int32_t rtc_add_days(uint64_t *out, const uint64_t *in, int32_t n) {
+    if (!out || !in) return ERR_INVALID_POINTER;
+    *out=(uint64_t)((int64_t)*in+(int64_t)n*(int64_t)TICKS_PER_DAY); return 0;
+}
+static int32_t add_months(uint64_t *out, const uint64_t *in, int64_t months) {
+    if (!out || !in) return ERR_INVALID_POINTER;
+    DateTime t; from_tick(*in,&t);
+    int64_t m=(int64_t)t.year*12+(t.month-1)+months;
+    int y=(int)(m/12); int mo=(int)(m%12)+1;
+    if (y<1 || y>9999) return ERR_INVALID_YEAR;
+    t.year=(uint16_t)y; t.month=(uint16_t)mo;
+    if (t.day>days_in_month(y,mo)) t.day=(uint16_t)days_in_month(y,mo);
+    *out=to_tick(&t); return 0;
+}
+static ABI int32_t rtc_add_months(uint64_t *out, const uint64_t *in, int32_t n) { return add_months(out,in,n); }
+static ABI int32_t rtc_add_years(uint64_t *out, const uint64_t *in, int16_t n) { return add_months(out,in,(int64_t)n*12); }
+/* RFC 2822 / RFC 3339 text of a UTC tick shown in the given time zone (minutes east of UTC). */
+static ABI int32_t rtc_rfc2822(char *out, const uint64_t *utc_tick, int32_t tz_minutes) {
+    if (!out) return ERR_INVALID_POINTER;
+    uint64_t utc=utc_tick ? *utc_tick : now_utc();
+    DateTime t; from_tick((uint64_t)((int64_t)utc+(int64_t)tz_minutes*60000000),&t);
+    static const char *days[]={"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    static const char *months[]={"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+    int a=(tz_minutes<0 ? -tz_minutes : tz_minutes)%(100*60);
+    char text[64];
+    snprintf(text,sizeof(text),"%s, %02u %s %04u %02u:%02u:%02u %c%02d%02d",days[rtc_day_of_week(t.year,t.month,t.day)],t.day,
+             months[t.month-1],t.year,t.hour,t.minute,t.second,tz_minutes<0 ? '-' : '+',a/60,a%60);
+    memcpy(out,text,strlen(text)+1);
+    return 0;
+}
+static ABI int32_t rtc_rfc3339(char *out, const uint64_t *utc_tick, int32_t tz_minutes) {
+    if (!out) return ERR_INVALID_POINTER;
+    uint64_t utc=utc_tick ? *utc_tick : now_utc();
+    DateTime t; from_tick((uint64_t)((int64_t)utc+(int64_t)tz_minutes*60000000),&t);
+    int a=(tz_minutes<0 ? -tz_minutes : tz_minutes)%(100*60);
+    char text[64];
+    if (!tz_minutes)
+        snprintf(text,sizeof(text),"%04u-%02u-%02uT%02u:%02u:%02u.%02uZ",t.year,t.month,t.day,t.hour,t.minute,t.second,t.microsecond/10000);
+    else
+        snprintf(text,sizeof(text),"%04u-%02u-%02uT%02u:%02u:%02u.%02u%c%02d:%02d",t.year,t.month,t.day,t.hour,t.minute,t.second,
+                 t.microsecond/10000,tz_minutes<0 ? '-' : '+',a/60,a%60);
+    memcpy(out,text,strlen(text)+1);
+    return 0;
+}
+
 static const RuntimeExport exports[]={
     {"sceRtcGetCurrentClockLocalTime",rtc_current_local}, {"sceRtcGetCurrentClock",rtc_current_clock},
     {"sceRtcGetCurrentTick",rtc_current_tick}, {"sceRtcGetCurrentNetworkTick",rtc_current_tick},
@@ -151,5 +205,9 @@ static const RuntimeExport exports[]={
     {"sceRtcGetDayOfWeek",rtc_day_of_week}, {"sceRtcGetTick",rtc_get_tick}, {"sceRtcSetTick",rtc_set_tick},
     {"sceRtcGetTickResolution",rtc_tick_resolution}, {"sceRtcSetTime_t",rtc_set_time_t},
     {"sceRtcGetTime_t",rtc_get_time_t}, {"sceRtcFormatRFC2822LocalTime",rtc_rfc2822_local},
+    {"sceRtcTickAddSeconds",rtc_add_seconds}, {"sceRtcTickAddMinutes",rtc_add_minutes},
+    {"sceRtcTickAddHours",rtc_add_hours}, {"sceRtcTickAddDays",rtc_add_days},
+    {"sceRtcTickAddMonths",rtc_add_months}, {"sceRtcTickAddYears",rtc_add_years},
+    {"sceRtcFormatRFC2822",rtc_rfc2822}, {"sceRtcFormatRFC3339",rtc_rfc3339},
 };
 uintptr_t runtime_rtc_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
