@@ -166,6 +166,26 @@ guest handed in (callbacks, allocators, vtables) must go through `guest_cpu_call
 function handed to the guest as a pointer through `guest_cpu_host_function`. Check new files for
 `typedef ... (*Name)(...)` and calls through struct members.
 
+## Third boot (2026-10-27, build f0432b0): engine start, then the detiler on the stock driver
+
+With the NGS2 fix the game runs ~60 s of start-up: the NGS2 built-in mixer (grain 256, 48 kHz),
+the `sndx_*` sound threads and `SoundTick`, `DrawThread`, 7 `MTTW` and 6 `JoBwOrKeR` threads, 5
+`Havok Thread`s, `MSM::StepThr`, `RTC Polling Thread.`, NpToolkit offline (signed out), the
+first fiber (`SandboxBGJobWorker`, JIT contexts), sceFont glyph rendering (FreeType), ~200
+semaphores, and its first shaders. Then the renderer stops:
+
+```
+GPU [Debug] <Critical> tile_manager.cpp:189 GetTilingPipeline: Assertion Failed!
+Detiler pipeline creation failed ErrorUnknown
+STOP: GPU library assertion failed (see GPU log above)
+```
+
+This is shadPS4's detiler compute pipeline failing to build, on the **stock Qualcomm driver**
+("GPU driver: system (stock)"): the app has no Turnip yet. The kernel GPU lines of the bug report
+show no CP faults. Next: install the Standard Turnip build in this app (or make the launcher
+use one by default, blocker 4 below) and run again; only if Turnip fails too is the detiler
+shader itself the problem.
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
@@ -184,9 +204,8 @@ function handed to the guest as a pointer through `guest_cpu_host_function`. Che
    where possible, keeping our JIT host-call boundary (`guest_cpu.h`), fibers (`runtime_fiber_jit.c`),
    Bionic and Android pieces. Then the renderer side: gr2_pc's shadPS4 fixes from inFAMOUS (float
    atomics, `S_WQM_B64`, LDS barriers, the geometry-shader outline that draws black lines).
-2. **Game libraries the launcher must link:** `libSceJobManager.prx` (and `libSceNpToolkit.prx`,
-   `libSceSecure.prx` from `sysdata/`), as gr2_pc's launcher does. Only libc and Fios2 are
-   linked today.
+2. **Game libraries the launcher must link:** done (libc, Fios2, JobManager,
+   `sysdata/libSceSecure.prx`; NpToolkit is served by the runtime, as on PC).
 3. **Audio:** gr2_pc uses the console firmware's `libSceNgs2.sprx` (`system_lib/`, the player's
    own) or its own experimental mixer.
 4. **Turnip on first start:** install the Standard Turnip build in this app (Settings → DRIVER).
