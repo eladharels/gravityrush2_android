@@ -31,19 +31,24 @@ public:
     // join is logged and the thread detached instead.
     void Join() {
         if (!thread.joinable()) return;
+        if (thread.get_id() == std::this_thread::get_id()) {
+            // gravityrush2_android: Bionic's pthread_detach fails with EINVAL while another
+            // thread is joining this one (Gravity Rush 2 stops an AvPlayer from its game thread
+            // while the player's controller thread stops itself). The joiner waits for it to end;
+            // this object only has to stop owning it, or its destructor would join itself.
+            Release();
+            return;
+        }
         try {
-            if (thread.get_id() == std::this_thread::get_id()) thread.detach();
-            else thread.join();
+            thread.join();
         } catch (const std::system_error& error) {
             // Windows (libc++ on Win32 threads): the join can fail although the thread is fine.
             // Wait for its function to return, so nothing it uses is freed under it, then let go.
             std::fprintf(stderr, "HLE thread: join failed (%s); waiting for it to finish\n", error.what());
-            if (thread.get_id() != std::this_thread::get_id()) {
-                for (int waited = 0; finished && !finished->load() && waited < 5000; ++waited) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
+            for (int waited = 0; finished && !finished->load() && waited < 5000; ++waited) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            if (thread.joinable()) thread.detach();
+            Release();
         }
     }
     bool Joinable() const { return thread.joinable(); }
@@ -55,6 +60,17 @@ public:
     }
 
 private:
+    // Lets go of the thread without an exception reaching guest code: detached if possible,
+    // else moved to a jthread that is never destroyed (its destructor would join or terminate).
+    void Release() {
+        if (!thread.joinable()) return;
+        try {
+            thread.detach();
+        } catch (const std::system_error& error) {
+            std::fprintf(stderr, "HLE thread: detach failed (%s); thread object kept\n", error.what());
+            new std::jthread(std::move(thread));
+        }
+    }
     std::jthread thread;
     std::shared_ptr<std::atomic<bool>> finished;
 };
