@@ -75,7 +75,8 @@ if [ -f "$launch_env" ]; then
     # value unsets the option; lines starting with # are ignored. Applied after the game's own
     # options; the start script's screen, driver and frame settings below still win. Besides
     # the port's GOW3_* options the Turnip driver's own are accepted: TU_DEBUG (e.g. sysmem,
-    # gmem, nolrz, noubwc), FD_DEV_FEATURES, IR3_SHADER_DEBUG and MESA_* (the shader cache).
+    # gmem, nolrz, noubwc), FD_DEV_FEATURES, IR3_SHADER_DEBUG and MESA_* (the shader cache), and
+    # FEXCore's FEX_* (FEX_MAXINST=1: one guest instruction per block, so a fault names its own).
     uc_env_file="${GOW3_GAME_DIR%/}/gr2-env.txt"
     if [ -n "${GOW3_GAME_DIR:-}" ] && [ -f "$uc_env_file" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
@@ -83,7 +84,7 @@ if [ -f "$launch_env" ]; then
             case $line in ''|'#'*) continue ;; esac
             key=${line%%=*}
             value=${line#*=}
-            case $key in GOW3_[A-Z0-9_]*|TU_[A-Z0-9_]*|FD_[A-Z0-9_]*|IR3_[A-Z0-9_]*|MESA_[A-Z0-9_]*) ;;
+            case $key in GOW3_[A-Z0-9_]*|TU_[A-Z0-9_]*|FD_[A-Z0-9_]*|IR3_[A-Z0-9_]*|MESA_[A-Z0-9_]*|FEX_[A-Z0-9_]*) ;;
                 *) echo "gr2-env.txt: ignored: $line"; continue ;; esac
             case $key in *[!A-Z0-9_]*) echo "gr2-env.txt: ignored: $line"; continue ;; esac
             # FD_DEV_FEATURES=name=1 carries '=' in its value; MESA_SHADER_CACHE_DIR a path.
