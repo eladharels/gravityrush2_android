@@ -8,12 +8,30 @@
 #include <string_view>
 #include <utility>
 #include <queue>
+#include <type_traits>
 
 #include "core/libraries/avplayer/avplayer.h"
+#include "../../../../../src/guest_cpu.h" // FEXCore boundary (src/guest_cpu.h)
 
 #define AVPLAYER_IS_ERROR(x) ((x) < 0)
 
 namespace Libraries::AvPlayer {
+
+// gravityrush2_android: the game's memory, file and event callbacks are guest code; they are
+// entered through the guest CPU (FEXCore's JIT on arm64), never called directly.
+template <typename T>
+inline u64 GuestArg(T value) {
+    if constexpr (std::is_pointer_v<T>) {
+        return static_cast<u64>(reinterpret_cast<uintptr_t>(value));
+    } else {
+        return static_cast<u64>(value);
+    }
+}
+template <typename F, typename... Args>
+inline u64 GuestCall(F function, Args... args) {
+    const u64 values[] = {GuestArg(args)..., 0};
+    return guest_cpu_call(reinterpret_cast<uintptr_t>(function), sizeof...(Args), values);
+}
 
 enum class AvState {
     Unknown,
