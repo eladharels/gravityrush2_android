@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Uncharted Collection</string>
+    <string name="app_name">Gravity Rush 2</string>
 
     <!-- 品牌与关键动作按钮：双语同值，不翻译 -->
-    <string name="title_god_of_war_iii">UNCHARTED</string>
+    <string name="title_god_of_war_iii">GRAVITY RUSH 2</string>
     <string name="title_remastered">REMASTERED</string>
     <string name="launch_button">LAUNCH</string>
     <string name="start_game_button">START GAME</string>
@@ -312,7 +312,7 @@
     <string name="folder_title_game">选择你的游戏目录</string>
     <string name="folder_title_update">选择游戏升级补丁目录</string>
     <string name="folder_message_update">可选：游戏的升级（补丁）目录，例如 CUSA01740-patch。启动时它的 eboot.bin 与 sce_sys 会叠加到游戏上；游戏文件不会被改动。留空则使用游戏目录原样。</string>
-    <string name="folder_message_game">选择解压后的《神秘海域：德雷克船长合集》目录（例如 CUSA02344）或其父目录。所选位置必须包含 eboot.bin、big2-ps4_Shipping.elf 和 big3-ps4_Shipping.elf。</string>
+    <string name="folder_message_game">选择《重力眩晕 2》游戏目录（CUSA03694，叠加 01.11 更新）。所选位置必须包含 eboot.bin 和 Gravite2_Chunk0.psarc。</string>
     <string name="folder_current_selection_fmt">\n\n当前选择：\n%1$s</string>
     <string name="folder_choose_update">选择升级补丁目录</string>
     <string name="folder_choose_game">选择游戏目录</string>

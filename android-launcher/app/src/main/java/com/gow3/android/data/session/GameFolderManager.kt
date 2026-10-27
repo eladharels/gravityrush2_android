@@ -61,6 +61,25 @@ internal class GameFolderManager(private val activity: Activity) {
         return isGame(File(path)) && !sameAs(File(path), File(gamePath))
     }
 
+    /**
+     * gravityrush2_android: sets the game folder without the system folder picker, which can show
+     * an empty storage root (Galaxy S24 Ultra with a work profile, 2026-10-27). [requested] is the
+     * `game_dir` extra of an adb start (`am start -n ... --es game_dir <path>`); without it, and
+     * while no folder is set, the usual places are searched: <storage>/games/<any>/ and
+     * <storage>/games/<any>/Game/ holding Gravity Rush 2. Returns the folder set, or null.
+     */
+    fun adoptFolder(requested: String?): String? {
+        if (activity.checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) return null
+        val dir = if (!requested.isNullOrBlank()) File(requested).takeIf { isGame(it) }
+        else if (gamePrefs.gameDir() != null) null
+        else File(Environment.getExternalStorageDirectory(), "games").listFiles().orEmpty().sortedBy { it.name }
+            .flatMap { listOf(it, File(it, "Game")) }
+            .firstOrNull { com.gow3.android.data.GravityRush2.isGame(it) }
+        dir ?: return null
+        gamePrefs.setGameDir(dir.path)
+        return dir.path
+    }
+
     fun ensureGameFolder() {
         if (hasGameFolder()) return
         chooseGameFolder()

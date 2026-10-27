@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
         window.decorView.systemUiVisibility = 0
 
         gameFolderManager = GameFolderManager(this)
+        gameFolderManager.adoptFolder(intent?.getStringExtra("game_dir"))
         losslessDllManager = LosslessDllManager(this)
         saveManager = SaveManager(this)
         logManager = LogManager(this)
