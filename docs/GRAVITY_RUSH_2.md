@@ -132,6 +132,40 @@ changes: `mov reg, fs:[0]` for any register (not only rax), and binding a newer 
 by NID and library name. gr2_pc also links the console's `system_lib/libSceNgs2.sprx` when
 present; not done here (its own mixer is used).
 
+Build fix: `runtime_gr2_font.c` renders glyphs with FreeType, so `build_bionic_deps.sh` builds
+FreeType 2.13.3 (static, no zlib/png/bzip2/brotli/harfbuzz) and `gow3-probe` links it.
+
+## Second boot (2026-10-27, build e7fb093): the game's entry point runs
+
+1. All four linked modules initialise (libc 0, Fios2 1, JobManager 2, libSceSecure 3; 266
+   native bindings instead of 242), and the game is entered at guest offset 0xa0.
+2. The game starts: `_init_env`, AppContent, nine system modules (host), 1.4 GB + 3.1 GB of
+   direct memory, three 1920x1080 display buffers, the threads `BGFiberWorkerLow/High/Sys/Font`,
+   FIOS2 and its `SceFios*` threads, PlayGo (2 chunks), Audio3d (port opened on the Android PCM
+   bridge) and the thread `sndx_audio3d_out_thread`.
+3. Then the process ends:
+
+```
+Guest fault (signal 4) at guest offset 0x264eb0, address 0x800368eb0
+```
+
+It was not the JIT. Build 7cfccfe prints more at a fault (the thread, the bytes at the RIP, the
+image return addresses on the guest stack), and with `FEX_MAXINST=1` (one guest instruction per
+JIT block; `gr2-env.txt` now takes `FEX_*` options) the main thread stopped at the same offset,
+with the guest stack topped by +0x25bb5e. That return address follows a call of the import stub
+at 0x13f7b40 (`jmp [0x1705ef8]`), the import `mPYgU4oYpuY#libSceNgs2` =
+`sceNgs2SystemCreateWithAllocator`. gr2_pc's `runtime_ngs2.c` called the game's allocator
+handler (guest code at 0x264eb0) directly: on arm64 the host CPU ran the x86 bytes and took
+SIGILL. The signal reached probe.c while the thread was in a host call, so the "guest offset"
+printed was the host PC. Fixed in the next build: `guest_alloc`/`guest_free` call the handlers
+through `guest_cpu_call`, and a fault with the host PC inside the image now says "Host jumped
+into guest code ... without guest_cpu_call".
+
+**Rule for later merges from gr2_pc (or any PC port):** every call of a function pointer the
+guest handed in (callbacks, allocators, vtables) must go through `guest_cpu_call`, and every host
+function handed to the guest as a pointer through `guest_cpu_host_function`. Check new files for
+`typedef ... (*Name)(...)` and calls through struct members.
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;

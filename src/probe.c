@@ -846,7 +846,12 @@ static void fault(int sig, siginfo_t *info, void *context) {
     uintptr_t rip = in_guest == GUEST_CPU_IN_GUEST ? (uintptr_t)regs.rip : guest_cpu_host_pc(context);
     char line[512];
     Dl_info where;
-    if (rip - (uintptr_t)image < 0x10000000)
+    if (rip - (uintptr_t)image < 0x10000000 && in_guest != GUEST_CPU_IN_GUEST)
+        /* The host CPU itself is at a guest address: host code called a guest function pointer
+         * directly instead of through guest_cpu_call (x86 bytes run as arm64: SIGILL). */
+        snprintf(line, sizeof(line), "Host jumped into guest code (signal %d) at guest offset 0x%lx: a host function "
+                 "called a guest function pointer without guest_cpu_call\n", sig, (unsigned long)(rip - (uintptr_t)image));
+    else if (rip - (uintptr_t)image < 0x10000000)
         snprintf(line, sizeof(line), "Guest fault (signal %d) at guest offset 0x%lx, address %p\n",
                  sig, (unsigned long)(rip - (uintptr_t)image), info->si_addr);
     else if (dladdr((void *)rip, &where) && where.dli_fname)

@@ -1008,11 +1008,15 @@ static void guest_alloc(const Allocator *a, BufferInfo *info, uint64_t size) {
     info->host_size = size;
     if (!a || !a->alloc) return;
     info->user_data = a->user_data;
-    int32_t r = a->alloc(info);
+    /* The handlers are guest code: through the guest CPU (the JIT on arm64). */
+    const uint64_t arg = (uint64_t)(uintptr_t)info;
+    int32_t r = (int32_t)guest_cpu_call((uintptr_t)a->alloc, 1, &arg);
     if (r) note("guest allocator returned 0x%08x", (uint32_t)r);
 }
 static void guest_free(const Allocator *a, BufferInfo *info) {
-    if (a && a->free && info->host_buffer) a->free(info);
+    if (!a || !a->free || !info->host_buffer) return;
+    const uint64_t arg = (uint64_t)(uintptr_t)info;
+    guest_cpu_call((uintptr_t)a->free, 1, &arg);
 }
 
 #define CONTEXT_BUFFER_SIZE 0x1000
