@@ -863,8 +863,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
         int n = snprintf(line, sizeof(line), "  thread '%s', guest rsp %#" PRIx64 ", bytes at rip:", name, regs.gpr[GUEST_RSP]);
         for (int i = 0; i < 24 && n < (int)sizeof(line) - 4 && rip - (uintptr_t)image < 0x10000000; ++i)
             n += snprintf(line + n, sizeof(line) - (size_t)n, " %02x", ((const unsigned char *)rip)[i]);
-        snprintf(line + n, sizeof(line) - (size_t)n, "
-");
+        snprintf(line + n, sizeof(line) - (size_t)n, "\n");
         { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
         n = snprintf(line, sizeof(line), "  guest stack, image offsets:");
         const uint64_t *stack = (const uint64_t *)(uintptr_t)regs.gpr[GUEST_RSP];
@@ -873,8 +872,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
                 n += snprintf(line + n, sizeof(line) - (size_t)n, " +%#" PRIx64, stack[i] - (uintptr_t)image);
                 ++shown;
             }
-        snprintf(line + n, sizeof(line) - (size_t)n, "
-");
+        snprintf(line + n, sizeof(line) - (size_t)n, "\n");
         { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
     }
     if (gpu_enabled) gow3gpu_dump_guest_writes(context);
