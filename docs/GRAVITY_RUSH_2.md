@@ -75,9 +75,67 @@ Native libc initialization is incomplete; game entry has not run.
 Uncharted's libc never called it. The runtime stops at the first unsupported import, so more
 missing ones follow.
 
+## The gr2_pc merge (2026-10-27, commit 6ced6bf)
+
+gr2_pc's first commit (17b008a) imports gow3_pc unchanged under `port/`; its `port/src` is
+byte-identical to our `src/` at the common ancestor 998ebc5. So the merge is a three-way merge
+per file of gr2_pc's `port/src` (HEAD) into `src/`, with that import as the base. To redo it after
+upstream changes:
+
+```bash
+git clone https://github.com/HayatoG/gr2_pc <scratch>/gr2_pc   # core.longpaths=true on Windows
+git fetch <scratch>/gr2_pc HEAD:refs/gr2/head && git update-ref refs/gr2/base 17b008a91eb10b854a8c6feb118666fae297a238
+# per file: git merge-file --diff3 ours base theirs, theirs renamed first (below)
+```
+
+gr2_pc renamed `GOW3_*`, `gow3_*`, `Gow3*`, `gow3gpu*` to `TLG_*`, `tlg_*`, `Tlg*`, `tlggpu*`
+(and `tlg.ini`, thread names `tlg:`). Its side was mapped back to our names before merging
+(keeping `runtime_tlg_*`), which left 40 conflict hunks instead of 65. So all options stay
+`GOW3_*` here; gr2_pc's `GR2_*` aliases (copied to `TLG_*` at start) are not ported.
+
+Taken from gr2_pc: `runtime_gr2.c`, `runtime_gr2_audio3d.c`, `runtime_gr2_font.c`,
+`runtime_gr2_json.c`, `runtime_gr2_np.c`, `runtime_ngs2.c` (its own mixer), `runtime_ngs2_trace.c`,
+`runtime_tlg.c` (`sceLibcHeapGetTraceInfo` and other libc/kernel extras), `runtime_freeze.c`,
+`import_names.inc`, the RTC, rwlock, semaphore, memory-map and file-read changes, the mutex owner
+tracking, the per-thread wait slots and `GOW3_WAIT_STATS`, `msg_log` for message dialogs.
+
+Kept ours, and why:
+
+- **ISA rewrite** (`isa_rewrite.c`, `isa_emulate.c`, `cpu_check.c` are in `src/` but not built
+  on Android, and `probe.c` does not call them): they patch the eboot's SSE4A `EXTRQ` for x86 CPUs
+  without SSE4A. FEXCore decodes SSE4A itself.
+- **Fibers:** gr2_pc's `sceFiber*` (ucontext/Windows fibers, the entry called as host code) is
+  removed; Bionic has no `makecontext`, and `runtime_fiber_jit.c` resolves first anyway.
+- **probe.c:** ours unchanged (its JIT boundary). Not ported: the ISA/red-zone rewrite, the
+  `GOW3_IMPORT_TRACE` x86 stubs, `GR2_*` aliases, the freeze monitor start, NGS2 trace binding.
+- **runtime_pad.c:** ours (Android input bridge, Uncharted mouse camera). gr2_pc's PC mouse
+  scheme and **simulated motion sensor** (tilt/shake keys for gravity sliding) are not merged;
+  gr2_pc adds no pad imports. Port the motion part when gameplay is reached.
+- **Save dialog** (`runtime_services.c`): ours (the Android save bridge); gr2_pc's needs its
+  renderer's new save-list UI (`tlggpu_save_list_*`, `_message_*`, `_progress`, `_toast`).
+- **TSC:** ours (the guest CPU's counter), not gr2_pc's host `rdtsc`.
+- **Mutex lock:** ours (spin, statistics, caller sampling), with gr2_pc's owner tracking added.
+  Note that cond waits now return EPERM when the caller does not hold the mutex (gr2_pc,
+  inFAMOUS #586); a game that locks on one thread and waits on another would now get EPERM.
+
+Changed for the JIT: NGS2 voice callbacks and user FX, the font memory destroy callback and the
+NP toolkit allocator are guest code and are called through `guest_cpu_call`; the JSON allocator's
+base vtable holds `guest_cpu_host_function` stubs; MXCSR save/restore at thread start and in the
+NGS2 mixer are x86-64 only (`#if defined(__x86_64__)`); the freeze monitor is compiled out
+(`GOW3_FREEZE_MONITOR`, needs gr2_pc's renderer frame counters and x86 registers).
+
+Launcher (`Gow3Prepare.kt`, `gow3_prepare_jni.cpp`, `gow3_link.cpp`): links `libc.prx`,
+`libSceFios2.prx`, `libSceJobManager.prx` and `sysdata/libSceSecure.prx` (a name with a `/` is
+relative to the game folder), the order of gr2_pc's `gr2_run.py`. `libSceNpToolkit.prx` is not
+linked, as on PC: `runtime_gr2_np.c` serves it. The linker took two gr2_pc `link_modules.py`
+changes: `mov reg, fs:[0]` for any register (not only rax), and binding a newer library version
+by NID and library name. gr2_pc also links the console's `system_lib/libSceNgs2.sprx` when
+present; not done here (its own mixer is used).
+
 ## Next blockers, in order
 
-1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** gr2_pc descends from the same
+1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
+   the renderer side is still to do.) gr2_pc descends from the same
    gow3_pc family (by way of The Last Guardian's `tlg_pc`; its options are `TLG_*`/`GR2_*`) and
    plays the game to gameplay on PC at 30 FPS. Its `port/src/` has the same layout as our `src/`,
    plus the pieces this game needs:

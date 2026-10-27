@@ -110,6 +110,8 @@ fetch SDL3-3.2.10 https://github.com/libsdl-org/SDL/releases/download/release-3.
 fetch Vulkan-Headers-1.4.363 https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.363.tar.gz
 fetch SPIRV-Headers-1.4.309 https://github.com/KhronosGroup/SPIRV-Headers/archive/refs/tags/vulkan-sdk-1.4.309.0.tar.gz
 fetch ffmpeg-7.1.5 https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
+# gravityrush2_android: libSceFont (src/runtime_gr2_font.c) renders glyphs with FreeType.
+fetch_git freetype-2.13.3 https://github.com/freetype/freetype.git VER-2-13-3 42608f77f20749dd6ddc9e0536788eaad70ea4b5
 
 # 仅头文件：vulkan-hpp（NDK 自带 Vulkan 1.3.275 C 头但没有它）与 SPIR-V。
 cm vulkan-headers "$src/Vulkan-Headers-1.4.363"
@@ -121,6 +123,8 @@ cm zycore "$src/zycore-1.5.2" -DBUILD_SHARED_LIBS=OFF
 cm zydis "$src/zydis-4.1.1" -DBUILD_SHARED_LIBS=OFF -DZYDIS_BUILD_EXAMPLES=OFF -DZYDIS_BUILD_TOOLS=OFF \
     -DZYDIS_BUILD_DOXYGEN=OFF
 cm xxhash "$src/xxhash-0.8.3/cmake_unofficial" -DBUILD_SHARED_LIBS=OFF -DXXHASH_BUILD_XXHSUM=OFF
+# Static, without its optional libraries (the game's fonts are plain OpenType/TrueType).
+cm freetype "$src/freetype-2.13.3" -DBUILD_SHARED_LIBS=OFF -DFT_DISABLE_ZLIB=ON -DFT_DISABLE_BZIP2=ON     -DFT_DISABLE_PNG=ON -DFT_DISABLE_HARFBUZZ=ON -DFT_DISABLE_BROTLI=ON
 cm miniz "$src/miniz-3.1.2" -DBUILD_SHARED_LIBS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DINSTALL_PROJECT=ON
 # SDL3：共享（gow3-probe 与 libgow3gpu.so 必须共享同一份 SDL），仅 Android 后端；
 # window/audio/input 路径是第二阶段（exec 出的进程背后没有 SDLActivity/JNI）。

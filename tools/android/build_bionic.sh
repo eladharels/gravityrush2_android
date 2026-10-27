@@ -110,7 +110,7 @@ fi
 # uncharted_android: the runtime's C sources are checked first (they are compiled only after the
 # long GPU build), and the GPU build keeps going past errors (-k 0), so one run reports them all.
 early_cc=("$llvm/bin/aarch64-linux-android$api-clang")
-read -r -a early_includes <<< "$(PKG_CONFIG_SYSROOT_DIR= pkg-config --cflags libavcodec libavutil libswscale libswresample sdl3)"
+read -r -a early_includes <<< "$(PKG_CONFIG_SYSROOT_DIR= pkg-config --cflags libavcodec libavutil libswscale libswresample sdl3 freetype2)"
 runtime_check=0
 for source in src/probe.c src/runtime*.c src/vulkan_smoke.c; do
     "${early_cc[@]}" -fsyntax-only -std=c11 -Wall -Wextra -Werror -pthread -I"$prefix/include" -I. -Isrc \
@@ -159,8 +159,9 @@ done
 # 无 libvulkan、无我们自己的 loader。runtime_videodec.c 直接调用 avcodec，
 # 因此 probe 需要链接 Bionic 前缀里的静态 FFmpeg（与 build_arm64.sh 的 glibc probe 一致）。
 export PKG_CONFIG_SYSROOT_DIR=
-read -r -a pv_includes <<< "$(pkg-config --cflags libavcodec libavutil libswscale libswresample sdl3)"
-read -r -a pv_libraries <<< "$(pkg-config --libs libavcodec libavutil libswscale libswresample sdl3)"
+# freetype2: libSceFont (src/runtime_gr2_font.c).
+read -r -a pv_includes <<< "$(pkg-config --cflags libavcodec libavutil libswscale libswresample sdl3 freetype2)"
+read -r -a pv_libraries <<< "$(pkg-config --libs libavcodec libavutil libswscale libswresample sdl3 freetype2)"
 links=(-L"$out/lib" -lgow3gpu -lgow3cpu -Wl,-rpath,'$ORIGIN/../lib' -rdynamic -pie)
 "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I"$prefix/include" -I. -Isrc \
     "${pv_includes[@]}" \
