@@ -233,6 +233,9 @@ void Load() {
         {"GOW3_RCAS", "rcas"},                        {"GOW3_FRAMES_AHEAD", "frames_queued"},
         {"GOW3_ANISOTROPY", "anisotropy"},
         {"GOW3_VIBRATION", "vibration"},
+        // gravityrush2_android: the output size (854x480, 1280x720, 1920x1080), which is also
+        // the scene's raster size, from gr2-env.txt for A/B tests.
+        {"GOW3_OUTPUT_SIZE", "output_res"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env); value && value[0]) {
