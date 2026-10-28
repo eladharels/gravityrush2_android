@@ -114,6 +114,9 @@ export GOW3_SAVE_DIALOG_FILE="$base/save-dialog.request"
 # 渲染尺寸由 gow3.ini 的 render_resolution（分辨率补丁，准备阶段打进 eboot）决定；
 # 输出 output_res（1920x1080、1280x720 或 854x480；缺省 720p）是 UI/呈现的最终尺寸。
 output=$(setting output_res)
+# gravityrush2_android: GOW3_OUTPUT_RES in gr2-env.txt (854x480, 1280x720, 1920x1080) wins over the
+# ini, for A/B tests: the scene is rasterised at the output size.
+[ -n "${GOW3_OUTPUT_RES:-}" ] && output=$GOW3_OUTPUT_RES
 # 超分硬关闭（change replace-android-fsr3-with-gsr2 收尾决定）：时间域路径在 Android 尚未
 # 接通（UI 合成钩子未验证），ini 的 upscaler 取值一律忽略。ini 默认与一次性迁移均为 off，
 # 这里的硬关闭保证任何来源的取值都不会启用超分。接通后恢复白名单透传 off|gsr2|fsr3。

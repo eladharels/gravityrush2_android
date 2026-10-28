@@ -65,7 +65,7 @@ private:
     void Collect(u32 slice);
     void Print();
 
-    static constexpr u32 NumSlices = 4;
+    static constexpr u32 NumSlices = 32; // gravityrush2_android: 4 dropped nearly every frame at 5 FPS
     static constexpr u32 SliceQueries = 4096;
     static inline GpuProfiler* instance_ptr = nullptr;
 
