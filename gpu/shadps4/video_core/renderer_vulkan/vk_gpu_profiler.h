@@ -65,8 +65,10 @@ private:
     void Collect(u32 slice);
     void Print();
 
-    static constexpr u32 NumSlices = 32; // gravityrush2_android: 4 dropped nearly every frame at 5 FPS
-    static constexpr u32 SliceQueries = 4096;
+    // gravityrush2_android: 4 slices dropped nearly every frame at 5 FPS, and Gravity Rush 2 starts
+    // ~250 profiler frames a second in gameplay: 256 slices wait about a second for the GPU.
+    static constexpr u32 NumSlices = 256;
+    static constexpr u32 SliceQueries = 1024;
     static inline GpuProfiler* instance_ptr = nullptr;
 
     vk::Device device;
