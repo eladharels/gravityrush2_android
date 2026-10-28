@@ -261,6 +261,28 @@ its passes and shaders, then gr2_pc's renderer fixes.
 Note for test scripts: `printf '' | adb shell "cat > gr2-env.txt"` does not empty the file
 (adb sends no input); use `adb shell ": > .../gr2-env.txt"`.
 
+## Where the GPU time goes in gameplay (2026-10-28, build 95c92f6)
+
+- `TU_DEBUG=nocb` (Turnip's tiled GMEM rendering allowed again): mean 11.8 FPS against 11.4 with
+  `nocb,sysmem`, no GPU faults in 5 minutes. Not the bottleneck; the default stays.
+- GPU profile (`GOW3_GPU_PROFILE=1`; 95c92f6 keeps 256 slices of 1024 queries, since gameplay
+  starts ~300 profiler frames a second): the GPU is busy ~1 s per second, ~105 ms per game frame
+  at ~9.5 FPS (~3,600 draws). Per game frame:
+  - shadow maps ~22 ms: `pass 4096x4096 depth D16` and `pass 2048x2048 depth D16`
+    (vs `5d0febd2`, no pixel shader). Fixed size, so the render size does not change them;
+  - compute at native 1080p ~20-25 ms: dispatches of 240x135 and 120x68 groups (cs `7e22ac2f`,
+    `694a3f45`, `12bb8982`, `e172c821`, `c12dbba7`, `3615273f`, ...), the post-processing.
+    Scene proxies only shrink render targets, not compute storage images;
+  - scene-proxy resolves and fills (720p proxy <-> native 1080p) ~8 ms;
+  - the 720p scene passes ~10-15 ms, then a long tail (75 labels). ~110 small passes per frame
+    with vs `eb0345fe` (one per draw: something ends the render pass at every draw).
+- The renderer's own threads are near their limit too (stage B busy 85-90%), behind the GPU.
+
+Leads, in order of expected gain: the shadow maps (half-size depth targets, or a gr2_pc-style
+game patch), the native-size compute post-processing (scale the dispatches with the scene, or
+let the proxies cover storage images), the per-draw pass breaks, then gr2_pc's renderer fixes
+(early fragment tests BP12, wave64 lowering at the real subgroup size).
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
