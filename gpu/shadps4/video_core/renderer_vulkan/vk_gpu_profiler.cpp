@@ -85,6 +85,15 @@ void GpuProfiler::Collect(u32 which) {
         ++dropped;
         return;
     }
+    // gravityrush2_android: on Turnip some frames' stamps go backwards (reordered or stale
+    // queries); unsigned differences then add 1e14 ms. Such a frame is dropped and counted.
+    for (u32 i = 0; i + 1 < count; ++i) {
+        if (stamps[i + 1] < stamps[i] || double(stamps[i + 1] - stamps[i]) * period_ns > 1e9) {
+            ++dropped;
+            ++unordered;
+            return;
+        }
+    }
     for (u32 i = 0; i + 1 < count; ++i) {
         const double ms = double(stamps[i + 1] - stamps[i]) * period_ns / 1e6;
         auto& total = totals[keys[which][i]];
@@ -113,10 +122,11 @@ void GpuProfiler::Print() {
     const double submissions = idle_it != totals.end() ? double(idle_it->second.segments) : 0.0;
     std::printf("GPU profile: %.2f ms/frame busy, %.2f ms/frame idle between %.1f submissions, "
                 "%.2f ms/frame span over %llu frames (%llu dropped, GPU too far behind), "
-                "%zu labels\n",
+                "%zu labels; %llu frames with stamps out of order\n",
                 (sum - idle) / frames, idle / frames, submissions / frames, sum / frames,
                 static_cast<unsigned long long>(frames),
-                static_cast<unsigned long long>(std::exchange(dropped, 0)), sorted.size());
+                static_cast<unsigned long long>(std::exchange(dropped, 0)), sorted.size(),
+                static_cast<unsigned long long>(std::exchange(unordered, 0)));
     for (size_t i = 0; i < std::min<size_t>(sorted.size(), 30); ++i) {
         const auto& [key, total] = sorted[i];
         std::printf("  %6.3f ms/frame %5.1f/frame  %s\n", total.ms / frames,

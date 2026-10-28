@@ -85,6 +85,7 @@ private:
     std::unordered_map<u64, Total> totals;
     u64 frames = 0;
     u64 dropped = 0; ///< uc3: frames whose timestamps were not ready four frames on.
+    u64 unordered = 0; ///< of those, frames whose timestamps went backwards (Turnip)
     u64 current = 0;
     std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
 };
