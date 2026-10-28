@@ -3938,7 +3938,14 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     std::pair<vk::ImageView, vk::ImageLayout> original_color{};
     const auto& regs = Regs();
     const auto& key = pipeline->GetGraphicsKey();
-    if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first &&
+    // The scene starts at the G-buffer pass: 5+ colour targets in the God of War III and Uncharted
+    // engines. gravityrush2_android: Gravity Rush 2's has 3 (GOW3_SCENE_MRT=3).
+    static const int scene_mrt = [] {
+        const char* value = std::getenv("GOW3_SCENE_MRT");
+        const int n = value ? std::atoi(value) : 0;
+        return n >= 1 && n <= 8 ? n : 5;
+    }();
+    if (std::popcount(key.mrt_mask & 0x7f) >= scene_mrt && db_desc.first &&
         scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
     // same image through the guest's native descriptor during this draw.
