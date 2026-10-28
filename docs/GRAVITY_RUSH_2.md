@@ -219,6 +219,34 @@ a geometry-shader or LDS path is the first suspect: gr2_pc's renderer fixes from
 geometry-shader outlines and LDS barriers), then the renderer-side merge of gr2_pc's `gpu/`.
 No screenshot of that screen yet.
 
+## The opening scene: 4.6 -> 16 FPS (2026-10-28)
+
+Build 99c34d7 reaches the game's opening scene (the mining ship's descent, credits and
+subtitles), rendered correctly on Turnip, at 4.6 FPS. Measured, one change per run, 5 minutes
+each with Cross every 20 s (screenshots and the 5-second statistics):
+
+| Run | Change | FPS |
+|---|---|---|
+| 99c34d7 | (defaults) | 4.6 |
+| 5346132 | output 854x480 (`GOW3_OUTPUT_SIZE`) | 4.6 (the scene stayed 1920x1080) |
+| 5346132 | `GOW3_READBACKS=0` | 4.6 |
+| a0c376a | `GOW3_SCENE_MRT=3` (scene at 1280x720) | 4.7 |
+| a0c376a | `GOW3_SCENE_MRT=3`, 854x480 | 4.8 |
+| a0c376a | `GOW3_READBACK_LINEAR=0`, `GOW3_SCENE_MRT=3` | **16** |
+
+- The GPU profile (`GOW3_GPU_PROFILE=1`; fixed in 9dd22cc/c900d1e: it now drops frames whose
+  Turnip timestamps go backwards and waits 32 frames, not 4) showed ~76 submissions a second,
+  each ~8 ms of GPU work and ~5 ms of GPU idle, with an `image download R16G16B16A16Sfloat
+  1920x1080` (16 MB) in nearly every one. `GOW3_READBACK_LINEAR=1` (uncharted_android's
+  default: without it Uncharted's language screen showed corrupted bands) read every linear
+  render target back to guest memory, which serialised the CPU and the GPU at each submission.
+  Gravity Rush 2's picture is unchanged without it.
+- The reduced-resolution scene started only at a pass with 5+ colour targets (God of War III's
+  and Uncharted's G-buffers); Gravity Rush 2's has 3. `GOW3_SCENE_MRT` (default 5) sets it.
+- Both are Gravity Rush 2's defaults now (`GravityRush2.kt`). After them the GPU is ~99% busy:
+  the next gains are GPU work (the G-buffer pass `ps fbaef68b`, the HDR passes) and the render
+  size.
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;

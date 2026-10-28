@@ -22,6 +22,11 @@ object GravityRush2 {
         // The renderer's threads on the big cores and the draw pipe on: measured with Uncharted on
         // the Galaxy S24 Ultra (uncharted_android), not specific to that game.
         "GOW3_BIG_CORES" to "1", "GOW3_DRAW_PIPE" to "1",
+        // Measured in the opening scene (2026-10-28): reading every linear render target back
+        // (the Uncharted default) copied the 16 MB HDR target to guest memory at each of ~16
+        // submissions a frame, 4.6 FPS; without it 16 FPS, picture unchanged. The game's G-buffer
+        // has 3 colour targets, which start the reduced-resolution scene (default 5).
+        "GOW3_READBACK_LINEAR" to "0", "GOW3_SCENE_MRT" to "3",
     ), "Boot test")
 
     @JvmStatic
