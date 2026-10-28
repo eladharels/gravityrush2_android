@@ -247,6 +247,20 @@ each with Cross every 20 s (screenshots and the 5-second statistics):
   the next gains are GPU work (the G-buffer pass `ps fbaef68b`, the HDR passes) and the render
   size.
 
+## Gameplay reached (2026-10-28, build 7f63899)
+
+With the defaults alone (empty `gr2-env.txt`) the game continues from the save that the
+earlier runs created (`data0000`) into gameplay in the mine: the app's touch controls, the
+waypoint marker, ~2,000-3,600 draws per frame. **7-17 FPS, mean 11.4** over 4 minutes, GPU 99%
+busy (the overlay), CPU 14%. At 854x480 (`GOW3_OUTPUT_SIZE`, the scene really at 854x480) the
+mean was 10.7: the render size does not set the frame time. The GPU cost is per draw or per
+vertex (the shadPS4-translated shaders), and the phone heats (FPS fell from 17 to 7-11 within
+two minutes in both runs). Next: GPU profile of a gameplay frame (`GOW3_GPU_PROFILE=1`) to rank
+its passes and shaders, then gr2_pc's renderer fixes.
+
+Note for test scripts: `printf '' | adb shell "cat > gr2-env.txt"` does not empty the file
+(adb sends no input); use `adb shell ": > .../gr2-env.txt"`.
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
