@@ -154,6 +154,18 @@ if [ -n "$uc_game" ] && [ "${GOW3_UC_SCALED:-0}" != 1 ]; then
     export GOW3_OUTPUT_RES=1920x1080 GOW3_WINDOW_SIZE=1920x1080
     echo "Presentation: native 1920x1080 output scaled to the screen (no UI composition)"
 fi
+# gravityrush2_android: the launcher's render resolution sets Gravity Rush 2's scene size (the
+# renderer's output size, which the scene is rasterised at; no game patch). GOW3_OUTPUT_SIZE in
+# gr2-env.txt wins.
+if [ "$uc_game" = gr2 ] && [ -z "${GOW3_OUTPUT_SIZE:-}" ]; then
+    case $(setting render_resolution) in
+        native|1080p) export GOW3_OUTPUT_SIZE=1920x1080 ;;
+        540p) export GOW3_OUTPUT_SIZE=960x540 ;;
+        480p) export GOW3_OUTPUT_SIZE=854x480 ;;
+        *) export GOW3_OUTPUT_SIZE=1280x720 ;;
+    esac
+    echo "Render resolution: scene at $GOW3_OUTPUT_SIZE"
+fi
 # GPU 内存是手机的系统 RAM，和游戏的 DMEM 及 Android 共享；纹理收集器按预算工作，
 # 空闲的游戏内存拷贝延后回收。
 # DMEM 基线与 launch_env.py --base-dmem 7104 一致（launcher 同样用 7104）（release 补丁要求 7104MiB）；运行前派生出的

@@ -219,10 +219,12 @@ internal object LaunchParams {
     /** 补丁类快捷入口只展示当前目录真正提供的档位；无目录时禁止修改。 */
     fun forCatalog(catalog: PatchCatalog?): List<LaunchParam> = all.map { param ->
         when (param.key) {
-            // gravityrush2_android: no resolution patch for Gravity Rush 2 yet: native only.
+            // gravityrush2_android: no resolution patch; the renderer draws Gravity Rush 2's
+            // scene at this size instead (run-bionic.sh, GOW3_OUTPUT_SIZE). Default 720p, the
+            // size measured so far.
             "render_resolution" -> if (catalog?.gr2 == true) param.copy(
-                options = param.options.filter { it.value == "native" },
-                defaultValue = "native",
+                options = param.options.filter { it.value in GR2_RESOLUTIONS },
+                defaultValue = "720p",
             ) else param.copy(
                 options = param.options.filter { option ->
                     option.value == "native" || catalog?.patches?.any { it.resolution == option.value } == true
@@ -240,6 +242,9 @@ internal object LaunchParams {
     }
 
     fun isPatchSetting(key: String): Boolean = key == "render_resolution" || key == "engine_fps"
+
+    /** Gravity Rush 2's scene sizes (run-bionic.sh maps them to the renderer's output sizes). */
+    private val GR2_RESOLUTIONS = setOf("native", "720p", "540p", "480p")
 
     /** 参数的当前原始值；缺失或为空时返回其默认值。 */
     fun valueOf(ini: Map<String, String>, param: LaunchParam): String {

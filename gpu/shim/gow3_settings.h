@@ -27,10 +27,11 @@ enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugV
 
 /// Live output resolutions: the upscaler's output and the UI host targets.
 /// 854x480 is the Android low tier (run-bionic.sh's whitelist); appended last so the
-/// desktop indices (and OutputDefault) keep their meaning.
-inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840, 854};
-inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160, 480};
-inline constexpr int OutputCount = 5;
+/// desktop indices (and OutputDefault) keep their meaning. gravityrush2_android: 960x540 too, the
+/// launcher's 540p render resolution (Gravity Rush 2's scene size).
+inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840, 854, 960};
+inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160, 480, 540};
+inline constexpr int OutputCount = 6;
 inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 
 struct Values {
