@@ -283,6 +283,23 @@ game patch), the native-size compute post-processing (scale the dispatches with 
 let the proxies cover storage images), the per-draw pass breaks, then gr2_pc's renderer fixes
 (early fragment tests BP12, wave64 lowering at the real subgroup size).
 
+## Turnip build: Standard, not 8G2-OneUI (2026-10-29)
+
+The app had `v27.0.0-20261027-r4-8G2-OneUI` selected: the build with a flag for the Adreno 740,
+not this phone's Adreno 750. Downloaded in the app (Settings -> DRIVER -> DOWNLOAD DRIVERS ->
+Banners Turnip -> `Turnip-v27.0.0-20261029-r2.zip`, the plain Android build) and selected on
+HOME -> GPU DRIVER. Same save, same 5-minute run, defaults only:
+
+| Driver | Mean FPS in gameplay | Range | Draws/frame |
+|---|---|---|---|
+| 8G2-OneUI 20261027-r4 | 11.4 | 7-17 | ~2,960 |
+| Standard 20261029-r2 | **17.6** | 13-22 | ~2,830 |
+
+No GPU faults, the picture is correct (outdoors in the ruins). Two things changed at once (the
+variant and two days of Mesa), but either way the Standard build is the one to use on this
+phone. **Install the Standard build** for Gravity Rush 2; the launcher does not pick a driver by
+itself yet (blocker 4 below).
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
