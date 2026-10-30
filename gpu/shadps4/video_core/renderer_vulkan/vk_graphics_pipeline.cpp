@@ -263,8 +263,30 @@ GraphicsPipeline::GraphicsPipeline(
     const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
         .requiredSubgroupSize = 64,
     };
+    // gravityrush2_android: only stages whose results depend on the 64-lane wave (lane ids,
+    // ballots, shuffles) need it. On Adreno 7xx Turnip otherwise runs fragment shaders 128 wide;
+    // forcing 64 on every stage halves that. GOW3_GFX_WAVE64=1: every stage, as before.
+    static const bool wave64_everywhere = [] {
+        const char* value = std::getenv("GOW3_GFX_WAVE64");
+        return value && value[0] == '1';
+    }();
+    const auto needs_wave64 = [&](vk::ShaderStageFlagBits flag) {
+        if (wave64_everywhere) return true;
+        const auto sw = flag == vk::ShaderStageFlagBits::eVertex     ? Shader::SwStage::Vertex
+                        : flag == vk::ShaderStageFlagBits::eGeometry ? Shader::SwStage::Geometry
+                        : flag == vk::ShaderStageFlagBits::eTessellationControl
+                            ? Shader::SwStage::TessellationControl
+                        : flag == vk::ShaderStageFlagBits::eTessellationEvaluation
+                            ? Shader::SwStage::TessellationEval
+                            : Shader::SwStage::Fragment;
+        const auto* info = infos[u32(sw)];
+        // Auxiliary stages (no guest info) use no subgroup operations.
+        return info && (info->uses_lane_id || info->uses_group_ballot || info->uses_group_shuffle);
+    };
     for (auto& stage : shader_stages) {
-        stage.pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr;
+        stage.pNext = instance.IsSubgroupSize64Supported() && needs_wave64(stage.stage)
+                          ? &subgroup_size_ci
+                          : nullptr;
     }
 
     const auto depth_format =
