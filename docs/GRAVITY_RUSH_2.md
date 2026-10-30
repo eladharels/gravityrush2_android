@@ -428,3 +428,25 @@ ones (outdoors) disappear. 62e58e0 makes it the launcher's GRAPHICS -> Shadows s
    unsupported.
 5. **autorun.sh:** a `STOP:` line counts as a crash, so it takes a 3-minute bug report for GPU
    lines that a runtime stop cannot have. Skip the bug report when the log has no `Device lost`.
+
+## Scene size patch (2026-10-30, build 2e44990)
+
+`GOW3_GR2_RES=WxH` (off by default; `src/probe.c`, `patch_gr2_resolution`). The renderer's init
+(0x102aa0a in 1.00) creates its first scene target at 1920x1080 and stores 1920x1080 once at
+renderer+0x92c0/+0x92c4; about 30 later scene targets (and Pro mode's shifted sizes, flag 0x1b586c0)
+read that field. The patch replaces the four immediates, found by their bytes. The display
+buffers (0x446818, 1920x1080 or 3840x2160) are left alone.
+
+- First run, `GOW3_GR2_RES=1280x720` with `GOW3_OUTPUT_SIZE=1920x1080` (no scene proxies): no
+  crash, gameplay 20.4 FPS mean over 47 samples (22-24 cool, 16-17 hot), then a video cutscene at
+  30. The game took a different path than earlier runs, so there is no clean A/B yet; the picture
+  during gameplay was not checked.
+- Next: a back-to-back baseline on the same path, a gameplay screenshot, then map the launcher's
+  Resolution setting to it if it holds.
+
+Untested heat/power levers from the Uncharted repo (it has no code GR2 lacks): `TU_DEBUG=nocb`
+(drops `sysmem`, so Turnip uses GMEM tiling again), a 20 FPS cap, Uncharted's submission set
+(`GOW3_EAGER_SUBMIT=128 GOW3_EAGER_SUBMIT_US=1000 GOW3_ASYNC_SUBMIT=1 GOW3_DEFERRED_SUBMIT=1
+GOW3_RING_COPY_THREAD=1 GOW3_RING_DEDUP=1`), shorter spins (`GOW3_PREP_WORKERS=1
+GOW3_PIPE_SPIN_US=20 GOW3_SPIN_US=10 GOW3_YIELD_US=0`), `GOW3_BIG_CORES=0`, and code for ADPF /
+a 60 Hz display mode.
