@@ -337,6 +337,22 @@ at ~17-19 FPS and falls to 9-12 within two minutes (the same 540p setting gave 1
 phone the day before). Compare runs only back to back, and expect a frame-rate cap (30 or 20,
 the launcher's FPS limit) to give steadier play than the uncapped peak.
 
+### A frame-rate cap below what the phone sustains (2026-10-30)
+
+The launcher's FPS limit offers 30, 60 and Unlimited; 30 was set, and gameplay never reaches
+it, so it changed nothing. `GOW3_FPS_LIMIT=15` in `gr2-env.txt` (a fixed presenter limit), on a
+phone already warm from three runs:
+
+| Run | Last 2.5 minutes: mean | lowest 5 s |
+|---|---|---|
+| uncapped, 64 only where needed | 11.3 | 8.9 |
+| uncapped, 64 everywhere | 10.7 | 10.1 |
+| **cap 15** | **13.7** | 11.9 |
+
+The cap holds 15 for long stretches and sustains more than uncapped play once the phone is
+hot. A 15 or 20 choice in the launcher's FPS limit (today 30/60/Unlimited, `FpsLimits` in
+`gpu/shim/gow3_graphics.h`) would make this a setting.
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
