@@ -319,6 +319,24 @@ The 540p run walked somewhere busier, so per draw it was ~12% faster, which is a
 shadow maps and native-size compute (which do not scale) leave room for. The picture is
 correct at 540p, a little softer. 720p stays the default.
 
+## Shader width and heat (2026-10-30, build ea302e5)
+
+Every graphics stage required a 64-lane subgroup (`requiredSubgroupSize = 64`). Turnip on the
+Adreno 7xx otherwise runs fragment shaders 128 wide. Since ea302e5 only stages that use lane
+ids, ballots or shuffles (`uses_lane_id`, `uses_group_ballot`, `uses_group_shuffle`) require 64;
+`GOW3_GFX_WAVE64=1` restores the old behaviour. Same save, 540p, Standard Turnip, back to back
+on a warm phone:
+
+| Shaders | Mean FPS | Draws/s |
+|---|---|---|
+| 64 wide everywhere (`GOW3_GFX_WAVE64=1`) | 10.6 | ~38,000 |
+| 64 only where needed (default) | **12.1** | ~43,600 |
+
+About 15% faster, the picture unchanged. **Heat dominates the numbers now:** every run starts
+at ~17-19 FPS and falls to 9-12 within two minutes (the same 540p setting gave 15.7 on a cooler
+phone the day before). Compare runs only back to back, and expect a frame-rate cap (30 or 20,
+the launcher's FPS limit) to give steadier play than the uncapped peak.
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
