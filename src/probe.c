@@ -452,6 +452,33 @@ static void patch_uc3_resolution(const Uc3ResSite *sites, size_t n, const char *
     printf("%s resolution: render %ux%u, largest buffer %ux%u, output %s (%zu sites from %#" PRIx64 ")\n", game, w, h,
            maxw, maxh, all ? value : "1920x1080 (unchanged)", n, sites[0].at);
 }
+/* GOW3_GR2_RES=WxH (Gravity Rush 2, off): the renderer's init (0x102aa0a in 1.00) creates its
+ * first scene target at 1920x1080 and stores 1920x1080 at renderer+0x92c0/+0x92c4, the size every
+ * later scene target, its viewports and the post-processing read. Those four immediates are
+ * replaced, found by their bytes (mov edx/ecx, 2x xor, the two stores). The display buffers stay
+ * 1920x1080. */
+static void patch_gr2_resolution(uint64_t image_size, const char *value) {
+    unsigned w = 0, h = 0;
+    char extra = 0;
+    if (sscanf(value, "%ux%u%c", &w, &h, &extra) != 2 || w < 320 || h < 180 || w > 1920 || h > 1080) {
+        printf("GR2 resolution: bad GOW3_GR2_RES=%s (WxH, at most 1920x1080)\n", value);
+        return;
+    }
+    static const unsigned char init[] = {0xba, 0x80, 0x07, 0, 0, 0xb9, 0x38, 0x04, 0, 0, 0x45, 0x31, 0xc0, 0x45, 0x31, 0xc9,
+                                         0x41, 0xc7, 0x87, 0xc0, 0x92, 0, 0, 0x80, 0x07, 0, 0,
+                                         0x41, 0xc7, 0x87, 0xc4, 0x92, 0, 0, 0x38, 0x04, 0, 0};
+    const uint64_t at = uc_find_unique(image_size, init, sizeof(init));
+    if (!at) {
+        printf("GR2 resolution: the renderer's init was not found as expected, not patched\n");
+        return;
+    }
+    const uint32_t w32 = w, h32 = h;
+    memcpy(image + at + 1, &w32, 4);
+    memcpy(image + at + 6, &h32, 4);
+    memcpy(image + at + 23, &w32, 4);
+    memcpy(image + at + 34, &h32, 4);
+    printf("GR2 resolution: scene %ux%u (renderer init at %#" PRIx64 ")\n", w, h, at);
+}
 /* GOW3_UC3_RTHEAP_MB=N and GOW3_UC3_RT_MB=M (Opus, 1440p/4K): the memory map table in .data
  * (0x16f8d90..0x16fa050, 32-byte entries {u32 id, u32 group, u64 size, u64 align, u64 0}) sizes the
  * game's heaps for 1080p. N MB are added to the Render Target Heap (group 6, id 0x85, 0x2310bc00) and
@@ -1817,6 +1844,8 @@ int main(int argc, char **argv) {
     if (res_set)
         patch_uc3_resolution(res_sites, res_n, res_game, getenv("GOW3_UC3_RES"),
                              getenv("GOW3_UC3_RES_ALL") && getenv("GOW3_UC3_RES_ALL")[0] == '1');
+    if (gpu_enabled && getenv("GOW3_GR2_RES") && getenv("GOW3_GR2_RES")[0])
+        patch_gr2_resolution(size, getenv("GOW3_GR2_RES"));
     if (gpu_enabled)
         patch_uc3_rt_heap(size);
     if (res_log && res_n && mapped(segments, ns, uc_res_struct, 0x88)) {
