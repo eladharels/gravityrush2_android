@@ -35,6 +35,10 @@
     <!-- 启动参数：参数名 -->
     <string name="param_upscaler">Upscaler</string>
     <string name="param_resolution">Resolution</string>
+    <string name="param_shadows">Shadows</string>
+    <string name="param_option_shadows_near">Near only</string>
+    <string name="param_option_shadows_full">Full</string>
+    <string name="param_desc_shadows">Near only skips the far shadow map (distant shadows disappear) and runs about a third faster; Full draws every shadow. Takes effect on the next launch.</string>
     <string name="param_anisotropy">Anisotropic filtering</string>
     <string name="param_vibration">Vibration</string>
     <string name="param_fps_limit">FPS limit</string>

@@ -34,6 +34,10 @@
     <!-- 启动参数：参数名 -->
     <string name="param_upscaler">超分</string>
     <string name="param_resolution">分辨率</string>
+    <string name="param_shadows">阴影</string>
+    <string name="param_option_shadows_near">仅近处</string>
+    <string name="param_option_shadows_full">完整</string>
+    <string name="param_desc_shadows">仅近处：跳过远处的阴影贴图（远处阴影消失），约快三分之一；完整：绘制全部阴影。下次启动生效。</string>
     <string name="param_anisotropy">各向异性过滤</string>
     <string name="param_vibration">振动</string>
     <string name="param_fps_limit">帧率上限</string>

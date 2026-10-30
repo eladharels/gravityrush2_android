@@ -166,6 +166,15 @@ if [ "$uc_game" = gr2 ] && [ -z "${GOW3_OUTPUT_SIZE:-}" ]; then
     esac
     echo "Render resolution: scene at $GOW3_OUTPUT_SIZE"
 fi
+# gravityrush2_android: the launcher's Shadows setting. "near" (the default) drops the far
+# shadow cascade's draws (the 2048x2048 map); GOW3_SHADOW_SKIP in gr2-env.txt wins.
+if [ "$uc_game" = gr2 ] && [ -z "${GOW3_SHADOW_SKIP+x}" ]; then
+    case $(setting shadows) in
+        full) ;;
+        *) export GOW3_SHADOW_SKIP=2048 ;;
+    esac
+    echo "Shadows: ${GOW3_SHADOW_SKIP:+near only (far cascade skipped)}${GOW3_SHADOW_SKIP:-full}"
+fi
 # GPU 内存是手机的系统 RAM，和游戏的 DMEM 及 Android 共享；纹理收集器按预算工作，
 # 空闲的游戏内存拷贝延后回收。
 # DMEM 基线与 launch_env.py --base-dmem 7104 一致（launcher 同样用 7104）（release 补丁要求 7104MiB）；运行前派生出的

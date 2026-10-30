@@ -98,6 +98,17 @@ internal object LaunchParams {
             defaultValue = "720p",
             descriptionRes = R.string.param_desc_render_patch,
         ),
+        // gravityrush2_android: "near" drops the far shadow cascade's draws (run-bionic.sh,
+        // GOW3_SHADOW_SKIP=2048); measured 12.5 -> 17.3 FPS in gameplay.
+        LaunchParam(
+            key = "shadows", labelRes = R.string.param_shadows, category = LaunchCategory.GRAPHICS,
+            options = listOf(
+                LaunchOption("near", R.string.param_option_shadows_near),
+                LaunchOption("full", R.string.param_option_shadows_full),
+            ),
+            defaultValue = "near",
+            descriptionRes = R.string.param_desc_shadows,
+        ),
         LaunchParam(
             key = "anisotropy", labelRes = R.string.param_anisotropy, category = LaunchCategory.GRAPHICS,
             options = listOf(
