@@ -74,6 +74,8 @@ public:
     }
 
     void Draw(bool is_indexed, u32 index_offset = 0, const PreparedDraw* prepared = nullptr);
+    /// GOW3_SHADOW_SKIP: a shadow-caster draw of the skipped cascade (see the definition).
+    [[nodiscard]] bool SkipShadowCaster() const;
 
     /// gow3: draw preparation workers (vk_draw_prep.h), fed and consumed by Liverpool.
     DrawPreparation& GetDrawPreparation() {
