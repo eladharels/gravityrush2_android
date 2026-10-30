@@ -353,6 +353,31 @@ The cap holds 15 for long stretches and sustains more than uncapped play once th
 hot. A 15 or 20 choice in the launcher's FPS limit (today 30/60/Unlimited, `FpsLimits` in
 `gpu/shim/gow3_graphics.h`) would make this a setting.
 
+## Toward 30 FPS: what limits a gameplay frame (2026-10-30, build ea302e5)
+
+- **Not the CPU.** Sampling profile (`GOW3_PROFILE=1`, `tools/android/profile/symbolize.py`
+  with CI's symbols artifact): the process uses ~1.7 cores. The recording thread
+  (`gow3:DrawRec`, "stage B busy 85-90%") spends ~69% of its time in Turnip at each flip
+  (`SubmitFlip` -> `Scheduler::Wait`), waiting for the GPU; the command thread
+  (`shadPS4:GpuComm`) waits for it (`DrainDrawPipe`) ~92% of the time.
+- **The GPU.** Profile at 540p, Standard Turnip, hot phone (~9 FPS, ~118 ms of GPU work per
+  frame; ~46 profiler segments per frame):
+
+  | Work | ms per frame | Share |
+  |---|---|---|
+  | compute post-processing at native 1080p (cs `7e22ac2f`, `694a3f45`, `12bb8982`, ...) | ~34 | 29% |
+  | shadow maps 4096^2 + 2048^2 (vs `5d0febd2`, ~3,300 draws) | ~28 | 24% |
+  | the 960x540 scene passes | ~28 | 24% |
+  | scene proxy resolves/fills (540p <-> native) | ~12 | 10% |
+  | the rest | ~16 | 13% |
+
+- The scene passes cost about the same at 540p, 720p and 1080p: the frame is bound by
+  geometry and per-draw work, not pixels. Only the native-size compute and the proxy copies
+  (~46 ms) scale with resolution; running the compute at the scene size (proxy storage
+  images, scaled dispatches, and the game's own shaders addressing 1080p constants) could
+  save ~30 ms but is a deep change. 30 FPS needs the GPU work cut to ~33 ms (~55 ms at the
+  cool-phone peak of 18 FPS).
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
