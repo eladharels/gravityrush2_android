@@ -1373,10 +1373,45 @@ bool Rasterizer::FilterDrawPasses() const {
     return !(mode == Mode::Disable && (depth_copy || stencil_copy));
 }
 
+// gravityrush2_android: GOW3_SHADOW_SKIP=N drops the depth-only draws into an NxN depth target
+// (Gravity Rush 2's far shadow cascade is the 2048x2048 map; the near one 4096x4096). The first
+// draw into it each frame still runs, so its render pass begins and clears it: what is beyond
+// the near cascade reads as unshadowed instead of stale. The shadow casters are geometry-bound
+// (~3,300 draws per frame between both maps).
+bool Rasterizer::SkipShadowCaster() const {
+    static const u32 size = [] {
+        const char* value = std::getenv("GOW3_SHADOW_SKIP");
+        return value ? u32(std::strtoul(value, nullptr, 10)) : 0u;
+    }();
+    if (!size) {
+        return false;
+    }
+    const auto& regs = Regs();
+    if (!regs.depth_buffer.DepthValid() || regs.depth_render_control.depth_clear_enable ||
+        regs.depth_buffer.Pitch() != size || regs.depth_buffer.Height() != size) {
+        return false;
+    }
+    for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+        if (regs.color_buffers[cb] && regs.color_target_mask.GetMask(cb)) {
+            return false;
+        }
+    }
+    static u64 kept_frame = ~0ull;
+    const u64 frame = Gow3Stats::gpu_frames.load(std::memory_order_relaxed);
+    if (frame != kept_frame) {
+        kept_frame = frame; // the frame's first draw begins the pass (and its clear)
+        return false;
+    }
+    return true;
+}
+
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
     StageBTimer a_timer{SbADraw};
     Gow3Stats::draws.fetch_add(1, std::memory_order_relaxed);
+    if (SkipShadowCaster()) {
+        return;
+    }
 
     // gow3: with the draw pipeline this thread only selects the pipeline and hands the draw
     // to the recording thread (DrawRecord there); draws FilterDraw handles itself run here.
