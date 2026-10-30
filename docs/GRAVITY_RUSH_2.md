@@ -300,6 +300,25 @@ variant and two days of Mesa), but either way the Standard build is the one to u
 phone. **Install the Standard build** for Gravity Rush 2; the launcher does not pick a driver by
 itself yet (blocker 4 below).
 
+## Render resolution setting (2026-10-30, build 66d3d5d)
+
+Settings -> GRAPHICS -> Resolution now offers Native (1920x1080), 1280x720 (default), 960x540
+and 854x480 for Gravity Rush 2. There is no resolution patch: `run-bionic.sh` maps the choice to
+`GOW3_OUTPUT_SIZE`, the renderer's output size, which the game's scene is rasterised at through
+the scene proxies (`GOW3_SCENE_MRT=3`); the UI stays 1920x1080. 960x540 was added to the
+renderer's output sizes. `GOW3_OUTPUT_SIZE` in `gr2-env.txt` still wins.
+
+Measured on the Standard Turnip build, same save, 5 minutes each:
+
+| Resolution | Mean FPS | Draws/frame | Draws/s |
+|---|---|---|---|
+| 1280x720 | 17.6 | ~2,830 | ~50,000 |
+| 960x540 | 15.7 | ~3,570 | ~56,000 |
+
+The 540p run walked somewhere busier, so per draw it was ~12% faster, which is about what the
+shadow maps and native-size compute (which do not scale) leave room for. The picture is
+correct at 540p, a little softer. 720p stays the default.
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
