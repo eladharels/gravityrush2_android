@@ -173,7 +173,7 @@ if [ "$uc_game" = gr2 ] && [ -z "${GOW3_SHADOW_SKIP+x}" ]; then
         full) ;;
         *) export GOW3_SHADOW_SKIP=2048 ;;
     esac
-    echo "Shadows: ${GOW3_SHADOW_SKIP:+near only (far cascade skipped)}${GOW3_SHADOW_SKIP:-full}"
+    if [ -n "${GOW3_SHADOW_SKIP:-}" ]; then echo "Shadows: near only (far cascade skipped)"; else echo "Shadows: full"; fi
 fi
 # GPU 内存是手机的系统 RAM，和游戏的 DMEM 及 Android 共享；纹理收集器按预算工作，
 # 空闲的游戏内存拷贝延后回收。

@@ -378,6 +378,29 @@ hot. A 15 or 20 choice in the launcher's FPS limit (today 30/60/Unlimited, `FpsL
   save ~30 ms but is a deep change. 30 FPS needs the GPU work cut to ~33 ms (~55 ms at the
   cool-phone peak of 18 FPS).
 
+## Shadows: the far cascade off (2026-10-30, builds 4e87903 and 62e58e0)
+
+The shadow distances (`cascade0Distance`, `cascade1Distance`, `shadowRange`,
+`fastShadowCullingDist`) are fields of the directional-light parameters, registered by
+reflection at 0x1058b0b-0x1058bdd (offsets 0x48-0x5c, type 0x1f) and filled from each level's
+data. The code that consumes them was not found (a search for functions reading those offsets
+from one pointer gave ~30 candidates; the best one, 0x1042e34, is a matrix transform), so there
+is no game patch.
+
+Renderer side instead: `GOW3_SHADOW_SKIP=N` drops depth-only draws into an NxN depth target
+(no colour targets, no depth clear), except the first each frame, which begins the pass and
+clears the map. With 2048 (the far cascade; the near one is 4096x4096), same save, back to back:
+
+| Shadows | Mean FPS | Last minute |
+|---|---|---|
+| far cascade skipped (first run, cooler phone) | 17.3 | ~16 |
+| all (second run) | 12.5 | ~11 |
+
+The skip run had the cooler start, but earlier first runs fell to 9-15 within two minutes and
+this one held 16-20 for five; the gain is roughly a third. Nearby shadows are unchanged; distant
+ones (outdoors) disappear. 62e58e0 makes it the launcher's GRAPHICS -> Shadows setting: Near only
+(default) or Full.
+
 ## Next blockers, in order
 
 1. **Merge the Gravity Rush 2 runtime from HayatoG/gr2_pc.** (Done for `src/`, see above;
